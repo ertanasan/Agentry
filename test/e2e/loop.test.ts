@@ -3,7 +3,7 @@
 // request body; called as the verifier (--tools Read,Grep) it answers PASS unless the body says MODE:badverify.
 // "Production" is a directory with a VERSION file; deploy fails while prod/fail exists.
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { acquireLease, openDb } from "../../src/db.ts";
 import * as g from "../../src/git.ts";
@@ -50,8 +50,12 @@ function setup() {
   };
   writeFileSync(join(fx.root, "recipe.json"), JSON.stringify(recipe));
 
-  const cli = (...args: string[]) => {
-    const p = Bun.spawnSync(["bun", CLI, ...args], { env: { ...process.env, AGENTRY_HOME: home, AGENTRY_CLAUDE_BIN: bin }, stdout: "pipe", stderr: "pipe" });
+  const cli = (...args: string[]) => cliIn(undefined, ...args);
+  const cliIn = (stdin: string | undefined, ...args: string[]) => {
+    const p = Bun.spawnSync(["bun", CLI, ...args], {
+      env: { ...process.env, AGENTRY_HOME: home, AGENTRY_CLAUDE_BIN: bin }, stdout: "pipe", stderr: "pipe",
+      stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
+    });
     return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString() };
   };
   const ok = (...args: string[]) => {
@@ -62,7 +66,7 @@ function setup() {
   expect(ok("project", "add", "p1", join(fx.root, "recipe.json"))).toContain("project p1");
   const db = openDb(join(home, "agentry.db"));
   return {
-    fx, home, prod, cli, ok, db,
+    fx, home, prod, cli, cliIn, ok, db,
     add: (title: string, ...flags: string[]) => Number(ok("add", "p1", title, ...flags).match(/#(\d+) queued/)![1]),
     req: (id: number) => db.query("SELECT * FROM requests WHERE id = ?").get(id) as any,
     group: () => db.query("SELECT * FROM deploy_groups WHERE name = 'g1'").get() as any,
@@ -184,6 +188,17 @@ describe("agentry CLI, end to end", () => {
     expect(h.cli("resolve", String(id)).err).toContain("this needs blocked_post_push");
     expect(h.cli("reopen", String(id), "x").err).toContain("reopen needs done");
     expect(h.cli("answer", "999", "x").err).toContain("no request #999");
+  });
+
+  test("token saves a wrapped setup-token token with mode 600 and refuses anything else", () => {
+    const h = setup();
+    const file = join(h.home, "claude-oauth-token");
+    const bad = h.cliIn("pbpaste | tr -d ' \\n' > ~/.agentry/claude-oauth-token\n", "token");
+    expect(bad.code).toBe(1);
+    expect(bad.err).toContain("nothing saved");
+    expect(h.cliIn("sk-ant-oat01-first-half-\n EbtrEAAA\n", "token").out).toContain("saved 32 characters");
+    expect(readFileSync(file, "utf8")).toBe("sk-ant-oat01-first-half-EbtrEAAA\n");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
   });
 
   test("unblock clears a lock no request holds (drift guard), and only that kind", () => {

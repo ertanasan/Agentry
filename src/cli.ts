@@ -8,7 +8,7 @@
 // api-key-helper. AGENTRY_CLAUDE_BIN overrides the claude on PATH; AGENTRY_MODEL picks its model.
 import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import { claudeAgent, resolveAuth } from "./adapters/claude.ts";
@@ -34,7 +34,8 @@ const USAGE = `usage: agentry <command>
   redeploy <id> | resolve <id>       blocked_post_push → deploy again | done_manual
   reopen <id> <what's wrong>         done → a new linked request (counts one false-done)
   unblock <group>                    clear a deploy group's lock that no request holds (drift guard)
-  resume                             unpause the runner`;
+  resume                             unpause the runner
+  token                              save a \`claude setup-token\` token for subscription auth (paste, then Ctrl-D)`;
 
 class CliError extends Error {}
 const fail = (msg: string): never => { throw new CliError(msg); };
@@ -93,6 +94,7 @@ function main(argv: string[]): Promise<number> | number {
       logEvent(db, null, "unblock", { group: name });
       return 0;
     }
+    case "token": return saveToken();
     case "resume": {
       db.query("UPDATE runner SET paused = 0, pause_reason = NULL WHERE id = 1").run();
       logEvent(db, null, "resume");
@@ -167,6 +169,18 @@ function list(db: Database, all: boolean): number {
   for (const g of groups) console.log(`group ${g.name} blocked${g.locked_by_request ? ` by #${g.locked_by_request}` : ""}: ${g.lock_reason}`);
   const falseDone = (db.query("SELECT COUNT(*) AS n FROM events WHERE type = 'reopen'").get() as { n: number }).n;
   console.log(`false-done: ${falseDone}`);
+  return 0;
+}
+
+// Reads a pasted `claude setup-token` token from stdin, refuses anything else, and saves it with mode 600.
+async function saveToken(): Promise<number> {
+  if (process.stdin.isTTY) console.log("Paste the token (line breaks are fine), then press Enter and Ctrl-D:");
+  const token = (await Bun.stdin.text()).replace(/\s+/g, "");
+  if (!/^sk-ant-oat01-[A-Za-z0-9_-]+$/.test(token)) fail("that is not a setup-token token (sk-ant-oat01-…); nothing saved");
+  const file = join(home, "claude-oauth-token");
+  rmSync(file, { recursive: false, force: true });
+  writeFileSync(file, token + "\n", { mode: 0o600 });
+  console.log(`saved ${token.length} characters to ${file}`);
   return 0;
 }
 

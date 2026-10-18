@@ -84,6 +84,7 @@ export function sandbox(p: SandboxPaths): { wrap: string[]; env: Record<string, 
     TMPDIR: runTmp + "/",
     LANG: "en_US.UTF-8",
     CLAUDE_CONFIG_DIR: claudeConfig,
+    CLAUDE_CODE_TMPDIR: runTmp, // claude otherwise writes to /tmp/claude-<uid>, whatever TMPDIR says
     DOTNET_CLI_HOME: home,
     DOTNET_CLI_TELEMETRY_OPTOUT: "1",
     DOTNET_NOLOGO: "1",

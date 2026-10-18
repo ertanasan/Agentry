@@ -22,10 +22,11 @@ export type ClaudeOptions = { bin: string; model?: string; auth?: ClaudeAuth }; 
 // Output of `claude setup-token`, saved by the user (chmod 600).
 export const OAUTH_TOKEN_FILE = join(AGENTRY_HOME, "claude-oauth-token");
 
-// The subscription token when ~/.agentry/claude-oauth-token exists, else the API key helper.
+// The subscription token when ~/.agentry/claude-oauth-token exists, else the API key helper. Whitespace is dropped
+// anywhere in it: `claude setup-token` wraps the token over two lines, and a copied line break would cut it.
 export function resolveAuth(tokenFile = OAUTH_TOKEN_FILE, keyHelper = KEY_HELPER): ClaudeAuth {
   if (existsSync(tokenFile)) {
-    const token = readFileSync(tokenFile, "utf8").trim();
+    const token = readFileSync(tokenFile, "utf8").replace(/\s+/g, "");
     if (!token) throw new Error(`${tokenFile} is empty`);
     return { kind: "subscription", token };
   }
