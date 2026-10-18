@@ -1,0 +1,16 @@
+{
+  "name": "agentry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "agentry": "src/cli.ts" },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "eval:verifier": "bun run eval/verifier/run.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
