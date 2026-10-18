@@ -1,7 +1,7 @@
 // The sandbox for every step that runs agent-written code: agent, build, test and verifier (eng review D4, D14).
 // Pass `wrap` to runStep's `wrap` and `env` as its `env`. The step gets a scrubbed environment whose HOME,
 // TMPDIR and CLAUDE_CONFIG_DIR all live in the run's own temp dir, so nothing carries over between runs.
-import { mkdirSync, realpathSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -34,6 +34,25 @@ function darwinUserDir(): string {
   return userDir;
 }
 
+// MSBuild's worker nodes and the C# compiler server talk over sockets in /tmp (hardcoded, whatever TMPDIR says),
+// which the sandbox blocks. Allowing them would let sandboxed code reach the user's own unsandboxed nodes and
+// compiler server. So a `dotnet` first on the sandbox's PATH keeps MSBuild in one process for every verb that
+// runs it; without it, a build with project references hangs until MSBuild gives up after 5 minutes.
+function writeDotnetShim(dir: string): void {
+  const real = Bun.which("dotnet", { PATH });
+  if (!real) return;
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "dotnet");
+  writeFileSync(path, `#!/bin/zsh
+# Agentry sandbox: MSBuild in one process (no worker nodes, no compiler server); their pipes in /tmp are blocked.
+case "$1" in
+  build|test|restore|publish|pack|msbuild|clean) exec '${real}' "$1" -m:1 -nodeReuse:false -p:UseSharedCompilation=false "\${@:2}" ;;
+esac
+exec '${real}' "$@"
+`);
+  chmodSync(path, 0o755);
+}
+
 export function sandbox(p: SandboxPaths): { wrap: string[]; env: Record<string, string> } {
   mkdirSync(p.runTmp, { recursive: true });
   const runTmp = realpathSync(p.runTmp);
@@ -44,6 +63,8 @@ export function sandbox(p: SandboxPaths): { wrap: string[]; env: Record<string, 
   mkdirSync(home, { recursive: true });
   mkdirSync(claudeConfig, { recursive: true });
   const keyHelper = p.keyHelper ?? (p.claudeBin ? KEY_HELPER : NONE);
+  const bin = join(runTmp, "bin");
+  writeDotnetShim(bin);
 
   const params: Record<string, string> = {
     USER_HOME: realpathSync(p.userHome ?? homedir()),
@@ -58,7 +79,7 @@ export function sandbox(p: SandboxPaths): { wrap: string[]; env: Record<string, 
   const wrap = ["sandbox-exec", ...Object.entries(params).flatMap(([k, v]) => ["-D", `${k}=${v}`]), "-f", PROFILE];
 
   const env: Record<string, string> = {
-    PATH,
+    PATH: `${bin}:${PATH}`,
     HOME: home,
     TMPDIR: runTmp + "/",
     LANG: "en_US.UTF-8",
@@ -67,6 +88,8 @@ export function sandbox(p: SandboxPaths): { wrap: string[]; env: Record<string, 
     DOTNET_CLI_TELEMETRY_OPTOUT: "1",
     DOTNET_NOLOGO: "1",
     NUGET_PACKAGES: params.PKG_CACHE,
+    UseSharedCompilation: "false", // read by MSBuild as a property: no compiler server (see writeDotnetShim)
+    MSBUILDDISABLENODEREUSE: "1",
     xcrun_db: join(runTmp, "xcrun_db"), // xcrun (behind /usr/bin/git) otherwise caches in the denied per-user temp dir
   };
   return { wrap, env };

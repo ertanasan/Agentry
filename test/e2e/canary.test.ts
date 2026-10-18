@@ -110,6 +110,13 @@ describe("sandbox canary: allowed", () => {
     expect(r.code).toBe(0);
   });
 
+  test.if(!!Bun.which("dotnet"))("dotnet is the single-process shim and runs", async () => {
+    const r = await inSandbox(`command -v dotnet && dotnet --version`);
+    expect(r.code).toBe(0);
+    expect(r.out).toStartWith(`${sb.env.TMPDIR}bin/dotnet\n`);
+    expect(readFileSync(join(sb.env.TMPDIR, "bin/dotnet"), "utf8")).toContain("-m:1 -nodeReuse:false");
+  });
+
   test.if(!!claudeBin)("claude starts", async () => {
     const r = await inSandbox(`'${claudeBin}' --version`);
     expect(r.code).toBe(0);
