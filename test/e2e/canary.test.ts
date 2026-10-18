@@ -75,9 +75,11 @@ describe("sandbox canary: blocked", () => {
 
 describe.if(process.env.AGENTRY_CANARY_SECRETS === "1")("sandbox canary: keychain and ssh agent", () => {
   // The sandbox keeps securityd reachable for .NET's TLS, so this is the check that the login keychain itself
-  // still refuses a sandboxed caller.
+  // still refuses a sandboxed caller. The keychain is named explicitly, because the sandbox's temp HOME could
+  // leave the search list empty and make "not found" look like a refusal.
   test("the login keychain cannot be queried", async () => {
-    const r = await inSandbox(`security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1`);
+    const keychain = join(home, "Library/Keychains/login.keychain-db");
+    const r = await inSandbox(`security find-generic-password -s "Claude Code-credentials" '${keychain}' >/dev/null 2>&1`);
     expect(r.code).not.toBe(0);
   });
 
