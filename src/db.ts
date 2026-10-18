@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS requests (
   agent TEXT NOT NULL DEFAULT 'claude',
   attempts INTEGER NOT NULL DEFAULT 0,
   reopened_from INTEGER REFERENCES requests(id),
+  resume_run INTEGER REFERENCES runs(id), -- set by approve: the next run resumes this run's branch at build
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS runs (
@@ -57,6 +58,7 @@ CREATE TABLE IF NOT EXISTS runs (
   current_step TEXT, lease_token TEXT, lease_expires_at INTEGER NOT NULL DEFAULT 0,
   pgid INTEGER, branch TEXT, base_sha TEXT, candidate_sha TEXT, commit_sha TEXT,
   push_state TEXT NOT NULL DEFAULT 'none', flags TEXT NOT NULL DEFAULT '[]',
+  tests_total INTEGER, tests_skipped INTEGER,
   started_at INTEGER NOT NULL, ended_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS steps (

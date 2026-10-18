@@ -17,7 +17,7 @@ export type Recipe = {
   test_result_file?: string;    // TRX file path relative to the worktree, e.g. "TestResults/agentry.trx"
   deploy_cmd?: string;          // runs unsandboxed from the worktree (D6); absent = "built", not deployed
   targets?: Target[];           // live-version reads for the drift guard and the post-deploy check
-  remote_busy_cmd?: string;     // exit 0 = an earlier install is still running remotely (D18)
+  remote_busy_cmd?: string;     // exit 0 = an earlier install is still running remotely, 1 = free, else unknown (D18)
   gate_paths?: string[];        // extra blocking globs (recipe, CI, schema files, ...)
   test_globs?: string[];        // which files are tests
   skip_patterns?: string[];     // regexes that mark a test as skipped when added in a test file

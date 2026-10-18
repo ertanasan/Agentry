@@ -1,5 +1,6 @@
 // Git operations the runner needs. Everything works on worktrees under ~/.agentry/worktrees; the user's own
 // checkout is never checked out, reset or committed to.
+import { isAbsolute, join } from "node:path";
 
 export type GitResult = { code: number; out: string; err: string };
 
@@ -34,6 +35,26 @@ export function addWorktree(repo: string, path: string, branch: string, start: s
 // Worktree for an existing branch (resume after needs_review, retry from a kept branch, redeploy).
 export function checkoutWorktree(repo: string, path: string, branch: string): void {
   must(repo, ["worktree", "add", "--quiet", path, branch]);
+}
+
+// Worktree at an exact commit, for re-running a deploy.
+export function detachedWorktree(repo: string, path: string, sha: string): void {
+  must(repo, ["worktree", "add", "--quiet", "--detach", path, sha]);
+}
+
+// The repository's shared git dir, where the worktrees' metadata lives.
+export function commonDir(repo: string): string {
+  const dir = must(repo, ["rev-parse", "--git-common-dir"]);
+  return isAbsolute(dir) ? dir : join(repo, dir);
+}
+
+// Removes untracked and ignored files, e.g. build output that sandboxed steps left in the worktree.
+export function cleanUntracked(wt: string): void {
+  must(wt, ["clean", "-fdxq"]);
+}
+
+export function diff(cwd: string, base: string, head: string): string {
+  return must(cwd, ["diff", "--no-color", base, head]);
 }
 
 export function removeWorktree(repo: string, path: string): void {
