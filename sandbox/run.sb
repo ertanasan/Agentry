@@ -1,0 +1,36 @@
+(version 1)
+; Agentry step sandbox for the agent, build, test and verifier steps (eng review D4, D14).
+; Allowlist: the user's home, /tmp and the per-user temp area are unreadable except the paths a run needs.
+; Writes go only to the worktree, the run's temp dir and Agentry's package cache. Network stays open.
+; Parameters are set by src/sandbox.ts and must be real paths (no symlinks).
+(allow default)
+
+; Reads. Metadata stays readable so path lookups work; contents and directory listings do not.
+(deny file-read* (subpath (param "USER_HOME")) (subpath "/private/tmp") (subpath (param "USER_DIR")))
+(allow file-read-metadata (subpath (param "USER_HOME")) (subpath "/private/tmp") (subpath (param "USER_DIR")))
+(allow file-read*
+  (subpath (param "WORKTREE")) (subpath (param "RUN_TMP")) (subpath (param "PKG_CACHE"))
+  (subpath (param "GIT_DIR"))           ; read-only, so git works inside the worktree
+  (literal (param "CLAUDE_BIN"))
+  (literal (param "KEY_HELPER")))       ; readable by design; use a dedicated, revocable key (D4)
+
+; Writes.
+(deny file-write*)
+(allow file-write*
+  (subpath (param "WORKTREE")) (subpath (param "RUN_TMP")) (subpath (param "PKG_CACHE"))
+  (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/dtracehelper") (regex #"^/dev/fd/"))
+
+; dotnet keeps its named mutexes in /tmp/.dotnet whatever TMPDIR says.
+(allow file-read* file-write* (regex #"^/private/tmp/\.dotnet"))
+
+; Keychains are reached through securityd, not by reading files. com.apple.SecurityServer (file-based
+; keychains) stays reachable because .NET's TLS needs it to read the system root certificates; whether the
+; login keychain still refuses a sandboxed caller is checked by the opt-in canary (AGENTRY_CANARY_SECRETS=1).
+; The data-protection keychain is not needed by any step.
+(deny mach-lookup (global-name "com.apple.securityd.xpc"))
+
+; Local sockets, such as the ssh agent's (/private/tmp/com.apple.launchd.*/Listeners).
+(deny network-outbound
+  (remote unix-socket (subpath "/private/tmp"))
+  (remote unix-socket (subpath (param "USER_HOME")))
+  (remote unix-socket (subpath (param "USER_DIR"))))
