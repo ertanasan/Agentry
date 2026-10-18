@@ -36,6 +36,7 @@ export type RunnerCtx = {
   agent: Agent;
   verifier: Verifier;
   claudeBin?: string;
+  keyHelper?: string;       // API key helper the sandbox lets claude read; default ~/.agentry/api-key-helper
   pushBackoffMs?: number[]; // ls-remote retries after a push (D19)
   currentRun: number | null;
 };
@@ -195,7 +196,7 @@ async function pipeline(j: Job, resumed: boolean): Promise<Stop> {
   }
   j.sbx = sandbox({
     worktree: j.wt, runTmp: join(j.dir, "tmp"), gitDir: g.commonDir(j.repo), claudeBin: j.ctx.claudeBin,
-    pkgCache: join(j.ctx.home, "cache", "nuget"),
+    keyHelper: j.ctx.keyHelper, pkgCache: join(j.ctx.home, "cache", "nuget"),
   });
 
   if (!resumed) {
