@@ -21,7 +21,7 @@ describe("recipes", () => {
 
     const enc = r.remote_busy_cmd!.match(/-EncodedCommand (\S+)'/)![1];
     const script = new TextDecoder("utf-16le").decode(Buffer.from(enc, "base64"));
-    expect(script).toBe('if (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match "install-service\\.ps1" }) { exit 0 } else { exit 1 }');
+    expect(script).toBe("$ProgressPreference = 'SilentlyContinue'; " + 'if (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match "install-service\\.ps1" }) { exit 0 } else { exit 1 }');
     expect((JSON.parse(json)._comment as string[]).join("\n")).toContain(script);
 
     // What deploy-prod-winhost.sh writes, as `type` prints it over ssh (CRLF).
