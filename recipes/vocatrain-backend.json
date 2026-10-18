@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "VocaTrain_backend (slice 1). Deploys to winhost only: the Mac production (~/VocaTrain-prod, deploy-prod-machost.sh) is obsolete since 2026-10-11 (VocaTrain CLI.md).",
+    "deploy-prod-winhost.sh publishes the API and the web app, so VocaTrain_web shares the vt-server group. Run without a terminal it is a debug deploy (no notarization).",
+    "remote_busy_cmd's -EncodedCommand is base64 UTF-16LE of: if (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match \"install-service\\.ps1\" }) { exit 0 } else { exit 1 }  (exit 0 = an install is running, 1 = free; ssh failure 255 = unknown, D18)"
+  ],
+  "repo": "/path/to/VocaTrain",
+  "deploy_group": "vt-server",
+  "scope_path": "VocaTrain_backend/",
+  "build_cmd": "dotnet build VocaTrain_backend/VocaTrain.WN.Api -c Release -nologo -v q && dotnet build VocaTrain_web/VocaTrain.WN.Web -c Release -nologo -v q",
+  "test_cmd": "dotnet test VocaTrain_backend/VocaTrain.WN.Core.Tests -nologo --logger 'trx;LogFileName=agentry.trx' --results-directory TestResults",
+  "test_result_file": "TestResults/agentry.trx",
+  "deploy_cmd": "VocaTrain_backend/deploy-prod-winhost.sh",
+  "targets": [
+    { "name": "winhost-api", "live_version_cmd": "ssh -o BatchMode=yes -o ConnectTimeout=15 user@winhost 'type C:\\Sites\\VocaTrain.Api\\current\\VERSION'" },
+    { "name": "winhost-web", "live_version_cmd": "ssh -o BatchMode=yes -o ConnectTimeout=15 user@winhost 'type C:\\Sites\\VocaTrain.Web\\current\\VERSION'" }
+  ],
+  "remote_busy_cmd": "ssh -o BatchMode=yes -o ConnectTimeout=15 user@winhost 'powershell -NoProfile -NonInteractive -EncodedCommand aQBmACAAKABHAGUAdAAtAEMAaQBtAEkAbgBzAHQAYQBuAGMAZQAgAFcAaQBuADMAMgBfAFAAcgBvAGMAZQBzAHMAIAB8ACAAVwBoAGUAcgBlAC0ATwBiAGoAZQBjAHQAIAB7ACAAJABfAC4AQwBvAG0AbQBhAG4AZABMAGkAbgBlACAALQBtAGEAdABjAGgAIAAiAGkAbgBzAHQAYQBsAGwALQBzAGUAcgB2AGkAYwBlAFwALgBwAHMAMQAiACAAfQApACAAewAgAGUAeABpAHQAIAAwACAAfQAgAGUAbABzAGUAIAB7ACAAZQB4AGkAdAAgADEAIAB9AA=='",
+  "test_globs": ["VocaTrain_backend/VocaTrain.WN.Core.Tests/**"],
+  "skip_patterns": ["Skip\\s*=", "Assert\\.Skip", "Skip\\.(If|IfNot)\\("],
+  "timeouts_s": { "deploy": 1200 }
+}
