@@ -1,0 +1,36 @@
+{
+  "_comment": [
+    "VocaTrain_web: the backend recipe with scope VocaTrain_web/. Same build, tests, deploy (deploy-prod-winhost.sh publishes the API and the web app) and group vt-server, so web and backend requests never deploy at once.",
+    "The web components' bunit tests live in VocaTrain_backend/VocaTrain.WN.Core.Tests, outside this scope: a request that adds one, or changes the API, stops at needs_review for approval.",
+    "remote_busy_cmd's -EncodedCommand is base64 UTF-16LE of: $ProgressPreference = 'SilentlyContinue'; if (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match \"install-service\\.ps1\" }) { exit 0 } else { exit 1 }  (exit 0 = an install is running, 1 = free; ssh failure 255 = unknown, D18)"
+  ],
+  "repo": "/path/to/VocaTrain",
+  "deploy_group": "vt-server",
+  "scope_path": "VocaTrain_web/",
+  "build_cmd": "dotnet build VocaTrain_backend/VocaTrain.WN.Api -c Release -nologo -v q && dotnet build VocaTrain_web/VocaTrain.WN.Web -c Release -nologo -v q",
+  "test_cmd": "dotnet test VocaTrain_backend/VocaTrain.WN.Core.Tests -nologo --logger 'trx;LogFileName=agentry.trx' --results-directory TestResults",
+  "test_result_file": "TestResults/agentry.trx",
+  "deploy_cmd": "VocaTrain_backend/deploy-prod-winhost.sh",
+  "targets": [
+    {
+      "name": "winhost-api",
+      "live_version_cmd": "ssh -o BatchMode=yes -o ConnectTimeout=15 user@winhost 'type C:\\Sites\\VocaTrain.Api\\current\\VERSION'"
+    },
+    {
+      "name": "winhost-web",
+      "live_version_cmd": "ssh -o BatchMode=yes -o ConnectTimeout=15 user@winhost 'type C:\\Sites\\VocaTrain.Web\\current\\VERSION'"
+    }
+  ],
+  "remote_busy_cmd": "ssh -o BatchMode=yes -o ConnectTimeout=15 user@winhost 'powershell -NoProfile -NonInteractive -EncodedCommand JABQAHIAbwBnAHIAZQBzAHMAUAByAGUAZgBlAHIAZQBuAGMAZQAgAD0AIAAnAFMAaQBsAGUAbgB0AGwAeQBDAG8AbgB0AGkAbgB1AGUAJwA7ACAAaQBmACAAKABHAGUAdAAtAEMAaQBtAEkAbgBzAHQAYQBuAGMAZQAgAFcAaQBuADMAMgBfAFAAcgBvAGMAZQBzAHMAIAB8ACAAVwBoAGUAcgBlAC0ATwBiAGoAZQBjAHQAIAB7ACAAJABfAC4AQwBvAG0AbQBhAG4AZABMAGkAbgBlACAALQBtAGEAdABjAGgAIAAiAGkAbgBzAHQAYQBsAGwALQBzAGUAcgB2AGkAYwBlAFwALgBwAHMAMQAiACAAfQApACAAewAgAGUAeABpAHQAIAAwACAAfQAgAGUAbABzAGUAIAB7ACAAZQB4AGkAdAAgADEAIAB9AA=='",
+  "test_globs": [
+    "VocaTrain_backend/VocaTrain.WN.Core.Tests/**"
+  ],
+  "skip_patterns": [
+    "Skip\\s*=",
+    "Assert\\.Skip",
+    "Skip\\.(If|IfNot)\\("
+  ],
+  "timeouts_s": {
+    "deploy": 1200
+  }
+}

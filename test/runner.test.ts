@@ -124,6 +124,10 @@ describe("runner: agent outcomes", () => {
     expect(h.lastRun(id).branch).toBe(`agentry/${id}-2`);
     expect(h.prompts[1]).toContain("The /words one");
     expect(h.prompts[1]).toContain("# Request: Change main");
+    // Out-of-scope changes are allowed and gated by review (design step 4), never forbidden; build files stay off limits.
+    expect(h.prompts[1]).toContain("Keep your changes under app/. If the request needs a change");
+    expect(h.prompts[1]).toContain("sends\nthe change to human review");
+    expect(h.prompts[1]).toContain("do not edit build files");
   });
 
   test("no changes → blocked_pre_push", async () => {

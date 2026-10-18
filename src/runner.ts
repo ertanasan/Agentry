@@ -321,7 +321,9 @@ function prompt(j: Job): string {
   const answers = (j.ctx.db.query("SELECT payload FROM events WHERE request_id = ? AND type = 'answer' ORDER BY id").all(req.id) as { payload: string }[])
     .map((r) => `- ${(JSON.parse(r.payload) as { text: string }).text}`);
   const parts = [
-    `You are working on request #${req.id}. Change only files under ${recipe.scope_path}.`,
+    `You are working on request #${req.id}. Keep your changes under ${recipe.scope_path}. If the request needs a change`,
+    "elsewhere in the repository (a test in another project, an API the code calls), make it: it is allowed, and it sends",
+    "the change to human review.",
     "Rules: edit code only. Do not commit, push or deploy, and do not edit build files, CI config or test-gate files.",
     "If the request is ambiguous, reply with a single line `NEEDS_INFO: <question>` and change nothing.",
     `\n# Request: ${req.title}\n\n${req.body}`,
