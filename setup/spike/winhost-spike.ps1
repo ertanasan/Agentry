@@ -69,11 +69,30 @@ try {
   $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$dir\spike-inner.ps1`" -Dir `"$dir`""
   Register-ScheduledTask -TaskName $task -Action $action -User $runner -Password $runnerPw -RunLevel Limited | Out-Null
   Start-ScheduledTask -TaskName $task
+  # A new account's first logon builds its profile, so the task can sit queued a while before it runs: wait until it
+  # has run and finished, not just until it is no longer running.
+  $notFinished = 0x41301, 0x41303, 0x41325  # running, has not run yet, queued
   $deadline = (Get-Date).AddMinutes(4)
-  do { Start-Sleep -Seconds 2 } while ((Get-ScheduledTask -TaskName $task).State -eq 'Running' -and (Get-Date) -lt $deadline)
-  $info = Get-ScheduledTaskInfo -TaskName $task
+  do {
+    Start-Sleep -Seconds 2
+    $state = (Get-ScheduledTask -TaskName $task).State
+    $info = Get-ScheduledTaskInfo -TaskName $task
+  } while (($state -in 'Running', 'Queued' -or $notFinished -contains $info.LastTaskResult) -and (Get-Date) -lt $deadline)
 
-  if (-not (Test-Path "$dir\result.json")) { throw "The inner checks wrote no result (task result $($info.LastTaskResult))." }
+  if (-not (Test-Path "$dir\result.json")) {
+    $code = '0x{0:X}' -f $info.LastTaskResult
+    $hint = switch ($code) {
+      '0x41303' { "the task never started in 4 minutes: check that $runner may 'Log on as a batch job' (secpol.msc, Local Policies, User Rights Assignment)" }
+      '0x8007052E' { 'the runner account could not log on (bad user name or password)' }
+      '0x80070569' { "$runner lacks the 'Log on as a batch job' right" }
+      default { 'see Task Scheduler history for the task' }
+    }
+    $events = try {
+      Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 200 -ErrorAction Stop |
+        Where-Object { $_.Message -match $task } | Select-Object -First 5 | ForEach-Object { "  $($_.TimeCreated) [$($_.Id)] $($_.Message)" }
+    } catch { '  (Task Scheduler history is off)' }
+    throw "The inner checks wrote no result: task state $state, result $code ($hint).`n$($events -join "`n")"
+  }
   $results = Get-Content "$dir\result.json" -Raw | ConvertFrom-Json
   "`nAgentry isolation spike on $env:COMPUTERNAME ($((Get-CimInstance Win32_OperatingSystem).Caption), build $([Environment]::OSVersion.Version.Build))"
   $results.PSObject.Properties | ForEach-Object { [pscustomobject]@{ Check = $_.Name; Result = $(if ($_.Value.ok) { 'OK' } else { 'FAIL' }); Detail = $_.Value.detail } } |
