@@ -206,7 +206,9 @@ $q.ExecuteScalar() | Out-File 'OUT\sql.txt'
 exit 0
 '@
 try {
-  $r = Sandbox (PsCommand $sqlProbe.Replace('OUT', $out)) 0 60000
+  # A script file: CreateProcessWithLogonW takes at most 1024 characters of command line, too few for the encoded probe.
+  Set-Content "$out\sql-probe.ps1" $sqlProbe.Replace('OUT', $out)
+  $r = Sandbox "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$out\sql-probe.ps1`"" 0 60000
   $why = if (Test-Path "$out\sql.txt") { "$(Get-Content "$out\sql.txt" -Raw)".Trim() } else { '' }
   $detail = if ($r -eq 'exit=0') { "the sandbox got in: $why" } else { "$(Describe $r); $why" }
   Record 'sql_login_refused_for_sandbox' ($r -eq 'exit=7' -and $why -match 'Login failed') $detail
