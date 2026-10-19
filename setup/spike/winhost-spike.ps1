@@ -69,7 +69,7 @@ function Cleanup {
 }
 
 Cleanup
-$listener = $null; $history = $null
+$listener = $null; $control = $null; $history = $null
 try {
   # Accounts (standard users, not administrators).
   $runnerPw = & $pw; $sandboxPw = & $pw
@@ -93,16 +93,18 @@ try {
   New-NetFirewallRule -DisplayName $rule -Direction Outbound -Action Block -Protocol TCP -RemotePort 47470, 1433 `
     -LocalUser "O:LSD:(A;;CC;;;$sandboxSid)" | Out-Null
 
-  # A listener standing in for the Agentry server on 127.0.0.1.
+  # Listeners standing in for the Agentry server on 127.0.0.1: 47470 is blocked for the sandbox, 47471 is the control.
   $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 47470)
   $listener.Start()
+  $control = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 47471)
+  $control.Start()
 
   # Secondary Logon is what CreateProcessWithLogonW uses.
   $seclogon = Get-Service seclogon
   if ($seclogon.StartType -eq 'Disabled') { Write-Warning 'Secondary Logon (seclogon) is disabled: run-as will fail.' }
 
   # Run the inner checks as the runner account, non-interactively.
-  $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$dir\spike-inner.ps1`" -Dir `"$dir`""
+  $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$dir\spike-inner.ps1`" -Dir `"$dir`" -SitesConfigExists $([int](Test-Path 'C:\Sites\VocaTrain.Api\current\appsettings.Production.json'))"
   $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
   Register-ScheduledTask -TaskName $task -Action $action -Settings $settings -User $runner -Password $runnerPw -RunLevel Limited | Out-Null
   # Task Scheduler's history (off by default) says why a task did not start; it is switched back afterwards.
@@ -141,6 +143,7 @@ try {
   "Raw results: $dir\result.json"
 } finally {
   if ($listener) { $listener.Stop() }
+  if ($control) { $control.Stop() }
   if ($history -and -not $historyWasOn) { $history.IsEnabled = $false; $history.SaveChanges() }
   if ($Keep) { "Kept: users $runner/$sandbox, rule '$rule', task '$task', folder $dir. Run again without -Keep to remove." }
   else { Cleanup; 'Removed the spike users, rule, task and folder.' }
