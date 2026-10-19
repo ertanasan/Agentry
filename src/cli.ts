@@ -244,7 +244,13 @@ function run(db: Database, once: boolean): Promise<number> {
 
 const port = Number(process.env.AGENTRY_PORT) || DEFAULT_PORT;
 const publicUrl = () => process.env.AGENTRY_PUBLIC_URL || `http://localhost:${port}`;
-const backupDir = () => process.env.AGENTRY_BACKUP_DIR || join(home, "backups");
+// An explicit AGENTRY_BACKUP_DIR must already exist (a missing one is reported); the default is created.
+const backupDir = () => {
+  if (process.env.AGENTRY_BACKUP_DIR) return process.env.AGENTRY_BACKUP_DIR;
+  const dir = join(home, "backups");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+};
 
 // The web UI; also runs the nightly backup (at start when due, then checked every hour).
 async function serve(db: Database): Promise<number> {
