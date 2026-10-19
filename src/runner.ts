@@ -15,8 +15,12 @@
 //    │                                       ▼
 //    └── infra_error → queued (attempt not counted), runner paused              done
 //
+//  Re-run deploy (queued by the CLI/UI, slice 2 review D7) is handled before new work: origin must have the
+//  commit, and every target must run it, an older commit or a later one containing it (never a rollback, D14).
+//
 // Every stop removes the worktree and keeps the branch (D12). Every state write is fenced by the lease
-// token (D17); the caller holds the lease and runs the heartbeat, which reads `ctx.currentRun`.
+// token (D17); the caller holds the lease and runs the heartbeat, which reads `ctx.currentRun`. Every git call
+// is async and bounded, and its process group is recorded on the run while it runs (git.ts).
 import type { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -89,6 +93,19 @@ function pick(db: Database): ReqRow | null {
 
 export async function runNext(ctx: RunnerCtx): Promise<RunOutcome> {
   if (runnerRow(ctx.db).paused) return { kind: "paused" };
+  // A queued Re-run deploy goes first: its group stays blocked until it is handled (slice 2 review D7).
+  const queued = ctx.db.query(`SELECT id FROM requests WHERE redeploy_requested = 1 AND status = 'blocked_post_push'
+    ORDER BY updated_at, id LIMIT 1`).get() as { id: number } | null;
+  if (queued) {
+    w(ctx, () => ctx.db.query("UPDATE requests SET redeploy_requested = 0 WHERE id = ?").run(queued.id));
+    try {
+      return { kind: "ran", requestId: queued.id, status: await redeploy(ctx, queued.id) };
+    } catch (e) {
+      if (e instanceof LeaseLost) throw e;
+      w(ctx, () => setRequestStatus(ctx.db, queued.id, "blocked_post_push", `re-run deploy failed: ${e instanceof Error ? e.message : String(e)}`));
+      return { kind: "ran", requestId: queued.id, status: "blocked_post_push" };
+    }
+  }
   const req = pick(ctx.db);
   if (!req) return { kind: "idle" };
   const resume = req.resume_run ? ctx.db.query("SELECT * FROM runs WHERE id = ?").get(req.resume_run) as RunRow : null;
@@ -110,9 +127,14 @@ export async function redeploy(ctx: RunnerCtx, requestId: number): Promise<Reque
     attempt: last.attempt, branch: last.branch, base: last.base_sha, candidate: last.candidate_sha, commit: sha, pushState: last.push_state,
   });
   return execute(j, async () => {
-    if (g.fetch(j.repo, j.remote).code !== 0) throw new Error("git fetch failed");
-    if (!g.isAncestor(j.repo, sha, `${j.remote}/${j.branch}`)) throw new Error(`${sha.slice(0, 7)} is not on ${j.remote}/${j.branch}`);
-    g.detachedWorktree(j.repo, j.wt, sha);
+    if ((await g.fetch(j.repo, j.remote)).code !== 0) throw new Error("git fetch failed");
+    if (!await g.isAncestor(j.repo, sha, `${j.remote}/${j.branch}`)) throw new Error(`${sha.slice(0, 7)} is not on ${j.remote}/${j.branch}`);
+    // Origin has the commit: record that on this run and on earlier unknown pushes of it (slice 2 review D10).
+    w(ctx, () => ctx.db.query("UPDATE runs SET push_state = 'pushed' WHERE request_id = ? AND commit_sha = ? AND push_state IN ('push_unknown', 'push_started')")
+      .run(requestId, sha));
+    const plan = await redeployPlan(j, sha);
+    if (plan !== "deploy") return plan;
+    await g.detachedWorktree(j.repo, j.wt, sha);
     return deploy(j, sha);
   });
 }
@@ -131,6 +153,9 @@ function startRun(ctx: RunnerCtx, req: ReqRow, o: {
       .lastInsertRowid);
   });
   ctx.currentRun = runId;
+  // Each git process's group is recorded on the run while it runs, like a step's (slice 2 review D13).
+  g.observer.onStart = (pgid) => w(ctx, () => ctx.db.query("UPDATE runs SET pgid = ? WHERE id = ?").run(pgid, runId));
+  g.observer.onEnd = () => w(ctx, () => ctx.db.query("UPDATE runs SET pgid = NULL WHERE id = ?").run(runId));
   const dir = join(ctx.home, "runs", String(runId));
   mkdirSync(dir, { recursive: true });
   return {
@@ -151,9 +176,10 @@ async function execute(j: Job, body: () => Promise<Stop>): Promise<RequestStatus
     // Once a push has started, origin may have the commit: never requeue (D19).
     s = run.push_state === "none" ? infra(`runner error: ${msg}`) : post(`runner error after push started: ${msg}`, run.commit_sha);
   } finally {
-    if (existsSync(j.wt)) g.removeWorktree(j.repo, j.wt);
+    if (existsSync(j.wt)) await g.removeWorktree(j.repo, j.wt);
     rmSync(join(j.dir, "tmp"), { recursive: true, force: true });
     j.ctx.currentRun = null;
+    g.observer.onStart = g.observer.onEnd = undefined;
   }
   finish(j, s);
   return s.status;
@@ -183,26 +209,26 @@ function finish(j: Job, s: Stop): void {
 }
 
 async function pipeline(j: Job, resumed: boolean): Promise<Stop> {
-  if (g.fetch(j.repo, j.remote).code !== 0) return infra("git fetch failed");
+  if ((await g.fetch(j.repo, j.remote)).code !== 0) return infra("git fetch failed");
   const drift = await driftGuard(j);
   if (drift) return { status: "queued", reason: drift, requeue: true, lock: { reason: drift, sha: null } };
 
   if (resumed) {
-    g.checkoutWorktree(j.repo, j.wt, j.runBranch);
+    await g.checkoutWorktree(j.repo, j.wt, j.runBranch);
   } else {
-    j.base = g.remoteHead(j.repo, j.remote, j.branch);
+    j.base = await g.remoteHead(j.repo, j.remote, j.branch);
     w(j.ctx, () => j.ctx.db.query("UPDATE runs SET base_sha = ? WHERE id = ?").run(j.base, j.runId));
-    g.addWorktree(j.repo, j.wt, j.runBranch, j.base);
+    await g.addWorktree(j.repo, j.wt, j.runBranch, j.base);
   }
   j.sbx = sandbox({
-    worktree: j.wt, runTmp: join(j.dir, "tmp"), gitDir: g.commonDir(j.repo), claudeBin: j.ctx.claudeBin,
+    worktree: j.wt, runTmp: join(j.dir, "tmp"), gitDir: await g.commonDir(j.repo), claudeBin: j.ctx.claudeBin,
     keyHelper: j.ctx.keyHelper, pkgCache: join(j.ctx.home, "cache", "nuget"),
   });
 
   if (!resumed) {
     const stopped = (await agentStep(j)) ?? tampered(j, "agent");
     if (stopped) return stopped;
-    const candidate = g.candidateCommit(j.wt, `agentry: candidate for #${j.req.id}`);
+    const candidate = await g.candidateCommit(j.wt, `agentry: candidate for #${j.req.id}`);
     if (!candidate) return pre("the agent made no changes");
     w(j.ctx, () => j.ctx.db.query("UPDATE runs SET candidate_sha = ? WHERE id = ?").run(candidate, j.runId));
   }
@@ -213,14 +239,14 @@ async function pipeline(j: Job, resumed: boolean): Promise<Stop> {
 async function deliver(j: Job, approved: boolean): Promise<Stop> {
   let stopped = await gates(j, approved);
   if (stopped) return stopped;
-  let sha = g.amendMessage(j.wt, commitMessage(j.req));
+  let sha = await g.amendMessage(j.wt, commitMessage(j.req));
   for (let round = 0; ; round++) {
-    if (g.fetch(j.repo, j.remote).code !== 0) return infra("git fetch failed");
-    const head = g.remoteHead(j.repo, j.remote, j.branch);
-    if (!g.isAncestor(j.repo, head, sha)) {
-      if (!g.rebaseOnto(j.wt, `${j.remote}/${j.branch}`)) return pre(`rebase onto ${j.remote}/${j.branch} had conflicts`);
+    if ((await g.fetch(j.repo, j.remote)).code !== 0) return infra("git fetch failed");
+    const head = await g.remoteHead(j.repo, j.remote, j.branch);
+    if (!await g.isAncestor(j.repo, head, sha)) {
+      if (!await g.rebaseOnto(j.wt, `${j.remote}/${j.branch}`)) return pre(`rebase onto ${j.remote}/${j.branch} had conflicts`);
       j.base = head;
-      sha = g.headSha(j.wt);
+      sha = await g.headSha(j.wt);
       w(j.ctx, () => j.ctx.db.query("UPDATE runs SET base_sha = ? WHERE id = ?").run(head, j.runId));
       stopped = await gates(j, approved);
       if (stopped) return stopped;
@@ -240,9 +266,9 @@ function commitMessage(r: ReqRow): string {
 // Step 4 (inspect), unless approved, then build, tests and the done-when check on the worktree's HEAD.
 async function gates(j: Job, approved: boolean): Promise<Stop | null> {
   const { recipe, req } = j;
-  const head = g.headSha(j.wt);
+  const head = await g.headSha(j.wt);
   if (!approved) {
-    const found = inspect(g.changedFiles(j.wt, j.base, head), g.addedLines(j.wt, j.base, head), recipe);
+    const found = inspect(await g.changedFiles(j.wt, j.base, head), await g.addedLines(j.wt, j.base, head), recipe);
     j.flags = [...found.blocking, ...found.info];
     if (found.blocking.length) return { status: "needs_review", reason: describe(found.blocking) };
   }
@@ -259,7 +285,7 @@ async function gates(j: Job, approved: boolean): Promise<Stop | null> {
   const changed = tampered(j, "test");
   if (changed) return changed;
   if (t.exitCode !== 0) return pre(t.timedOut ? "tests timed out" : `tests failed (exit ${t.exitCode})`);
-  if (!g.trackedClean(j.wt)) return pre("the tests changed tracked files");
+  if (!await g.trackedClean(j.wt)) return pre("the tests changed tracked files");
 
   let run: TestRun | null = null;
   if (resultFile) {
@@ -284,7 +310,7 @@ async function gates(j: Job, approved: boolean): Promise<Stop | null> {
     const s = begin(j, "verify");
     const v = await j.ctx.verifier.verify({
       worktree: j.wt, logPath: s.logPath, timeoutMs: timeoutMs(recipe, "verify"), sandbox: j.sbx!, onStart: s.onStart,
-      title: req.title, body: req.body, doneWhen: req.done_when, diff: g.diff(j.wt, j.base, head), testSummary: summary(run, t),
+      title: req.title, body: req.body, doneWhen: req.done_when, diff: await g.diff(j.wt, j.base, head), testSummary: summary(run, t),
     });
     s.end(v.verdict === "PASS" ? 0 : 1);
     const changed = tampered(j, "verify");
@@ -353,13 +379,13 @@ function prompt(j: Job): string {
 async function push(j: Job, sha: string): Promise<"pushed" | "rejected" | "unknown"> {
   const setState = (state: PushState) => w(j.ctx, () => j.ctx.db.query("UPDATE runs SET push_state = ?, commit_sha = ? WHERE id = ?").run(state, sha, j.runId));
   setState("push_started");
-  g.push(j.wt, j.remote, sha, j.branch);
+  await g.push(j.wt, j.remote, sha, j.branch);
   for (const wait of [0, ...(j.ctx.pushBackoffMs ?? DEFAULT_BACKOFF_MS)]) {
     if (wait) await Bun.sleep(wait);
-    const live = g.lsRemote(j.repo, j.remote, j.branch);
+    const live = await g.lsRemote(j.repo, j.remote, j.branch);
     if (live === null) continue;
     // Someone may have pushed on top of the commit already; it still counts as pushed.
-    const pushed = live === sha || (g.fetch(j.repo, j.remote).code === 0 && g.isAncestor(j.repo, sha, `${j.remote}/${j.branch}`));
+    const pushed = live === sha || ((await g.fetch(j.repo, j.remote)).code === 0 && await g.isAncestor(j.repo, sha, `${j.remote}/${j.branch}`));
     setState(pushed ? "pushed" : "not_pushed");
     return pushed ? "pushed" : "rejected";
   }
@@ -376,8 +402,8 @@ async function deploy(j: Job, sha: string): Promise<Stop> {
     if (busy.exitCode !== 1) return post(`could not check for a running install (exit ${busy.exitCode})`, sha);
   }
   // Deploy builds unsandboxed with credentials, so nothing a sandboxed step wrote may survive (e.g. obj/*.targets).
-  g.cleanUntracked(j.wt);
-  const refused = checkDeployable(j.wt, sha);
+  await g.cleanUntracked(j.wt);
+  const refused = await checkDeployable(j.wt, sha);
   if (refused) return post(refused, sha);
   const d = await command(j, "deploy", recipe.deploy_cmd, {});
   if (d.timedOut) return post("deploy timed out: remote state unknown", sha);
@@ -390,11 +416,29 @@ async function deploy(j: Job, sha: string): Promise<Stop> {
   return { status: "done", reason: "deployed" };
 }
 
+// Re-run deploy never moves a target backwards (winhost review D14): every target must run this commit, an
+// older one, or a later one that already contains it. Deploys only when some target is behind.
+async function redeployPlan(j: Job, sha: string): Promise<Stop | "deploy"> {
+  let behind = false;
+  let later = false;
+  for (const t of j.recipe.targets ?? []) {
+    const live = await liveVersion(j, t);
+    if ("error" in live) return post(`${t.name}: ${live.error}`, sha);
+    if (live.uncommitted) return post(`${t.name} runs ${live.short}+uncommitted`, sha);
+    if (live.sha === sha) continue;
+    if (await g.isAncestor(j.repo, live.sha, sha)) { behind = true; continue; }
+    if (await g.isAncestor(j.repo, sha, live.sha)) { later = true; continue; }
+    return post(`${t.name} runs ${live.short}; deploying ${sha.slice(0, 7)} would roll it back`, sha);
+  }
+  if (behind) return "deploy";
+  return { status: "done", reason: later ? `deployed by a later commit that contains ${sha.slice(0, 7)}` : "already live" };
+}
+
 // Deploy only runs on exactly the pushed commit with no tracked changes (D6).
-export function checkDeployable(wt: string, sha: string): string | null {
-  const head = g.headSha(wt);
+export async function checkDeployable(wt: string, sha: string): Promise<string | null> {
+  const head = await g.headSha(wt);
   if (head !== sha) return `worktree is at ${head.slice(0, 7)}, not the pushed ${sha.slice(0, 7)}`;
-  if (!g.trackedClean(wt)) return "worktree has uncommitted changes";
+  if (!await g.trackedClean(wt)) return "worktree has uncommitted changes";
   return null;
 }
 
@@ -406,7 +450,7 @@ async function driftGuard(j: Job): Promise<string | null> {
     const live = await liveVersion(j, t);
     if ("error" in live) return `can't read live version of ${t.name}: ${live.error}`;
     if (live.uncommitted) return `${t.name} runs ${live.short}+uncommitted`;
-    if (!g.isAncestor(j.repo, live.sha, tracking)) return `${t.name} runs ${live.short}, not on ${tracking}`;
+    if (!await g.isAncestor(j.repo, live.sha, tracking)) return `${t.name} runs ${live.short}, not on ${tracking}`;
   }
   return null;
 }
@@ -421,7 +465,7 @@ async function liveVersion(j: Job, t: Target): Promise<LiveVersion> {
   if (r.exitCode !== 0) return { error: `live_version_cmd exited ${r.exitCode}` };
   const v = parseVersion(readTail(r.logPath, VERSION_TAIL_BYTES));
   if (!v) return { error: "no VERSION line in the output" };
-  const sha = g.resolveCommit(j.repo, v.short);
+  const sha = await g.resolveCommit(j.repo, v.short);
   if (!sha) return { error: `unknown or ambiguous commit ${v.short}` };
   return { sha, ...v };
 }

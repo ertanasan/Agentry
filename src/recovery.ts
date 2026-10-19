@@ -53,23 +53,22 @@ export async function recover(ctx: RecoveryCtx, o: { graceMs?: number; now?: num
     w(() => db.query("UPDATE runs SET pgid = NULL WHERE id = ?").run(r.id));
   }
 
-  report.worktreesRemoved = removeLeftovers(ctx);
+  report.worktreesRemoved = await removeLeftovers(ctx);
 
-  const unknown = db.query(`SELECT ru.id ${RUN_JOIN} WHERE ru.push_state = 'push_unknown' AND ru.status != 'running'`).all() as { id: number }[];
-  for (const r of unknown) report.resolved.push({ runId: r.id, result: resolvePushUnknown(ctx, r.id) });
+  for (const runId of unresolvedPushes(db)) report.resolved.push({ runId, result: await resolvePushUnknown(ctx, runId) });
 
   const now = o.now ?? Date.now();
   const expired = db.query(`SELECT ${RUN_COLUMNS} ${RUN_JOIN} WHERE ru.status = 'running' AND ru.lease_expires_at < ?
     AND (ru.lease_token IS NULL OR ru.lease_token != ?)`).all(now, token) as RunRow[];
   for (const run of expired) {
-    const status = interrupt(ctx, run, now);
+    const status = await interrupt(ctx, run, now);
     report.interrupted.push({ runId: run.id, requestId: run.request_id, status });
   }
   return report;
 }
 
 // Every worktree left on disk belongs to a dead run: this runner holds the lease and has not started one yet.
-function removeLeftovers(ctx: RecoveryCtx): string[] {
+async function removeLeftovers(ctx: RecoveryCtx): Promise<string[]> {
   const wtRoot = join(ctx.home, "worktrees");
   const removed = existsSync(wtRoot) ? readdirSync(wtRoot) : [];
   for (const name of removed) rmSync(join(wtRoot, name), { recursive: true, force: true });
@@ -77,31 +76,41 @@ function removeLeftovers(ctx: RecoveryCtx): string[] {
   for (const name of existsSync(runsRoot) ? readdirSync(runsRoot) : []) rmSync(join(runsRoot, name, "tmp"), { recursive: true, force: true });
   const recipes = ctx.db.query("SELECT recipe FROM projects").all() as { recipe: string }[];
   for (const repo of new Set(recipes.map((p) => parseRecipe(p.recipe).repo))) {
-    if (existsSync(repo)) g.pruneWorktrees(repo);
+    if (existsSync(repo)) await g.pruneWorktrees(repo);
   }
   return removed;
 }
 
 // Where the run's commit is on the remote: its SHA, null when origin doesn't have it, undefined when the
 // remote can't be reached.
-function onRemote(run: RunRow): string | null | undefined {
+async function onRemote(run: RunRow): Promise<string | null | undefined> {
   const recipe = parseRecipe(run.recipe);
   const remote = recipe.remote ?? "origin";
   const tracking = `${remote}/${recipe.branch ?? "main"}`;
-  if (g.fetch(recipe.repo, remote).code !== 0) return undefined;
-  if (run.commit_sha && g.isAncestor(recipe.repo, run.commit_sha, tracking)) return run.commit_sha;
+  if ((await g.fetch(recipe.repo, remote)).code !== 0) return undefined;
+  if (run.commit_sha && await g.isAncestor(recipe.repo, run.commit_sha, tracking)) return run.commit_sha;
   if (!run.base_sha) return null;
-  const hit = g.git(recipe.repo, ["log", "-1", "--format=%H", `--grep=^Agentry-Request: #${run.request_id}$`, `${run.base_sha}..${tracking}`]);
+  const hit = await g.run(recipe.repo, ["log", "-1", "--format=%H", `--grep=^Agentry-Request: #${run.request_id}$`, `${run.base_sha}..${tracking}`]);
   return hit.code === 0 && hit.out ? hit.out : null;
+}
+
+// Runs whose push outcome is still open: push_unknown, finished, the latest run of a request that is still
+// blocked_post_push. A request that was since redeployed, resolved or retried is never reopened by the
+// resolver (slice 2 review D10).
+export function unresolvedPushes(db: Database): number[] {
+  return (db.query(`SELECT ru.id ${RUN_JOIN} WHERE ru.push_state = 'push_unknown' AND ru.status != 'running'
+    AND r.status = 'blocked_post_push' AND ru.id = (SELECT MAX(id) FROM runs WHERE request_id = r.id)`).all() as { id: number }[])
+    .map((r) => r.id);
 }
 
 // Asks the remote whether a push_unknown run's commit arrived. Pushed: the request stays blocked_post_push and
 // its group stays blocked until it is deployed. Not pushed: blocked_pre_push and the group is freed (D19).
-export function resolvePushUnknown(ctx: RecoveryCtx, runId: number): Resolution {
+export async function resolvePushUnknown(ctx: RecoveryCtx, runId: number): Promise<Resolution> {
   const { db } = ctx;
   const run = db.query(`SELECT ${RUN_COLUMNS} ${RUN_JOIN} WHERE ru.id = ?`).get(runId) as RunRow | null;
   if (!run || run.push_state !== "push_unknown") throw new Error(`run ${runId} has no unknown push`);
-  const sha = onRemote(run);
+  if (!unresolvedPushes(db).includes(runId)) throw new Error(`run ${runId} no longer decides its request's state`);
+  const sha = await onRemote(run);
   if (sha === undefined) return "unknown";
   fenced(db, ctx.token, () => {
     if (sha) {
@@ -118,10 +127,10 @@ export function resolvePushUnknown(ctx: RecoveryCtx, runId: number): Resolution 
   return sha ? "pushed" : "not_pushed";
 }
 
-function interrupt(ctx: RecoveryCtx, run: RunRow, now: number): "blocked_pre_push" | "blocked_post_push" {
+async function interrupt(ctx: RecoveryCtx, run: RunRow, now: number): Promise<"blocked_pre_push" | "blocked_post_push"> {
   const { db } = ctx;
   const stopped = `runner stopped during ${run.current_step ?? "setup"}`;
-  const sha = onRemote(run);
+  const sha = await onRemote(run);
   // push_started is written (fenced) before every push, so without it nothing of this run can be on origin.
   let pushState: PushState = run.push_state;
   if (sha) pushState = "pushed";

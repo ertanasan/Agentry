@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeAgent, resolveAuth } from "../src/adapters/claude.ts";
 import type { StepIO } from "../src/adapters/types.ts";
-import { addWorktree } from "../src/git.ts";
+import { git } from "../src/git.ts";
 import { sandbox } from "../src/sandbox.ts";
 import { claudeVerifier, MAX_DIFF_CHARS, parseVerdict, verifierPrompt } from "../src/verifier.ts";
 import { makeFixture } from "./fixture.ts";
@@ -26,7 +26,7 @@ let n = 0;
 function setup(o: { out?: string; exit?: number; sleep?: number; timeoutMs?: number } = {}) {
   const fx = makeFixture();
   const wt = join(fx.root, "wt");
-  addWorktree(fx.repo, wt, "agentry/1-1", "main");
+  git(fx.repo, ["worktree", "add", "--quiet", "-B", "agentry/1-1", wt, "main"]);
   const bin = join(fx.root, "claude");
   writeFileSync(bin, FAKE);
   chmodSync(bin, 0o755);

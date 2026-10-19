@@ -2,14 +2,14 @@
 // against a fixture repo with a bare origin. A crashed runner is either simulated in the db (token "old",
 // expired lease) or, for the orphan test, a real runner process that is SIGKILLed mid-step.
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { acquireLease, LEASE_TTL_MS, openDb, type PushState } from "../src/db.ts";
 import * as g from "../src/git.ts";
-import { groupAlive } from "../src/proc.ts";
+import { groupAlive, killGroup } from "../src/proc.ts";
 import { recover, resolvePushUnknown } from "../src/recovery.ts";
 import type { Recipe } from "../src/recipe.ts";
-import { makeFixture } from "./fixture.ts";
+import { head, makeFixture } from "./fixture.ts";
 
 function setup() {
   const fx = makeFixture({ "README.md": "hello\n", "app/main.txt": "v1\n" });
@@ -22,7 +22,7 @@ function setup() {
   db.query("INSERT INTO deploy_groups (name) VALUES ('g1')").run();
   db.query("INSERT INTO projects (name, repo_id, deploy_group_id, recipe) VALUES ('p', 1, 1, ?)").run(JSON.stringify(recipe));
   const id = Number(db.query("INSERT INTO requests (project_id, title, status, created_at, updated_at) VALUES (1, 'Change main', 'running', 0, 0)").run().lastInsertRowid);
-  const initial = g.headSha(fx.repo);
+  const initial = head(fx.repo);
   const ctx = { db, token: "new", home };
   return {
     fx, db, dbPath, home, ctx, id, initial,
@@ -72,7 +72,7 @@ describe("recovery: interrupted runs, decided by the remote", () => {
   test("a trailer commit from before base_sha does not count", async () => {
     const h = setup();
     h.pushed(`Old attempt\n\nAgentry-Request: #${h.id}`);
-    const runId = h.crashed({ push_state: "push_started", commit_sha: null, base_sha: g.headSha(h.fx.repo) });
+    const runId = h.crashed({ push_state: "push_started", commit_sha: null, base_sha: head(h.fx.repo) });
     h.takeOver();
     await recover(h.ctx);
     expect(h.run(runId).push_state).toBe("not_pushed");
@@ -111,7 +111,7 @@ describe("recovery: interrupted runs, decided by the remote", () => {
     expect(h.req().status).toBe("blocked_post_push");
     expect(h.group()).toMatchObject({ lock: "blocked", locked_by_request: h.id, undeployed_sha: sha });
 
-    expect(resolvePushUnknown(h.ctx, runId)).toBe("unknown");
+    expect(await resolvePushUnknown(h.ctx, runId)).toBe("unknown");
     h.originOnline();
     const rep = await recover(h.ctx);
     expect(rep.resolved).toEqual([{ runId, result: "not_pushed" }]);
@@ -149,7 +149,7 @@ describe("recovery: leftovers", () => {
   test("leftover worktrees are deleted and pruned; the branch survives and can be checked out again (D12)", async () => {
     const h = setup();
     const wt = join(h.home, "worktrees", "1-1");
-    g.addWorktree(h.fx.repo, wt, "agentry/1-1", h.initial);
+    await g.addWorktree(h.fx.repo, wt, "agentry/1-1", h.initial);
     writeFileSync(join(wt, "app/main.txt"), "half done\n");
     mkdirSync(join(h.home, "runs", "7", "tmp"), { recursive: true });
     h.crashed({ step: "agent" });
@@ -160,7 +160,7 @@ describe("recovery: leftovers", () => {
     expect(existsSync(join(h.home, "runs", "7", "tmp"))).toBe(false);
     expect(g.git(h.fx.repo, ["worktree", "list", "--porcelain"]).out.match(/^worktree /gm)).toHaveLength(1);
     expect(g.git(h.fx.repo, ["rev-parse", "--verify", "--quiet", "agentry/1-1"]).out).toBe(h.initial);
-    g.checkoutWorktree(h.fx.repo, wt, "agentry/1-1");
+    await g.checkoutWorktree(h.fx.repo, wt, "agentry/1-1");
     expect(existsSync(join(wt, "app/main.txt"))).toBe(true);
   });
 
@@ -188,6 +188,41 @@ describe("recovery: leftovers", () => {
     expect(h.req()).toMatchObject({ status: "blocked_pre_push", status_reason: "runner stopped during deploy" });
     expect(h.db.query("SELECT status, pgid FROM runs WHERE request_id = ?").get(h.id)).toEqual({ status: "interrupted", pgid: null });
   }, 15_000);
+});
+
+describe("recovery: git left running by a crashed runner (slice 2 review D13)", () => {
+  test("a push in flight when the runner is SIGKILLed is killed before recovery asks the remote", async () => {
+    const h = setup();
+    h.db.query("UPDATE runner SET owner_token = NULL, lease_expires_at = 0").run();
+    const hook = join(h.fx.repo, ".git", "hooks", "pre-push");
+    writeFileSync(hook, "#!/bin/sh\nsleep 60\n");
+    chmodSync(hook, 0o755);
+    const proc = Bun.spawn(["bun", join(import.meta.dir, "helpers/fake-pusher.ts"), h.dbPath, String(h.id), h.fx.repo, join(h.home, "worktrees", "1-1")],
+      { stdout: "inherit", stderr: "inherit" });
+    let pgid: number | null = null;
+    try {
+      for (let i = 0; i < 400 && !pgid; i++) {
+        await Bun.sleep(25);
+        const row = h.db.query("SELECT pgid FROM runs WHERE request_id = ? AND push_state = 'push_started'").get(h.id) as { pgid: number | null } | null;
+        if (row?.pgid) pgid = row.pgid; // the push's group (earlier git calls ran before the run row existed)
+      }
+      expect(pgid).not.toBeNull();
+      proc.kill("SIGKILL");
+      await proc.exited;
+      expect(groupAlive(pgid!)).toBe(true); // git push is still running on its own
+
+      const later = Date.now() + LEASE_TTL_MS + 1;
+      expect(acquireLease(h.db, "new", process.pid, later)).toBe(true);
+      const rep = await recover(h.ctx, { graceMs: 500, now: later });
+      expect(rep.killed).toContain(pgid!);
+      expect(groupAlive(pgid!)).toBe(false);
+      expect(g.git(h.fx.origin, ["rev-parse", "main"]).out).toBe(h.initial); // the push never landed
+      expect(h.req()).toMatchObject({ status: "blocked_pre_push", status_reason: "runner stopped during push" });
+    } finally {
+      proc.kill("SIGKILL"); // never leave the helper or its push behind when an assertion fails
+      if (pgid) await killGroup(pgid, 0);
+    }
+  }, 20_000);
 });
 
 // Real time: ~2.5 min. AGENTRY_SLOW=1 bun test test/recovery.test.ts

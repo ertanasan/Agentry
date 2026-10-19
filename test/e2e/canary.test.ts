@@ -14,7 +14,7 @@ import { makeFixture } from "../fixture.ts";
 
 const fx = makeFixture();
 const wt = join(fx.root, "wt");
-addWorktree(fx.repo, wt, "agentry/1-1", "main");
+await addWorktree(fx.repo, wt, "agentry/1-1", "main");
 const runTmp = join(fx.root, "run-tmp");
 const pkgCache = join(fx.root, "pkg-cache");
 const claudeBin = Bun.which("claude") ?? undefined;

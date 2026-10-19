@@ -11,11 +11,12 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
+import * as A from "./actions.ts";
 import { claudeAgent, resolveAuth } from "./adapters/claude.ts";
-import { acquireLease, LeaseLost, logEvent, openDb, releaseLease, runnerRow, setRequestStatus, startHeartbeat, type RequestStatus } from "./db.ts";
+import { acquireLease, LeaseLost, openDb, releaseLease, runnerRow, startHeartbeat } from "./db.ts";
 import { parseRecipe } from "./recipe.ts";
-import { recover, resolvePushUnknown } from "./recovery.ts";
-import { redeploy, runNext, type RunnerCtx } from "./runner.ts";
+import { recover, resolvePushUnknown, unresolvedPushes } from "./recovery.ts";
+import { runNext, type RunnerCtx } from "./runner.ts";
 import { AGENTRY_HOME } from "./sandbox.ts";
 import { claudeVerifier } from "./verifier.ts";
 
@@ -31,7 +32,7 @@ const USAGE = `usage: agentry <command>
   approve <id> | reject <id>         needs_review → queued (resumes at build) | canceled
   retry <id> [--body B] [--done-when D] [--done-when-test T]   blocked_pre_push → queued
   cancel <id>
-  redeploy <id> | resolve <id>       blocked_post_push → deploy again | done_manual
+  redeploy <id> | resolve <id>       blocked_post_push → queue a re-run of the deploy | done_manual
   reopen <id> <what's wrong>         done → a new linked request (counts one false-done)
   unblock <group>                    clear a deploy group's lock that no request holds (drift guard)
   resume                             unpause the runner
@@ -39,8 +40,6 @@ const USAGE = `usage: agentry <command>
 
 class CliError extends Error {}
 const fail = (msg: string): never => { throw new CliError(msg); };
-
-type Req = { id: number; status: RequestStatus; title: string; body: string; project_id: number; done_when: string | null; done_when_test: string | null; deploy_group_id: number };
 
 const home = process.env.AGENTRY_HOME ?? AGENTRY_HOME;
 
@@ -63,64 +62,28 @@ function main(argv: string[]): Promise<number> | number {
     case "add": return add(db, args, o);
     case "list": return list(db, !!o.all);
     case "run": return run(db, !!o.once);
-    case "answer": {
-      const answer = text("the answer");
-      move(db, id(), ["needs_info"], "queued", null, "answer", { text: answer });
+    case "answer": A.answer(db, id(), text("the answer")); return 0;
+    case "approve": A.approve(db, id()); return 0;
+    case "reject": A.reject(db, id()); return 0;
+    case "retry": A.retry(db, id(), { body: o.body, doneWhen: o["done-when"], doneWhenTest: o["done-when-test"] }); return 0;
+    case "cancel": A.cancel(db, id()); return 0;
+    case "resolve": A.resolve(db, id()); return 0;
+    case "redeploy": {
+      const rid = id();
+      A.requestRedeploy(db, rid);
+      console.log(`#${rid} re-run deploy queued (the runner handles it before new work)`);
       return 0;
     }
-    case "approve": return tx(db, () => {
-      const req = move(db, id(), ["needs_review"], "queued", null, "approve");
-      const last = db.query("SELECT id FROM runs WHERE request_id = ? ORDER BY id DESC LIMIT 1").get(req.id) as { id: number };
-      db.query("UPDATE requests SET resume_run = ? WHERE id = ?").run(last.id, req.id);
-    });
-    case "reject": move(db, id(), ["needs_review"], "canceled", "rejected", "reject"); return 0;
-    case "retry": return tx(db, () => {
-      const req = move(db, id(), ["blocked_pre_push"], "queued", null, "retry");
-      db.query("UPDATE requests SET body = ?, done_when = ?, done_when_test = ? WHERE id = ?")
-        .run(o.body ?? req.body, o["done-when"] ?? req.done_when, o["done-when-test"] ?? req.done_when_test, req.id);
-    });
-    case "cancel": move(db, id(), ["queued", "needs_info", "needs_review", "blocked_pre_push"], "canceled", "canceled", "cancel"); return 0;
-    case "resolve": return tx(db, () => {
-      const req = move(db, id(), ["blocked_post_push"], "done_manual", "resolved by hand", "resolve");
-      db.query("UPDATE deploy_groups SET lock = 'free', lock_reason = NULL, locked_by_request = NULL, undeployed_sha = NULL WHERE id = ? AND locked_by_request = ?")
-        .run(req.deploy_group_id, req.id);
-    });
-    case "redeploy": return redeployCmd(db, id());
-    case "reopen": return reopen(db, id(), text("what's wrong"));
-    case "unblock": {
-      const name = args[0] ?? fail("unblock needs a group name");
-      const res = db.query("UPDATE deploy_groups SET lock = 'free', lock_reason = NULL, undeployed_sha = NULL WHERE name = ? AND lock = 'blocked' AND locked_by_request IS NULL").run(name);
-      if (res.changes !== 1) fail(`group ${name} is not blocked, or a request holds it (use resolve or redeploy on that request)`);
-      logEvent(db, null, "unblock", { group: name });
+    case "reopen": {
+      const from = id();
+      console.log(`#${A.reopen(db, from, text("what's wrong"))} queued (reopened from #${from})`);
       return 0;
     }
+    case "unblock": A.unblock(db, args[0] ?? fail("unblock needs a group name")); return 0;
     case "token": return saveToken();
-    case "resume": {
-      db.query("UPDATE runner SET paused = 0, pause_reason = NULL WHERE id = 1").run();
-      logEvent(db, null, "resume");
-      return 0;
-    }
+    case "resume": A.resume(db); return 0;
     default: return fail(`unknown command "${cmd}"\n${USAGE}`);
   }
-}
-
-// Runs a state action's writes in one transaction, so the runner never sees half of it.
-function tx(db: Database, write: () => void): number {
-  db.transaction(write)();
-  return 0;
-}
-
-// Moves a request from one of `from` to `to` in one transaction, with an event. Refuses any other state.
-function move(db: Database, id: number, from: RequestStatus[], to: RequestStatus, reason: string | null, event: string, payload: unknown = null): Req {
-  return db.transaction(() => {
-    const req = db.query(`SELECT r.id, r.status, r.title, r.body, r.project_id, r.done_when, r.done_when_test, p.deploy_group_id
-      FROM requests r JOIN projects p ON p.id = r.project_id WHERE r.id = ?`).get(id) as Req | null;
-    if (!req) fail(`no request #${id}`);
-    if (!from.includes(req!.status)) fail(`#${id} is ${req!.status}; this needs ${from.join(" or ")}`);
-    logEvent(db, id, event, payload);
-    setRequestStatus(db, id, to, reason);
-    return req!;
-  })();
 }
 
 function projectAdd(db: Database, args: string[]): number {
@@ -143,13 +106,10 @@ function projectAdd(db: Database, args: string[]): number {
 function add(db: Database, args: string[], o: Record<string, string | boolean | undefined>): number {
   const [project, ...title] = args;
   if (!project || !title.length) fail("usage: agentry add <project> <title> [--body B] [--done-when D] [--done-when-test T]");
-  const p = db.query("SELECT id FROM projects WHERE name = ?").get(project) as { id: number } | null;
-  if (!p) fail(`no project "${project}" (agentry project add)`);
-  const now = Date.now();
-  const id = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, priority, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(p!.id, title.join(" "), o.body ?? "", o["done-when"] ?? null, o["done-when-test"] ?? null,
-    Number(o.priority ?? 0), now, now).lastInsertRowid);
-  logEvent(db, id, "add");
+  const id = A.addRequest(db, {
+    project, title: title.join(" "), body: o.body as string | undefined, doneWhen: o["done-when"] as string | undefined,
+    doneWhenTest: o["done-when-test"] as string | undefined, priority: Number(o.priority ?? 0),
+  });
   console.log(`#${id} queued`);
   return 0;
 }
@@ -246,10 +206,9 @@ function run(db: Database, once: boolean): Promise<number> {
     while (!stopping) {
       if (Date.now() - lastResolve >= RESOLVE_EVERY_MS) {
         lastResolve = Date.now();
-        const unknown = db.query("SELECT id FROM runs WHERE push_state = 'push_unknown' AND status != 'running'").all() as { id: number }[];
-        for (const r of unknown) {
-          const res = resolvePushUnknown(ctx, r.id);
-          if (res !== "unknown") console.log(`run ${r.id}: push ${res}`);
+        for (const runId of unresolvedPushes(db)) {
+          const res = await resolvePushUnknown(ctx, runId);
+          if (res !== "unknown") console.log(`run ${runId}: push ${res}`);
         }
       }
       const out = await runNext(ctx);
@@ -266,32 +225,10 @@ function run(db: Database, once: boolean): Promise<number> {
   });
 }
 
-function redeployCmd(db: Database, id: number): Promise<number> {
-  return withLease(db, async (ctx) => {
-    console.log(`#${id} → ${await redeploy(ctx, id)}`);
-  });
-}
-
-function reopen(db: Database, id: number, what: string): number {
-  const newId = db.transaction(() => {
-    const orig = db.query("SELECT status, title, body, project_id, done_when, done_when_test FROM requests WHERE id = ?").get(id) as Req | null;
-    if (!orig) fail(`no request #${id}`);
-    if (orig!.status !== "done") fail(`#${id} is ${orig!.status}; reopen needs done`);
-    logEvent(db, id, "reopen", { text: what });
-    const now = Date.now();
-    return Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, reopened_from, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(orig!.project_id, `Reopened #${id}: ${orig!.title}`,
-      `${what}\n\nOriginal request:\n${orig!.body}`, orig!.done_when, orig!.done_when_test, id, now, now).lastInsertRowid);
-  })();
-  logEvent(db, newId, "add", { reopened_from: id });
-  console.log(`#${newId} queued (reopened from #${id})`);
-  return 0;
-}
-
 try {
   process.exitCode = await main(process.argv.slice(2));
 } catch (e) {
-  if (!(e instanceof CliError)) throw e;
+  if (!(e instanceof CliError) && !(e instanceof A.ActionError)) throw e;
   console.error(`agentry: ${e.message}`);
   process.exitCode = 1;
 }

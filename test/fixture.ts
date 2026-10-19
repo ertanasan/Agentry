@@ -30,3 +30,6 @@ export function makeFixture(files: Record<string, string> = { "README.md": "hell
   git(repo, ["fetch", "--quiet", "origin"]);
   return { root, origin, repo, write, commit };
 }
+
+// The commit a checkout or worktree is at (sync, for test setup).
+export const head = (cwd: string) => git(cwd, ["rev-parse", "HEAD"]).out;

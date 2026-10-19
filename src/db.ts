@@ -16,7 +16,8 @@ export class LeaseLost extends Error {
   constructor() { super("runner lease lost: another runner owns it"); }
 }
 
-const SCHEMA = `
+// The slice 1 schema, frozen: every later change is a numbered migration below, so existing databases upgrade.
+export const BASE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS runner (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   owner_token TEXT, owner_pid INTEGER, lease_expires_at INTEGER NOT NULL DEFAULT 0,
@@ -70,11 +71,30 @@ CREATE TABLE IF NOT EXISTS events (
 );
 `;
 
+// Schema changes after slice 1, in order. Migration i brings PRAGMA user_version from i to i + 1, in one
+// transaction with the version bump (review D11). Never edit or reorder an entry; append.
+export const MIGRATIONS: string[] = [
+  // 1: Re-run deploy is queued for the runner instead of taking the lease (slice 2 review D7).
+  "ALTER TABLE requests ADD COLUMN redeploy_requested INTEGER NOT NULL DEFAULT 0",
+];
+
 export function openDb(path: string): Database {
   const db = new Database(path, { create: true });
   db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
-  db.exec(SCHEMA);
+  db.exec(BASE_SCHEMA);
+  migrate(db);
   return db;
+}
+
+function migrate(db: Database): void {
+  const at = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  if (at > MIGRATIONS.length) throw new Error(`database schema version ${at} is newer than this Agentry (${MIGRATIONS.length})`);
+  for (let v = at; v < MIGRATIONS.length; v++) {
+    db.transaction(() => {
+      db.exec(MIGRATIONS[v]);
+      db.exec(`PRAGMA user_version = ${v + 1}`);
+    }).immediate();
+  }
 }
 
 type RunnerRow = { owner_token: string | null; owner_pid: number | null; lease_expires_at: number; paused: number; pause_reason: string | null };

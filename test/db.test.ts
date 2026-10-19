@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { openDb, acquireLease, renewLease, releaseLease, fenced, LeaseLost, runnerRow, LEASE_TTL_MS } from "../src/db.ts";
+import { Database } from "bun:sqlite";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openDb, acquireLease, renewLease, releaseLease, fenced, LeaseLost, runnerRow, LEASE_TTL_MS, BASE_SCHEMA, MIGRATIONS } from "../src/db.ts";
 
 const mem = () => openDb(":memory:");
 
@@ -42,3 +46,42 @@ describe("runner lease", () => {
     expect(acquireLease(db, "b", 2, 1)).toBe(true);
   });
 });
+
+describe("migrations (review D11)", () => {
+  const version = (db: Database) => (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  const columns = (db: Database) => (db.query("PRAGMA table_info(requests)").all() as { name: string }[]).map((c) => c.name);
+
+  test("a populated slice-1 database upgrades in place and keeps its rows", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "agentry-db-")), "agentry.db");
+    const old = new Database(path, { create: true });
+    old.exec(BASE_SCHEMA);
+    old.exec(`INSERT INTO repos (name, path) VALUES ('r', '/r'); INSERT INTO deploy_groups (name) VALUES ('g');
+      INSERT INTO projects (name, repo_id, deploy_group_id, recipe) VALUES ('p', 1, 1, '{}');
+      INSERT INTO requests (project_id, title, status, created_at, updated_at) VALUES (1, 'old one', 'done', 1, 1);`);
+    old.close();
+
+    const db = openDb(path);
+    expect(version(db)).toBe(MIGRATIONS.length);
+    expect(columns(db)).toContain("redeploy_requested");
+    expect(db.query("SELECT title, status, redeploy_requested FROM requests").all()).toEqual([{ title: "old one", status: "done", redeploy_requested: 0 }]);
+    db.close();
+    const again = openDb(path); // idempotent
+    expect(version(again)).toBe(MIGRATIONS.length);
+  });
+
+  test("a new database gets every migration", () => {
+    const db = mem();
+    expect(version(db)).toBe(MIGRATIONS.length);
+    expect(columns(db)).toContain("redeploy_requested");
+  });
+
+  test("a database from a newer Agentry is refused, not downgraded", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "agentry-db-")), "agentry.db");
+    const db = new Database(path, { create: true });
+    db.exec(BASE_SCHEMA);
+    db.exec(`PRAGMA user_version = ${MIGRATIONS.length + 1}`);
+    db.close();
+    expect(() => openDb(path)).toThrow("newer than this Agentry");
+  });
+});
+

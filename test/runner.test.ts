@@ -1,14 +1,16 @@
 // Runner paths from the test plan, against a fixture repo with a bare origin, a fake agent and verifier, and
 // the real sandbox for build and test steps. "Production" is a directory holding a VERSION file.
 import { describe, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { acquireLease, openDb, runnerRow } from "../src/db.ts";
 import * as g from "../src/git.ts";
 import type { Recipe } from "../src/recipe.ts";
 import type { AgentResult, Verdict } from "../src/adapters/types.ts";
 import { checkDeployable, parseVersion, redeploy, runNext, type RunnerCtx } from "../src/runner.ts";
-import { makeFixture } from "./fixture.ts";
+import { requestRedeploy, resolve } from "../src/actions.ts";
+import { recover, unresolvedPushes } from "../src/recovery.ts";
+import { head, makeFixture } from "./fixture.ts";
 
 type AgentFn = (wt: string) => AgentResult | void;
 
@@ -25,7 +27,7 @@ function setup(o: { recipe?: Partial<Recipe>; files?: Record<string, string>; ag
   const prod = join(fx.root, "prod");
   mkdirSync(home);
   mkdirSync(prod);
-  const initial = g.headSha(fx.repo);
+  const initial = head(fx.repo);
   writeFileSync(join(prod, "VERSION"), `${initial.slice(0, 7)} 2026-10-17 12:00\n`);
   const db = openDb(join(home, "agentry.db"));
   acquireLease(db, "tok", process.pid);
@@ -84,7 +86,7 @@ describe("runner: through to done", () => {
     expect(g.git(h.fx.origin, ["show", "--name-only", "--format=", "main"]).out.split("\n").sort()).toEqual(["app/main.txt", "app/new.txt"]);
     expect(h.worktrees()).toEqual([]);
     expect(g.git(h.fx.repo, ["rev-parse", "--verify", "--quiet", `agentry/${id}-1`]).out).toBe(run.commit_sha);
-    expect(g.headSha(h.fx.repo)).toBe(h.initial);
+    expect(head(h.fx.repo)).toBe(h.initial);
     expect(g.git(h.fx.repo, ["status", "--porcelain"]).out).toBe("?? wip.txt");
     expect(await runNext(h.ctx)).toEqual({ kind: "idle" });
   });
@@ -104,6 +106,22 @@ describe("runner: through to done", () => {
     const id = h.add();
     await runNext(h.ctx);
     expect(h.req(id).status).toBe("done");
+  });
+});
+
+describe("runner: git that hangs (slice 2 review D12)", () => {
+  test("a fetch that never answers ends as infra_error and pauses the runner, not a wedged runner", async () => {
+    const h = setup();
+    const server = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+    const saved = { ...g.timeouts };
+    try {
+      g.git(h.fx.repo, ["remote", "set-url", "origin", `http://127.0.0.1:${server.port}/repo.git`]);
+      g.timeouts.network = 800;
+      const id = h.add();
+      await runNext(h.ctx);
+      expect(h.req(id)).toMatchObject({ status: "queued", attempts: 0 });
+      expect(runnerRow(h.db).pause_reason).toBe("git fetch failed");
+    } finally { Object.assign(g.timeouts, saved); server.stop(true); }
   });
 });
 
@@ -295,6 +313,41 @@ describe("runner: origin moves and push outcomes", () => {
     renameSync(`${h.fx.origin}.gone`, h.fx.origin);
     expect(h.originHead()).toBe(run.commit_sha);
   });
+
+  // Slice 2 review D10: before the fix, the redeploy run copied push_unknown and the resolver, which runs every
+  // minute, set the deployed request back to blocked_post_push.
+  test("a redeploy after push_unknown stays done: the resolver never reopens it", async () => {
+    const h = setup();
+    const hook = join(h.fx.origin, "hooks", "post-receive");
+    writeFileSync(hook, `#!/bin/sh\nmv '${h.fx.origin}' '${h.fx.origin}.gone'\n`);
+    chmodSync(hook, 0o755);
+    const id = h.add();
+    await runNext(h.ctx);
+    renameSync(`${h.fx.origin}.gone`, h.fx.origin);
+    rmSync(hook);
+    expect(await redeploy(h.ctx, id)).toBe("done");
+    expect(h.lastRun(id).push_state).toBe("pushed");
+    expect(h.db.query("SELECT COUNT(*) AS n FROM runs WHERE request_id = ? AND push_state = 'push_unknown'").get(id)).toEqual({ n: 0 });
+    expect(unresolvedPushes(h.db)).toEqual([]);
+    await recover(h.ctx);
+    expect(h.req(id).status).toBe("done");
+    expect(h.group().lock).toBe("free");
+  });
+
+  test("a request resolved by hand after push_unknown is not reopened either", async () => {
+    const h = setup();
+    const hook = join(h.fx.origin, "hooks", "post-receive");
+    writeFileSync(hook, `#!/bin/sh\nmv '${h.fx.origin}' '${h.fx.origin}.gone'\n`);
+    chmodSync(hook, 0o755);
+    const id = h.add();
+    await runNext(h.ctx);
+    renameSync(`${h.fx.origin}.gone`, h.fx.origin);
+    resolve(h.db, id);
+    expect(unresolvedPushes(h.db)).toEqual([]);
+    await recover(h.ctx);
+    expect(h.req(id).status).toBe("done_manual");
+    expect(h.group().lock).toBe("free");
+  });
 });
 
 describe("runner: deploy", () => {
@@ -330,6 +383,71 @@ describe("runner: deploy", () => {
     expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith(sha.slice(0, 7));
     expect(h.group()).toMatchObject({ lock: "free", locked_by_request: null, undeployed_sha: null });
     expect(h.worktrees()).toEqual([]);
+  });
+
+  // Winhost review D14: Re-run deploy never moves production backwards.
+  function blockedAfterPush() {
+    const h = setup();
+    const deploy = h.recipe.deploy_cmd;
+    h.recipe.deploy_cmd = `test -f '${h.prod}/allow' && ${deploy}`;
+    h.db.query("UPDATE projects SET recipe = ?").run(JSON.stringify(h.recipe));
+    return h;
+  }
+  const setLive = (h: ReturnType<typeof setup>, sha: string) => writeFileSync(join(h.prod, "VERSION"), `${sha.slice(0, 7)} 2026-10-19 08:00\n`);
+
+  test("re-run deploy when a later commit containing it is already live: done, no deploy", async () => {
+    const h = blockedAfterPush();
+    const id = h.add();
+    await runNext(h.ctx);
+    const sha = h.lastRun(id).commit_sha;
+    g.git(h.fx.repo, ["pull", "--quiet", "--ff-only", "origin", "main"]);
+    h.pushFromUser("later.txt", "later\n");
+    const later = h.originHead();
+    setLive(h, later); // e.g. deployed from the Mac meanwhile
+    writeFileSync(join(h.prod, "allow"), "");
+    expect(await redeploy(h.ctx, id)).toBe("done");
+    expect(h.req(id).status_reason).toBe(`deployed by a later commit that contains ${sha.slice(0, 7)}`);
+    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith(later.slice(0, 7));
+    expect(h.group().lock).toBe("free");
+  });
+
+  test("re-run deploy when the commit is already live: done, no deploy", async () => {
+    const h = blockedAfterPush();
+    const id = h.add();
+    await runNext(h.ctx);
+    const sha = h.lastRun(id).commit_sha;
+    setLive(h, sha);
+    expect(await redeploy(h.ctx, id)).toBe("done");
+    expect(h.req(id).status_reason).toBe("already live");
+  });
+
+  test("re-run deploy that would replace an unrelated live commit is refused", async () => {
+    const h = blockedAfterPush();
+    const id = h.add();
+    await runNext(h.ctx);
+    const sha = h.lastRun(id).commit_sha;
+    g.git(h.fx.repo, ["checkout", "--quiet", "-b", "side", h.initial]);
+    h.fx.write("side.txt", "side\n");
+    const side = h.fx.commit("side branch");
+    setLive(h, side);
+    writeFileSync(join(h.prod, "allow"), "");
+    expect(await redeploy(h.ctx, id)).toBe("blocked_post_push");
+    expect(h.req(id).status_reason).toBe(`prod runs ${side.slice(0, 7)}; deploying ${sha.slice(0, 7)} would roll it back`);
+    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith(side.slice(0, 7));
+    expect(h.group()).toMatchObject({ lock: "blocked", locked_by_request: id });
+  });
+
+  test("a queued re-run deploy is handled before new work, and its flag is cleared (slice 2 review D7)", async () => {
+    const h = blockedAfterPush();
+    const a = h.add();
+    await runNext(h.ctx);
+    const b = h.add();
+    writeFileSync(join(h.prod, "allow"), "");
+    requestRedeploy(h.db, a);
+    expect(h.req(a)).toMatchObject({ status: "blocked_post_push", status_reason: "re-run deploy queued", redeploy_requested: 1 });
+    expect(await runNext(h.ctx)).toEqual({ kind: "ran", requestId: a, status: "done" });
+    expect(h.req(a).redeploy_requested).toBe(0);
+    expect(await runNext(h.ctx)).toEqual({ kind: "ran", requestId: b, status: "done" });
   });
 
   test("a busy remote, or one that can't be checked, refuses the deploy (D18)", async () => {
@@ -386,7 +504,7 @@ describe("runner: drift guard (D5, D10, C1)", () => {
 });
 
 describe("parseVersion", () => {
-  test("reads the SHA and the uncommitted marker", () => {
+  test("reads the SHA and the uncommitted marker", async () => {
     expect(parseVersion("abc1234 2026-10-17 12:00\n")).toEqual({ short: "abc1234", uncommitted: false });
     expect(parseVersion("warning: something\nabc1234+uncommitted 2026-10-17 12:00")).toEqual({ short: "abc1234", uncommitted: true });
     expect(parseVersion("not a version")).toBeNull();
@@ -394,14 +512,14 @@ describe("parseVersion", () => {
 });
 
 describe("checkDeployable (D6)", () => {
-  test("refuses a wrong HEAD and a dirty tree", () => {
+  test("refuses a wrong HEAD and a dirty tree", async () => {
     const fx = makeFixture();
     const wt = join(fx.root, "wt");
-    g.addWorktree(fx.repo, wt, "agentry/1-1", "main");
-    const sha = g.headSha(wt);
-    expect(checkDeployable(wt, sha)).toBeNull();
-    expect(checkDeployable(wt, "0".repeat(40))).toContain("not the pushed");
+    await g.addWorktree(fx.repo, wt, "agentry/1-1", "main");
+    const sha = head(wt);
+    expect(await checkDeployable(wt, sha)).toBeNull();
+    expect(await checkDeployable(wt, "0".repeat(40))).toContain("not the pushed");
     writeFileSync(join(wt, "README.md"), "dirty\n");
-    expect(checkDeployable(wt, sha)).toBe("worktree has uncommitted changes");
+    expect(await checkDeployable(wt, sha)).toBe("worktree has uncommitted changes");
   });
 });

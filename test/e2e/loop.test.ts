@@ -7,7 +7,7 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } f
 import { join } from "node:path";
 import { acquireLease, openDb } from "../../src/db.ts";
 import * as g from "../../src/git.ts";
-import { makeFixture } from "../fixture.ts";
+import { head, makeFixture } from "../fixture.ts";
 
 const CLI = join(import.meta.dir, "../../src/cli.ts");
 
@@ -39,7 +39,7 @@ function setup() {
   const home = join(fx.root, "agentry");
   const prod = join(fx.root, "prod");
   mkdirSync(prod);
-  writeFileSync(join(prod, "VERSION"), `${g.headSha(fx.repo).slice(0, 7)} 2026-10-17 12:00\n`);
+  writeFileSync(join(prod, "VERSION"), `${head(fx.repo).slice(0, 7)} 2026-10-17 12:00\n`);
   const bin = join(fx.root, "claude");
   writeFileSync(bin, FAKE_CLAUDE);
   chmodSync(bin, 0o755);
@@ -76,7 +76,7 @@ function setup() {
 }
 
 describe("agentry CLI, end to end", () => {
-  test("add → run: committed, pushed, deployed; reopen counts a false-done", () => {
+  test("add → run: committed, pushed, deployed; reopen counts a false-done", async () => {
     const h = setup();
     const id = h.add("Add a line", "--body", "Append to main.", "--done-when", "main.txt has a second line");
     expect(h.ok("run", "--once")).toContain(`#${id} → done  (deployed)`);
@@ -92,16 +92,15 @@ describe("agentry CLI, end to end", () => {
     expect(h.ok("list")).toContain("false-done: 1");
   });
 
-  test("a second runner refuses while the lease is live; so does redeploy", () => {
+  test("a second runner refuses while the lease is live", async () => {
     const h = setup();
     acquireLease(h.db, "someone-else", 4242);
     const r = h.cli("run", "--once");
     expect(r.code).toBe(1);
     expect(r.err).toContain("another runner holds the lease (pid 4242");
-    expect(h.cli("redeploy", "1").err).toContain("another runner holds the lease");
   });
 
-  test("needs_info → answer → the answer reaches the next attempt, which finishes", () => {
+  test("needs_info → answer → the answer reaches the next attempt, which finishes", async () => {
     const h = setup();
     const id = h.add("Ambiguous", "--body", "MODE:ask");
     expect(h.ok("run", "--once")).toContain(`#${id} → needs_info  (Which file?)`);
@@ -110,7 +109,7 @@ describe("agentry CLI, end to end", () => {
     expect(h.req(id).attempts).toBe(2);
   });
 
-  test("needs_review → reject cancels; approve resumes on the kept branch and ships the reviewed change", () => {
+  test("needs_review → reject cancels; approve resumes on the kept branch and ships the reviewed change", async () => {
     const h = setup();
     const a = h.add("Touch the readme", "--body", "MODE:outside");
     const b = h.add("Touch the readme too", "--body", "MODE:outside");
@@ -123,7 +122,7 @@ describe("agentry CLI, end to end", () => {
     expect(g.git(h.fx.origin, ["show", "--name-only", "--format=", "main"]).out).toBe("README.md");
   });
 
-  test("blocked_pre_push → retry with a new body runs a new attempt on a new branch", () => {
+  test("blocked_pre_push → retry with a new body runs a new attempt on a new branch", async () => {
     const h = setup();
     const id = h.add("Nothing to do", "--body", "MODE:noop");
     expect(h.ok("run", "--once")).toContain(`#${id} → blocked_pre_push  (the agent made no changes)`);
@@ -132,14 +131,14 @@ describe("agentry CLI, end to end", () => {
     expect(g.git(h.fx.repo, ["rev-parse", "--verify", "--quiet", `agentry/${id}-2`]).code).toBe(0);
   });
 
-  test("a FAIL verdict blocks before push with the verifier's evidence", () => {
+  test("a FAIL verdict blocks before push with the verifier's evidence", async () => {
     const h = setup();
     const id = h.add("Judge me", "--body", "MODE:badverify", "--done-when", "main.txt has the line in section 2");
     expect(h.ok("run", "--once")).toContain(`#${id} → blocked_pre_push  (done-when not met: main.txt is unchanged where it matters)`);
-    expect(h.originHead()).toBe(g.headSha(h.fx.repo));
+    expect(h.originHead()).toBe(head(h.fx.repo));
   });
 
-  test("blocked_post_push blocks the group; redeploy ships it and frees the group for the waiting request", () => {
+  test("blocked_post_push blocks the group; redeploy ships it and frees the group for the waiting request", async () => {
     const h = setup();
     writeFileSync(join(h.prod, "fail"), "");
     const a = h.add("First");
@@ -151,13 +150,16 @@ describe("agentry CLI, end to end", () => {
     expect(h.ok("list")).toContain(`group g1 blocked by #${a}`);
 
     rmSync(join(h.prod, "fail"));
-    expect(h.ok("redeploy", String(a))).toContain(`#${a} → done`);
+    // Queued for the runner, which handles it before the waiting request (slice 2 review D7).
+    acquireLease(h.db, "someone-else", 4242);
+    expect(h.ok("redeploy", String(a))).toContain(`#${a} re-run deploy queued`);
+    h.db.query("UPDATE runner SET owner_token = NULL, lease_expires_at = 0").run();
+    expect(h.ok("run", "--once")).toMatch(new RegExp(`#${a} → done[\\s\\S]*#${b} → done`));
     expect(h.group().lock).toBe("free");
-    expect(h.ok("run", "--once")).toContain(`#${b} → done`);
     expect(h.originHead().startsWith(h.live())).toBe(true);
   });
 
-  test("resolve marks a post-push block done_manual and frees the group", () => {
+  test("resolve marks a post-push block done_manual and frees the group", async () => {
     const h = setup();
     writeFileSync(join(h.prod, "fail"), "");
     const id = h.add("Deploy breaks");
@@ -167,7 +169,7 @@ describe("agentry CLI, end to end", () => {
     expect(h.group()).toMatchObject({ lock: "free", locked_by_request: null });
   });
 
-  test("an infra error requeues without counting and pauses the runner; resume unpauses; cancel ends it", () => {
+  test("an infra error requeues without counting and pauses the runner; resume unpauses; cancel ends it", async () => {
     const h = setup();
     const id = h.add("Out of quota", "--body", "MODE:infra");
     expect(h.ok("run", "--once")).toContain("runner paused: agent: usage limit reached");
@@ -179,7 +181,7 @@ describe("agentry CLI, end to end", () => {
     expect(h.req(id).status).toBe("canceled");
   });
 
-  test("actions refuse requests in the wrong state", () => {
+  test("actions refuse requests in the wrong state", async () => {
     const h = setup();
     const id = h.add("Queued");
     const r = h.cli("approve", String(id));
@@ -190,7 +192,7 @@ describe("agentry CLI, end to end", () => {
     expect(h.cli("answer", "999", "x").err).toContain("no request #999");
   });
 
-  test("token saves a wrapped setup-token token with mode 600 and refuses anything else", () => {
+  test("token saves a wrapped setup-token token with mode 600 and refuses anything else", async () => {
     const h = setup();
     const file = join(h.home, "claude-oauth-token");
     const bad = h.cliIn("pbpaste | tr -d ' \\n' > ~/.agentry/claude-oauth-token\n", "token");
@@ -201,7 +203,7 @@ describe("agentry CLI, end to end", () => {
     expect(statSync(file).mode & 0o777).toBe(0o600);
   });
 
-  test("unblock clears a lock no request holds (drift guard), and only that kind", () => {
+  test("unblock clears a lock no request holds (drift guard), and only that kind", async () => {
     const h = setup();
     h.db.query("UPDATE deploy_groups SET lock = 'blocked', lock_reason = 'prod runs abc1234, not on origin/main'").run();
     h.ok("unblock", "g1");
