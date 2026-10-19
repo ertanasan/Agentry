@@ -153,8 +153,9 @@ try {
 
 # 5. The job's 256 MB memory cap stops a 1 GB allocation; 16 MB under the same cap succeeds.
 try {
-  $small = Sandbox (PsCommand '$a = New-Object byte[] 16MB; exit 0') 256MB 60000
-  $big = Sandbox (PsCommand '$a = New-Object byte[] 1GB; exit 0') 256MB 60000
+  # Stop on the failed allocation: by default PowerShell would go on to "exit 0".
+  $small = Sandbox (PsCommand '$ErrorActionPreference = ''Stop''; $a = New-Object byte[] 16MB; exit 0') 256MB 60000
+  $big = Sandbox (PsCommand '$ErrorActionPreference = ''Stop''; $a = New-Object byte[] 1GB; exit 0') 256MB 60000
   Record 'memory_cap' ($small -eq 'exit=0' -and $big -ne 'exit=0' -and $big -ne $cantStart) "16 MB: $(Describe $small); 1 GB: $(Describe $big)"
 } catch { Record 'memory_cap' $false $_.Exception.Message }
 
@@ -192,10 +193,23 @@ try {
 } catch { Record 'loopback_control_runner' $false $_.Exception.Message }
 
 # 8. SQL Server: AgentrySandbox must not get in with its Windows login (SQL Express listens on a pipe, not 1433).
+# If it does get in, it reports which logins let it in (Windows groups too) and which databases it can open.
+$sqlProbe = @'
+$ErrorActionPreference = 'Stop'
+$c = New-Object System.Data.SqlClient.SqlConnection 'Server=.\SQLEXPRESS;Integrated Security=true;Connect Timeout=10'
+try { $c.Open() } catch { $_.Exception.Message | Out-File 'OUT\sql.txt'; exit 7 }
+$q = $c.CreateCommand()
+$q.CommandText = "SELECT 'as ' + SUSER_NAME() + '; sysadmin=' + CAST(IS_SRVROLEMEMBER('sysadmin') AS varchar(2)) +
+  '; via logins: ' + ISNULL((SELECT name + ' ' FROM sys.login_token WHERE principal_id > 0 FOR XML PATH('')), '-') +
+  '; databases: ' + ISNULL((SELECT name + ' ' FROM sys.databases WHERE HAS_DBACCESS(name) = 1 FOR XML PATH('')), '-')"
+$q.ExecuteScalar() | Out-File 'OUT\sql.txt'
+exit 0
+'@
 try {
-  $r = Sandbox (PsCommand "`$c = New-Object System.Data.SqlClient.SqlConnection 'Server=.\SQLEXPRESS;Integrated Security=true;Connect Timeout=10'; try { `$c.Open(); exit 0 } catch { `$_.Exception.Message | Out-File '$out\sql.txt'; exit 7 }") 0 60000
+  $r = Sandbox (PsCommand $sqlProbe.Replace('OUT', $out)) 0 60000
   $why = if (Test-Path "$out\sql.txt") { "$(Get-Content "$out\sql.txt" -Raw)".Trim() } else { '' }
-  Record 'sql_login_refused_for_sandbox' ($r -eq 'exit=7' -and $why -match 'Login failed') "$(Describe $r); $why"
+  $detail = if ($r -eq 'exit=0') { "the sandbox got in: $why" } else { "$(Describe $r); $why" }
+  Record 'sql_login_refused_for_sandbox' ($r -eq 'exit=7' -and $why -match 'Login failed') $detail
 } catch { Record 'sql_login_refused_for_sandbox' $false $_.Exception.Message }
 
 Remove-Item "$env:USERPROFILE\spike-secret.txt" -ErrorAction SilentlyContinue
