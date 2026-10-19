@@ -129,6 +129,14 @@ describe("guards (slice 2 review D9)", () => {
     expect(csp).toContain("script-src 'self'");
     expect(csp).toContain("frame-ancestors 'none'");
   });
+
+  test("pages link the icons, before sign-in too", async () => {
+    const h = await setup();
+    const login = await (await h.call("/login")).text();
+    expect(login).toContain('<link rel="icon" href="/static/icon.svg"');
+    expect(login).toContain('<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">');
+    expect((await h.call("/static/apple-touch-icon.png")).headers.get("content-type")).toBe("image/png");
+  });
 });
 
 describe("actions", () => {
@@ -207,9 +215,9 @@ describe("escaping (slice 2 review Q1)", () => {
 });
 
 describe("static files", () => {
-  test("htmx and the WebAuthn browser bundle are served from node_modules", async () => {
+  test("htmx, the WebAuthn browser bundle and the icons are served", async () => {
     const h = await setup();
-    for (const p of ["/static/htmx.js", "/static/webauthn.js", "/static/app.js"]) {
+    for (const p of ["/static/htmx.js", "/static/webauthn.js", "/static/app.js", "/static/icon.svg", "/static/apple-touch-icon.png"]) {
       const r = await h.call(p);
       expect(r.status).toBe(200);
       expect((await r.text()).length).toBeGreaterThan(100);

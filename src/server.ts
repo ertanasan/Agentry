@@ -33,10 +33,13 @@ const LOGIN_COOKIE = "agentry_login";
 export type ServerOptions = { db: Database; home: string; port?: number; publicUrl?: string };
 
 const modules = join(import.meta.dir, "..", "node_modules");
+const assets = join(import.meta.dir, "..", "static");
 const STATIC: Record<string, { path?: string; body?: string; type: string }> = {
   "/static/htmx.js": { path: join(modules, "htmx.org", "dist", "htmx.min.js"), type: "text/javascript" },
   "/static/webauthn.js": { path: join(modules, "@simplewebauthn", "browser", "dist", "bundle", "index.umd.min.js"), type: "text/javascript" },
   "/static/app.js": { body: APP_JS, type: "text/javascript" },
+  "/static/icon.svg": { path: join(assets, "icon.svg"), type: "image/svg+xml" },
+  "/static/apple-touch-icon.png": { path: join(assets, "apple-touch-icon.png"), type: "image/png" },  // iOS home screen
 };
 
 const SECURITY_HEADERS = {
