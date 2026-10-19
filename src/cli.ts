@@ -13,7 +13,10 @@ import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import * as A from "./actions.ts";
 import { claudeAgent, resolveAuth } from "./adapters/claude.ts";
-import { acquireLease, LeaseLost, openDb, releaseLease, runnerRow, startHeartbeat } from "./db.ts";
+import { acquireLease, asActor, LeaseLost, openDb, releaseLease, runnerRow, startHeartbeat } from "./db.ts";
+import { addUser, AuthError, resetUser } from "./accounts.ts";
+import { backupIfDue, runBackup } from "./backup.ts";
+import { DEFAULT_PORT, startServer } from "./server.ts";
 import { parseRecipe } from "./recipe.ts";
 import { recover, resolvePushUnknown, unresolvedPushes } from "./recovery.ts";
 import { runNext, type RunnerCtx } from "./runner.ts";
@@ -36,7 +39,14 @@ const USAGE = `usage: agentry <command>
   reopen <id> <what's wrong>         done → a new linked request (counts one false-done)
   unblock <group>                    clear a deploy group's lock that no request holds (drift guard)
   resume                             unpause the runner
-  token                              save a \`claude setup-token\` token for subscription auth (paste, then Ctrl-D)`;
+  token                              save a \`claude setup-token\` token for subscription auth (paste, then Ctrl-D)
+  serve                              the web UI on 127.0.0.1:$AGENTRY_PORT (default 4747), with nightly backups
+  user add <name> [--owner]          create a web UI account; prints a one-time passkey link (30 min)
+  user reset <name>                  revoke a user's passkeys and sessions; prints a new link
+  backup                             back up the database and agentry/* branches now
+
+Environment: AGENTRY_HOME (default ~/.agentry), AGENTRY_PUBLIC_URL (e.g. https://agentry.example.com; default
+http://localhost:<port>), AGENTRY_PORT, AGENTRY_BACKUP_DIR (default $AGENTRY_HOME/backups), AGENTRY_CLAUDE_BIN, AGENTRY_MODEL.`;
 
 class CliError extends Error {}
 const fail = (msg: string): never => { throw new CliError(msg); };
@@ -49,6 +59,7 @@ function main(argv: string[]): Promise<number> | number {
     options: {
       body: { type: "string" }, "done-when": { type: "string" }, "done-when-test": { type: "string" },
       priority: { type: "string" }, once: { type: "boolean" }, all: { type: "boolean" }, help: { type: "boolean", short: "h" },
+      owner: { type: "boolean" },
     },
   });
   if (!cmd || o.help) { console.log(USAGE); return cmd ? 0 : 1; }
@@ -57,6 +68,8 @@ function main(argv: string[]): Promise<number> | number {
   const id = () => Number(args[0]) || fail(`${cmd} needs a request id`);
   const text = (what: string) => args.slice(1).join(" ") || fail(`${cmd} needs ${what}`);
 
+  return cmd === "run" || cmd === "serve" ? dispatch() : asActor("cli", dispatch);
+  function dispatch(): Promise<number> | number {
   switch (cmd) {
     case "project": return projectAdd(db, args);
     case "add": return add(db, args, o);
@@ -81,8 +94,12 @@ function main(argv: string[]): Promise<number> | number {
     }
     case "unblock": A.unblock(db, args[0] ?? fail("unblock needs a group name")); return 0;
     case "token": return saveToken();
+    case "serve": return serve(db);
+    case "user": return userCmd(db, args, !!o.owner);
+    case "backup": return backupNow(db);
     case "resume": A.resume(db); return 0;
     default: return fail(`unknown command "${cmd}"\n${USAGE}`);
+  }
   }
 }
 
@@ -223,6 +240,44 @@ function run(db: Database, once: boolean): Promise<number> {
       await Bun.sleep(POLL_MS);
     }
   });
+}
+
+const port = Number(process.env.AGENTRY_PORT) || DEFAULT_PORT;
+const publicUrl = () => process.env.AGENTRY_PUBLIC_URL || `http://localhost:${port}`;
+const backupDir = () => process.env.AGENTRY_BACKUP_DIR || join(home, "backups");
+
+// The web UI; also runs the nightly backup (at start when due, then checked every hour).
+async function serve(db: Database): Promise<number> {
+  const { url } = startServer({ db, home, port, publicUrl: publicUrl() });
+  console.log(`agentry: web UI on 127.0.0.1:${port} for ${url}`);
+  const backup = async () => {
+    const r = await backupIfDue(db, home, backupDir());
+    if (r) console.log(r.ok ? `backup: ${r.file}${r.bundles.length ? ` + ${r.bundles.length} bundle(s)` : ""}` : `backup failed: ${r.error}`);
+  };
+  await backup();
+  setInterval(backup, 3600_000);
+  await new Promise(() => {}); // until the service stops it
+  return 0;
+}
+
+function userCmd(db: Database, args: string[], owner: boolean): number {
+  const [sub, name] = args;
+  if (!name || (sub !== "add" && sub !== "reset")) fail("usage: agentry user add <name> [--owner] | agentry user reset <name>");
+  try {
+    const code = sub === "add" ? addUser(db, name, owner ? "owner" : "admin") : resetUser(db, name);
+    console.log(`Open this on the device that will hold ${name}'s passkey (valid 30 minutes, once):\n${publicUrl()}/register/${code}`);
+  } catch (e) {
+    if (e instanceof AuthError) fail(e.message);
+    throw e;
+  }
+  return 0;
+}
+
+async function backupNow(db: Database): Promise<number> {
+  const r = await runBackup(db, home, backupDir());
+  if (!r.ok) fail(`backup failed: ${r.error}`);
+  if (r.ok) console.log(`backup: ${r.file}${r.bundles.length ? `\n${r.bundles.join("\n")}` : ""}`);
+  return 0;
 }
 
 try {

@@ -76,6 +76,22 @@ CREATE TABLE IF NOT EXISTS events (
 export const MIGRATIONS: string[] = [
   // 1: Re-run deploy is queued for the runner instead of taking the lease (slice 2 review D7).
   "ALTER TABLE requests ADD COLUMN redeploy_requested INTEGER NOT NULL DEFAULT 0",
+  // 2: accounts for the web UI: passkeys, sessions, one-time registration links, login challenges; the acting
+  // user on audit events (winhost design "Accounts and login").
+  `CREATE TABLE users (
+     id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, role TEXT NOT NULL CHECK (role IN ('owner', 'admin')),
+     webauthn_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, disabled INTEGER NOT NULL DEFAULT 0);
+   CREATE TABLE credentials (
+     id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), public_key BLOB NOT NULL,
+     counter INTEGER NOT NULL, transports TEXT, device TEXT, created_at INTEGER NOT NULL, last_used_at INTEGER);
+   CREATE TABLE sessions (
+     token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), device TEXT,
+     created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
+   CREATE TABLE registrations (
+     code_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL,
+     used_at INTEGER, challenge TEXT);
+   CREATE TABLE challenges (id_hash TEXT PRIMARY KEY, challenge TEXT NOT NULL, expires_at INTEGER NOT NULL);
+   ALTER TABLE events ADD COLUMN actor TEXT;`,
 ];
 
 export function openDb(path: string): Database {
@@ -131,9 +147,20 @@ export function fenced<T>(db: Database, token: string, write: () => T): T {
   })();
 }
 
+// Who is acting, for the audit log: "user:<name>" from the web UI, "cli" from the terminal, null for the runner.
+const audit: { actor: string | null } = { actor: null };
+
+// Runs a synchronous block with `actor` recorded on every event it logs. Actions are synchronous, so two web
+// requests can never interleave inside one.
+export function asActor<T>(actor: string, block: () => T): T {
+  const before = audit.actor;
+  audit.actor = actor;
+  try { return block(); } finally { audit.actor = before; }
+}
+
 export function logEvent(db: Database, requestId: number | null, type: string, payload: unknown = null, now = Date.now()): void {
-  db.query("INSERT INTO events (ts, request_id, type, payload) VALUES (?, ?, ?, ?)")
-    .run(now, requestId, type, payload === null ? null : JSON.stringify(payload));
+  db.query("INSERT INTO events (ts, request_id, type, payload, actor) VALUES (?, ?, ?, ?, ?)")
+    .run(now, requestId, type, payload === null ? null : JSON.stringify(payload), audit.actor);
 }
 
 export function setRequestStatus(db: Database, id: number, status: RequestStatus, reason: string | null = null, now = Date.now()): void {
