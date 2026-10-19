@@ -11,7 +11,7 @@
 // `result` event decides: is_error, a crash without a result, or a timeout is infra_error.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { runStep } from "../proc.ts";
+import { readTail, runStep } from "../proc.ts";
 import { AGENTRY_HOME, KEY_HELPER } from "../sandbox.ts";
 import type { Agent, StepIO } from "./types.ts";
 
@@ -39,7 +39,8 @@ type ResultEvent = { type: "result"; is_error?: boolean; subtype?: string; resul
 
 const AGENT_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"];
 
-const shq = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
+// The final `result` event is the last line of the stream-json log; this much of the tail always holds it.
+const RESULT_TAIL_BYTES = 4 * 1024 * 1024;
 
 export async function callClaude(o: ClaudeOptions, io: StepIO, prompt: string, tools: string[], mode: "bypassPermissions" | "dontAsk"): Promise<Reply> {
   const promptFile = join(io.sandbox.env.TMPDIR, `prompt-${process.hrtime.bigint()}.txt`);
@@ -53,11 +54,11 @@ export async function callClaude(o: ClaudeOptions, io: StepIO, prompt: string, t
     "--tools", tools.join(","), "--permission-mode", mode, ...(o.model ? ["--model", o.model] : []),
   ];
   const env = auth.kind === "subscription" ? { ...io.sandbox.env, CLAUDE_CODE_OAUTH_TOKEN: auth.token } : io.sandbox.env;
-  const r = await runStep(`${argv.map(shq).join(" ")} < ${shq(promptFile)}`, {
-    cwd: io.worktree, logPath: io.logPath, timeoutMs: io.timeoutMs, wrap: io.sandbox.wrap, env, onStart: io.onStart,
+  const r = await runStep(argv, {
+    cwd: io.worktree, logPath: io.logPath, timeoutMs: io.timeoutMs, wrap: io.sandbox.wrap, env, onStart: io.onStart, stdinPath: promptFile,
   });
   if (r.timedOut) return { ok: false, detail: `claude timed out after ${Math.round(io.timeoutMs / 1000)} s` };
-  const result = lastResult(readFileSync(io.logPath, "utf8"));
+  const result = lastResult(readTail(io.logPath, RESULT_TAIL_BYTES));
   if (!result) return { ok: false, detail: `claude exited ${r.exitCode} without a result` };
   if (result.is_error) return { ok: false, detail: result.result || result.subtype || "error" };
   return { ok: true, text: result.result ?? "" };

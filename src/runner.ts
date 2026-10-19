@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { fenced, LeaseLost, LEASE_TTL_MS, runnerRow, setRequestStatus, type PushState, type RequestStatus } from "./db.ts";
 import * as g from "./git.ts";
 import { countRegression, inspect, type Flag } from "./inspect.ts";
-import { runStep, type StepResult } from "./proc.ts";
+import { readTail, runStep, type StepResult } from "./proc.ts";
 import { parseRecipe, timeoutMs, type Recipe, type StepName, type Target } from "./recipe.ts";
 import { namedTestPassed, parseTrx, type TestRun } from "./results/trx.ts";
 import { sandbox } from "./sandbox.ts";
@@ -413,10 +413,13 @@ async function driftGuard(j: Job): Promise<string | null> {
 
 type LiveVersion = { sha: string; short: string; uncommitted: boolean } | { error: string };
 
+// A live_version_cmd prints one short line; its log is never read whole (winhost review D15).
+const VERSION_TAIL_BYTES = 64 * 1024;
+
 async function liveVersion(j: Job, t: Target): Promise<LiveVersion> {
   const r = await command(j, "version", t.live_version_cmd, { cwd: j.dir });
   if (r.exitCode !== 0) return { error: `live_version_cmd exited ${r.exitCode}` };
-  const v = parseVersion(r.log);
+  const v = parseVersion(readTail(r.logPath, VERSION_TAIL_BYTES));
   if (!v) return { error: "no VERSION line in the output" };
   const sha = g.resolveCommit(j.repo, v.short);
   if (!sha) return { error: `unknown or ambiguous commit ${v.short}` };
@@ -450,12 +453,12 @@ function begin(j: Job, name: string) {
   };
 }
 
-async function command(j: Job, name: string, cmd: string, o: { sandboxed?: boolean; cwd?: string; timeout?: StepName }): Promise<StepResult & { log: string }> {
+async function command(j: Job, name: string, cmd: string, o: { sandboxed?: boolean; cwd?: string; timeout?: StepName }): Promise<StepResult & { logPath: string }> {
   const s = begin(j, name);
   const r = await runStep(cmd, {
     cwd: o.cwd ?? j.wt, logPath: s.logPath, timeoutMs: timeoutMs(j.recipe, o.timeout ?? (name as StepName)),
     wrap: o.sandboxed ? j.sbx!.wrap : undefined, env: o.sandboxed ? j.sbx!.env : undefined, onStart: s.onStart,
   });
   s.end(r.exitCode);
-  return { ...r, log: readFileSync(s.logPath, "utf8") };
+  return { ...r, logPath: s.logPath };
 }
