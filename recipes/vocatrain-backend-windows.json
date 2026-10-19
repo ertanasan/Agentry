@@ -1,0 +1,38 @@
+{
+  "_comment": [
+    "VocaTrain_backend on winhost: the slice 1 recipe (vocatrain-backend.json) with a local deploy instead of ssh from the Mac. The deploy publishes the API and the web app, so VocaTrain_web shares the vt-server group.",
+    "Runs on winhost's Windows runner (slice 2c), from the runner's own clone. Commands run in PowerShell (the recipe's shell field, read by the Windows platform in T7), so they avoid && (Windows PowerShell 5.1 lacks it).",
+    "deploy-local-winhost.ps1 publishes and installs on winhost itself, holding C:\\Sites\\_locks\\staging.lock, the lock deploy-prod-winhost.sh takes from the Mac over ssh. remote_busy_cmd checks that lock: exit 0 = a deploy holds it, 1 = free (D18).",
+    "live_version_cmd uses type, which reads the file in both PowerShell and cmd."
+  ],
+  "repo": "C:\\Agentry\\runner\\repos\\VocaTrain",
+  "shell": "powershell",
+  "deploy_group": "vt-server",
+  "scope_path": "VocaTrain_backend/",
+  "build_cmd": "dotnet build VocaTrain_backend/VocaTrain.WN.Api -c Release -nologo -v q; if ($LASTEXITCODE) { exit $LASTEXITCODE }; dotnet build VocaTrain_web/VocaTrain.WN.Web -c Release -nologo -v q",
+  "test_cmd": "dotnet test VocaTrain_backend/VocaTrain.WN.Core.Tests -nologo --logger 'trx;LogFileName=agentry.trx' --results-directory TestResults",
+  "test_result_file": "TestResults/agentry.trx",
+  "deploy_cmd": "powershell -NoProfile -ExecutionPolicy Bypass -File VocaTrain_backend/deploy-local-winhost.ps1",
+  "targets": [
+    {
+      "name": "winhost-api",
+      "live_version_cmd": "type C:\\Sites\\VocaTrain.Api\\current\\VERSION"
+    },
+    {
+      "name": "winhost-web",
+      "live_version_cmd": "type C:\\Sites\\VocaTrain.Web\\current\\VERSION"
+    }
+  ],
+  "remote_busy_cmd": "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File VocaTrain_backend/.tools/winhost/staging-lock.ps1 -Check",
+  "test_globs": [
+    "VocaTrain_backend/VocaTrain.WN.Core.Tests/**"
+  ],
+  "skip_patterns": [
+    "Skip\\s*=",
+    "Assert\\.Skip",
+    "Skip\\.(If|IfNot)\\("
+  ],
+  "timeouts_s": {
+    "deploy": 1200
+  }
+}
