@@ -28,6 +28,19 @@ describe("inspect", () => {
     expect(kinds(inspect([{ status: "M", path }], new Map(), recipe))).toContain("build_file");
   });
 
+  test.each([
+    "VocaTrain_backend/directory.build.TARGETS", "VocaTrain_backend/NUGET.CONFIG", "VocaTrain_backend/Api/Foo.CSPROJ",
+    "VocaTrain_backend/DIRECTORY.PACKAGES.PROPS", "VocaTrain_backend/Run.SH",
+  ])("build file %s needs review whatever its case (case-insensitive file systems)", (path) => {
+    expect(kinds(inspect([{ status: "M", path }], new Map(), recipe))).toContain("build_file");
+  });
+
+  test("gate paths, test globs and the scope match whatever the case", () => {
+    expect(kinds(inspect([{ status: "M", path: "VOCATRAIN_BACKEND/AGENTRY.JSON" }], new Map(), recipe))).toEqual(["gate_path"]);
+    expect(kinds(inspect([{ status: "D", path: "VocaTrain_backend/core.tests/ReminderTests.CS" }], new Map(), recipe))).toEqual(["test_deleted"]);
+    expect(inspect([{ status: "M", path: "vocatrain_backend/Api/Reminder.cs" }], new Map(), recipe).blocking).toEqual([]);
+  });
+
   test("recipe gate paths need review", () => {
     expect(kinds(inspect([{ status: "M", path: "VocaTrain_backend/agentry.json" }], new Map(), recipe))).toEqual(["gate_path"]);
   });

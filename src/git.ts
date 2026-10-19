@@ -1,12 +1,51 @@
 // Git operations the runner needs. Everything works on worktrees under ~/.agentry/worktrees; the user's own
 // checkout is never checked out, reset or committed to.
+//
+// Sandboxed steps can write the whole worktree, including its `.git` pointer file. Git run unsandboxed in a
+// worktree would follow a rewritten pointer to a git dir of the agent's making, whose config (core.fsmonitor,
+// filter drivers, hooksPath) it then executes. So every worktree is pinned when Agentry creates it: git in a
+// pinned worktree gets its real git dir and work tree on the command line and never reads `.git`, and
+// fsmonitor and hooks are off (push keeps the repository's own hooks, e.g. git-lfs pre-push, which live in the
+// shared git dir the sandbox can only read). The runner also stops a run whose pointer changed (eng review D12).
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 export type GitResult = { code: number; out: string; err: string };
 
+type Pin = { gitDir: string; pointer: string };
+const pinned = new Map<string, Pin>();
+let noHooks: string | undefined;
+
+function pinnedArgs(cwd: string, args: string[]): string[] {
+  const pin = pinned.get(cwd);
+  if (!pin) return args;
+  noHooks ??= mkdtempSync(join(tmpdir(), "agentry-no-hooks-"));
+  const hooks = args[0] === "push" ? [] : ["-c", `core.hooksPath=${noHooks}`];
+  return [`--git-dir=${pin.gitDir}`, `--work-tree=${cwd}`, "-c", "core.fsmonitor=false", ...hooks, ...args];
+}
+
 export function git(cwd: string, args: string[]): GitResult {
-  const p = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  const p = Bun.spawnSync(["git", ...pinnedArgs(cwd, args)], { cwd, stdout: "pipe", stderr: "pipe" });
   return { code: p.exitCode ?? 1, out: p.stdout.toString().trim(), err: p.stderr.toString().trim() };
+}
+
+function readPointer(wt: string): string | null {
+  try { return readFileSync(join(wt, ".git"), "utf8"); } catch { return null; }
+}
+
+// Records a worktree Agentry just created, before any sandboxed step has run in it.
+function pin(wt: string): void {
+  const pointer = readPointer(wt);
+  const m = pointer?.match(/^gitdir: (.+)$/m);
+  if (!pointer || !m) throw new Error(`worktree ${wt} has no gitdir pointer`);
+  pinned.set(wt, { gitDir: m[1].trim(), pointer });
+}
+
+// True when a pinned worktree's `.git` is no longer what Agentry wrote (replaced, edited, turned into a folder).
+export function pointerChanged(wt: string): boolean {
+  const pin = pinned.get(wt);
+  return !pin || readPointer(wt) !== pin.pointer;
 }
 
 function must(cwd: string, args: string[]): string {
@@ -30,16 +69,19 @@ export function headSha(cwd: string): string {
 // New worktree on a new branch starting at `start`.
 export function addWorktree(repo: string, path: string, branch: string, start: string): void {
   must(repo, ["worktree", "add", "--quiet", "-B", branch, path, start]);
+  pin(path);
 }
 
 // Worktree for an existing branch (resume after needs_review, retry from a kept branch, redeploy).
 export function checkoutWorktree(repo: string, path: string, branch: string): void {
   must(repo, ["worktree", "add", "--quiet", path, branch]);
+  pin(path);
 }
 
 // Worktree at an exact commit, for re-running a deploy.
 export function detachedWorktree(repo: string, path: string, sha: string): void {
   must(repo, ["worktree", "add", "--quiet", "--detach", path, sha]);
+  pin(path);
 }
 
 // The repository's shared git dir, where the worktrees' metadata lives.
@@ -58,7 +100,10 @@ export function diff(cwd: string, base: string, head: string): string {
 }
 
 export function removeWorktree(repo: string, path: string): void {
+  pinned.delete(path);
   git(repo, ["worktree", "remove", "--force", path]);
+  // git refuses to remove a worktree whose `.git` no longer points back (a tampered pointer): delete it anyway.
+  if (existsSync(path)) rmSync(path, { recursive: true, force: true });
   git(repo, ["worktree", "prune"]);
 }
 

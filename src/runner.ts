@@ -200,7 +200,7 @@ async function pipeline(j: Job, resumed: boolean): Promise<Stop> {
   });
 
   if (!resumed) {
-    const stopped = await agentStep(j);
+    const stopped = (await agentStep(j)) ?? tampered(j, "agent");
     if (stopped) return stopped;
     const candidate = g.candidateCommit(j.wt, `agentry: candidate for #${j.req.id}`);
     if (!candidate) return pre("the agent made no changes");
@@ -249,11 +249,15 @@ async function gates(j: Job, approved: boolean): Promise<Stop | null> {
 
   if (recipe.build_cmd) {
     const b = await command(j, "build", recipe.build_cmd, { sandboxed: true });
+    const t = tampered(j, "build");
+    if (t) return t;
     if (b.exitCode !== 0) return pre(b.timedOut ? "build timed out" : `build failed (exit ${b.exitCode})`);
   }
   const resultFile = recipe.test_result_file ? join(j.wt, recipe.test_result_file) : null;
   if (resultFile) rmSync(resultFile, { force: true });
   const t = await command(j, "test", recipe.test_cmd, { sandboxed: true });
+  const changed = tampered(j, "test");
+  if (changed) return changed;
   if (t.exitCode !== 0) return pre(t.timedOut ? "tests timed out" : `tests failed (exit ${t.exitCode})`);
   if (!g.trackedClean(j.wt)) return pre("the tests changed tracked files");
 
@@ -283,10 +287,17 @@ async function gates(j: Job, approved: boolean): Promise<Stop | null> {
       title: req.title, body: req.body, doneWhen: req.done_when, diff: g.diff(j.wt, j.base, head), testSummary: summary(run, t),
     });
     s.end(v.verdict === "PASS" ? 0 : 1);
+    const changed = tampered(j, "verify");
+    if (changed) return changed;
     if (v.verdict === "infra_error") return infra(`verifier: ${v.evidence}`);
     if (v.verdict === "FAIL") return pre(`done-when not met: ${v.evidence}`);
   }
   return null;
+}
+
+// A sandboxed step rewrote the worktree's `.git` pointer: stop before any unsandboxed git runs there (D12).
+function tampered(j: Job, step: string): Stop | null {
+  return g.pointerChanged(j.wt) ? pre(`worktree git metadata changed during the ${step} step`) : null;
 }
 
 function describe(flags: Flag[]): string {

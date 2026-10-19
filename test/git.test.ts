@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { chmodSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as g from "../src/git.ts";
 import { makeFixture } from "./fixture.ts";
@@ -91,5 +91,55 @@ describe("git ops", () => {
     expect(g.resolveCommit(fx.repo, "deadbee")).toBeNull();
     expect(g.resolveCommit(fx.repo, "HEAD")).toBeNull();
     expect(g.isAncestor(fx.repo, full, "origin/main")).toBe(true);
+  });
+});
+
+describe("pinned worktrees (D12)", () => {
+  // What a sandboxed agent could do: make its own git dir whose config runs code, and point `.git` at it.
+  function plantEvilGitDir(root: string, wt: string): string {
+    const marker = join(root, "PWNED");
+    const evil = join(root, "evil");
+    g.git(root, ["init", "--quiet", evil]);
+    const hook = join(root, "fsmonitor.sh");
+    writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\n`);
+    chmodSync(hook, 0o755);
+    g.git(evil, ["config", "core.fsmonitor", hook]);
+    g.git(evil, ["config", "filter.evil.clean", `sh -c 'touch "${marker}"; cat'`]);
+    writeFileSync(join(wt, ".gitattributes"), "* filter=evil\n");
+    writeFileSync(join(wt, ".git"), `gitdir: ${join(evil, ".git")}\n`);
+    return marker;
+  }
+
+  test("a rewritten .git pointer cannot make Agentry's git run the agent's config", () => {
+    const fx = makeFixture();
+    const wt = join(fx.root, "wt");
+    g.addWorktree(fx.repo, wt, "agentry/1-1", "main");
+    expect(g.pointerChanged(wt)).toBe(false);
+    writeFileSync(join(wt, "x.txt"), "x\n");
+    const marker = plantEvilGitDir(fx.root, wt);
+    expect(g.pointerChanged(wt)).toBe(true);
+
+    const sha = g.candidateCommit(wt, "candidate");
+    expect(g.trackedClean(wt)).toBe(true);
+    expect(existsSync(marker)).toBe(false);
+    // The commit landed on the real branch in the real repository, not in the agent's git dir.
+    expect(g.git(fx.repo, ["rev-parse", "agentry/1-1"]).out).toBe(sha!);
+    expect(g.git(fx.repo, ["show", "--name-only", "--format=", sha!]).out.split("\n").sort()).toEqual([".gitattributes", "x.txt"]);
+  });
+
+  test("a worktree with a tampered pointer is still removed and pruned", () => {
+    const fx = makeFixture();
+    const wt = join(fx.root, "wt");
+    g.addWorktree(fx.repo, wt, "agentry/1-1", "main");
+    writeFileSync(join(wt, ".git"), "gitdir: /nonexistent\n");
+    g.removeWorktree(fx.repo, wt);
+    expect(existsSync(wt)).toBe(false);
+    expect(g.git(fx.repo, ["worktree", "list", "--porcelain"]).out.match(/^worktree /gm)).toHaveLength(1);
+  });
+
+  test("an unpinned path (the user's checkout) is not affected", () => {
+    const fx = makeFixture();
+    expect(g.pointerChanged(fx.repo)).toBe(true); // never pinned
+    expect(g.headSha(fx.repo)).toMatch(/^[0-9a-f]{40}$/);
   });
 });

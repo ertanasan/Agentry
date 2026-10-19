@@ -108,6 +108,24 @@ describe("runner: through to done", () => {
 });
 
 describe("runner: agent outcomes", () => {
+  test("an agent that rewrites the worktree's .git pointer → blocked_pre_push, nothing committed or pushed (D12)", async () => {
+    const h = setup({ agent: (wt) => { editMain(wt); writeFileSync(join(wt, ".git"), "gitdir: /tmp/agent-owned/.git\n"); } });
+    const id = h.add();
+    await runNext(h.ctx);
+    expect(h.req(id)).toMatchObject({ status: "blocked_pre_push", status_reason: "worktree git metadata changed during the agent step" });
+    expect(h.lastRun(id).candidate_sha).toBeNull();
+    expect(h.originHead()).toBe(h.initial);
+    expect(h.worktrees()).toEqual([]);
+  });
+
+  test("a test step that rewrites the pointer is caught too", async () => {
+    const h = setup({ recipe: { test_cmd: "printf 'gitdir: /tmp/x\\n' > .git" } });
+    const id = h.add();
+    await runNext(h.ctx);
+    expect(h.req(id)).toMatchObject({ status: "blocked_pre_push", status_reason: "worktree git metadata changed during the test step" });
+    expect(h.originHead()).toBe(h.initial);
+  });
+
   test("needs_info stops with the question; the answer reaches the next attempt's prompt", async () => {
     const h = setup({ agent: () => ({ outcome: "needs_info", question: "Which endpoint?" }) });
     const id = h.add();

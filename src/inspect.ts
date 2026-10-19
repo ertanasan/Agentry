@@ -6,7 +6,9 @@ import { BUILD_FILE_GLOBS, type Recipe } from "./recipe.ts";
 export type Flag = { kind: "out_of_scope" | "gate_path" | "build_file" | "test_deleted" | "test_skipped" | "test_added"; path: string; detail?: string };
 export type Inspection = { blocking: Flag[]; info: Flag[] };
 
-const matches = (globs: string[], path: string) => globs.some((g) => new Bun.Glob(g).match(path));
+// Case-insensitive: APFS and NTFS are case-insensitive by default, so MSBuild and NuGet pick up
+// directory.build.props or NUGET.CONFIG as well as the canonical names.
+const matches = (globs: string[], path: string) => globs.some((g) => new Bun.Glob(g.toLowerCase()).match(path.toLowerCase()));
 
 export function inspect(changes: FileChange[], added: Map<string, string[]>, recipe: Recipe): Inspection {
   const blocking: Flag[] = [];
@@ -15,7 +17,7 @@ export function inspect(changes: FileChange[], added: Map<string, string[]>, rec
   const skips = (recipe.skip_patterns ?? []).map((p) => new RegExp(p));
 
   for (const { status, path } of changes) {
-    if (!path.startsWith(recipe.scope_path)) blocking.push({ kind: "out_of_scope", path });
+    if (!path.toLowerCase().startsWith(recipe.scope_path.toLowerCase())) blocking.push({ kind: "out_of_scope", path });
     if (matches(recipe.gate_paths ?? [], path)) blocking.push({ kind: "gate_path", path });
     if (matches(BUILD_FILE_GLOBS, path)) blocking.push({ kind: "build_file", path });
     if (matches(tests, path)) {
