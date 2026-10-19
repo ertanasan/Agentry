@@ -196,8 +196,8 @@ describe("agentry CLI, end to end", () => {
     const bad = h.cliIn("pbpaste | tr -d ' \\n' > ~/.agentry/claude-oauth-token\n", "token");
     expect(bad.code).toBe(1);
     expect(bad.err).toContain("nothing saved");
-    expect(h.cliIn("sk-ant-oat01-first-half-\n EbtrEAAA\n", "token").out).toContain("saved 32 characters");
-    expect(readFileSync(file, "utf8")).toBe("sk-ant-oat01-first-half-EbtrEAAA\n");
+    expect(h.cliIn("sk-ant-oat01-first-half-\n WRAPTAIL\n", "token").out).toContain("saved 32 characters");
+    expect(readFileSync(file, "utf8")).toBe("sk-ant-oat01-first-half-WRAPTAIL\n");
     expect(statSync(file).mode & 0o777).toBe(0o600);
   });
 

@@ -157,8 +157,8 @@ describe("subscription auth", () => {
     expect(resolveAuth(tokenFile, "/k/helper")).toEqual({ kind: "api_key", keyHelper: "/k/helper" });
     writeFileSync(tokenFile, "sk-ant-oat-abc\n");
     expect(resolveAuth(tokenFile, "/k/helper")).toEqual({ kind: "subscription", token: "sk-ant-oat-abc" });
-    writeFileSync(tokenFile, "sk-ant-oat01-first-half-\n EbtrEAAA\n");
-    expect(resolveAuth(tokenFile)).toEqual({ kind: "subscription", token: "sk-ant-oat01-first-half-EbtrEAAA" });
+    writeFileSync(tokenFile, "sk-ant-oat01-first-half-\n WRAPTAIL\n");
+    expect(resolveAuth(tokenFile)).toEqual({ kind: "subscription", token: "sk-ant-oat01-first-half-WRAPTAIL" });
     writeFileSync(tokenFile, "\n");
     expect(() => resolveAuth(tokenFile)).toThrow("is empty");
   });
