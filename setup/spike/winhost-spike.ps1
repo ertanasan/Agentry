@@ -20,12 +20,47 @@ $rule = 'Agentry spike: block sandbox user'
 $task = 'AgentrySpike'
 $pw = { -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ }) + '!a9' }
 
+# User rights ("Log on as a batch job" and, for T7's services, "Log on as a service") through the LSA API; Windows has
+# no cmdlet for them. Ordinary Users lack the batch right by default, and a task running as a user needs it.
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+public static class UserRight {
+  [StructLayout(LayoutKind.Sequential)] struct LSA_STRING { public ushort Length, MaximumLength; public IntPtr Buffer; }
+  [StructLayout(LayoutKind.Sequential)] struct OBJECT_ATTRIBUTES { public int Length; public IntPtr RootDirectory, ObjectName; public uint Attributes; public IntPtr SecurityDescriptor, SecurityQualityOfService; }
+  [DllImport("advapi32.dll")] static extern uint LsaOpenPolicy(IntPtr system, ref OBJECT_ATTRIBUTES attrs, uint access, out IntPtr handle);
+  [DllImport("advapi32.dll")] static extern uint LsaAddAccountRights(IntPtr policy, byte[] sid, LSA_STRING[] rights, uint count);
+  [DllImport("advapi32.dll")] static extern uint LsaRemoveAccountRights(IntPtr policy, byte[] sid, bool all, LSA_STRING[] rights, uint count);
+  [DllImport("advapi32.dll")] static extern uint LsaClose(IntPtr handle);
+  [DllImport("advapi32.dll")] static extern int LsaNtStatusToWinError(uint status);
+  public static void Grant(string sid, string right) { Change(sid, right, true); }
+  public static void Revoke(string sid, string right) { Change(sid, right, false); }
+  static void Change(string sidText, string right, bool add) {
+    var sid = new SecurityIdentifier(sidText);
+    var bytes = new byte[sid.BinaryLength]; sid.GetBinaryForm(bytes, 0);
+    var attrs = new OBJECT_ATTRIBUTES(); attrs.Length = Marshal.SizeOf(attrs);
+    IntPtr policy;
+    uint status = LsaOpenPolicy(IntPtr.Zero, ref attrs, 0x00000811, out policy); // view local info, create account, lookup names
+    if (status != 0) throw new Exception("LsaOpenPolicy failed: " + LsaNtStatusToWinError(status));
+    var name = new LSA_STRING(); name.Buffer = Marshal.StringToHGlobalUni(right);
+    name.Length = (ushort)(right.Length * 2); name.MaximumLength = (ushort)(name.Length + 2);
+    try {
+      status = add ? LsaAddAccountRights(policy, bytes, new[] { name }, 1) : LsaRemoveAccountRights(policy, bytes, false, new[] { name }, 1);
+      if (status != 0 && !(status == 0xC0000034 && !add)) // removing a right the account lacks is fine
+        throw new Exception((add ? "Granting " : "Revoking ") + right + " failed: " + LsaNtStatusToWinError(status));
+    } finally { Marshal.FreeHGlobal(name.Buffer); LsaClose(policy); }
+  }
+}
+'@
+
 function Cleanup {
   Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
   Get-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue | Remove-NetFirewallRule
   foreach ($u in $runner, $sandbox) {
     if (Get-LocalUser $u -ErrorAction SilentlyContinue) {
       $sid = (Get-LocalUser $u).SID.Value
+      try { [UserRight]::Revoke($sid, 'SeBatchLogonRight') } catch { Write-Warning $_.Exception.Message }
       Remove-LocalUser $u
       Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $sid } | Remove-CimInstance -ErrorAction SilentlyContinue
     }
@@ -34,7 +69,7 @@ function Cleanup {
 }
 
 Cleanup
-$listener = $null
+$listener = $null; $history = $null
 try {
   # Accounts (standard users, not administrators).
   $runnerPw = & $pw; $sandboxPw = & $pw
@@ -42,6 +77,7 @@ try {
   New-LocalUser $sandbox -Password (ConvertTo-SecureString $sandboxPw -AsPlainText -Force) -PasswordNeverExpires -Description 'Agentry spike' | Out-Null
   Add-LocalGroupMember Users $runner, $sandbox -ErrorAction SilentlyContinue
   $sandboxSid = (Get-LocalUser $sandbox).SID.Value
+  [UserRight]::Grant((Get-LocalUser $runner).SID.Value, 'SeBatchLogonRight')  # the real runner gets "Log on as a service"
 
   # Folders: the runner owns the spike folder; the sandbox may write only to out\ and is denied secret\.
   New-Item -ItemType Directory -Force "$dir\out", "$dir\secret" | Out-Null
@@ -67,7 +103,12 @@ try {
 
   # Run the inner checks as the runner account, non-interactively.
   $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$dir\spike-inner.ps1`" -Dir `"$dir`""
-  Register-ScheduledTask -TaskName $task -Action $action -User $runner -Password $runnerPw -RunLevel Limited | Out-Null
+  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+  Register-ScheduledTask -TaskName $task -Action $action -Settings $settings -User $runner -Password $runnerPw -RunLevel Limited | Out-Null
+  # Task Scheduler's history (off by default) says why a task did not start; it is switched back afterwards.
+  $history = Get-WinEvent -ListLog 'Microsoft-Windows-TaskScheduler/Operational'
+  $historyWasOn = $history.IsEnabled
+  if (-not $historyWasOn) { $history.IsEnabled = $true; $history.SaveChanges() }
   Start-ScheduledTask -TaskName $task
   # A new account's first logon builds its profile, so the task can sit queued a while before it runs: wait until it
   # has run and finished, not just until it is no longer running.
@@ -82,7 +123,7 @@ try {
   if (-not (Test-Path "$dir\result.json")) {
     $code = '0x{0:X}' -f $info.LastTaskResult
     $hint = switch ($code) {
-      '0x41303' { "the task never started in 4 minutes: check that $runner may 'Log on as a batch job' (secpol.msc, Local Policies, User Rights Assignment)" }
+      '0x41303' { 'the task never started in 4 minutes; the history below says why' }
       '0x8007052E' { 'the runner account could not log on (bad user name or password)' }
       '0x80070569' { "$runner lacks the 'Log on as a batch job' right" }
       default { 'see Task Scheduler history for the task' }
@@ -90,7 +131,7 @@ try {
     $events = try {
       Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 200 -ErrorAction Stop |
         Where-Object { $_.Message -match $task } | Select-Object -First 5 | ForEach-Object { "  $($_.TimeCreated) [$($_.Id)] $($_.Message)" }
-    } catch { '  (Task Scheduler history is off)' }
+    } catch { "  (no Task Scheduler history: $($_.Exception.Message))" }
     throw "The inner checks wrote no result: task state $state, result $code ($hint).`n$($events -join "`n")"
   }
   $results = Get-Content "$dir\result.json" -Raw | ConvertFrom-Json
@@ -100,6 +141,7 @@ try {
   "Raw results: $dir\result.json"
 } finally {
   if ($listener) { $listener.Stop() }
+  if ($history -and -not $historyWasOn) { $history.IsEnabled = $false; $history.SaveChanges() }
   if ($Keep) { "Kept: users $runner/$sandbox, rule '$rule', task '$task', folder $dir. Run again without -Keep to remove." }
   else { Cleanup; 'Removed the spike users, rule, task and folder.' }
 }
