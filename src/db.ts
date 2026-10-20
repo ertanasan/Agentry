@@ -92,6 +92,11 @@ export const MIGRATIONS: string[] = [
      used_at INTEGER, challenge TEXT);
    CREATE TABLE challenges (id_hash TEXT PRIMARY KEY, challenge TEXT NOT NULL, expires_at INTEGER NOT NULL);
    ALTER TABLE events ADD COLUMN actor TEXT;`,
+  // 3: images attached to a request (attachments.ts); the files live under $AGENTRY_HOME/attachments.
+  `CREATE TABLE attachments (
+     id INTEGER PRIMARY KEY, request_id INTEGER NOT NULL REFERENCES requests(id), name TEXT NOT NULL,
+     mime TEXT NOT NULL, size INTEGER NOT NULL, created_at INTEGER NOT NULL);
+   CREATE INDEX attachments_request ON attachments(request_id);`,
 ];
 
 export function openDb(path: string): Database {

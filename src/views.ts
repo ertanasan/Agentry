@@ -31,6 +31,7 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: v
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
 input[type=text], textarea, select { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
 textarea { min-height: 84px; resize: vertical; }
+.thumbs img { height: 56px; max-width: 120px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); margin: 6px 6px 0 0; }
 button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; min-height: 40px; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.danger { color: var(--bad); }
@@ -57,7 +58,7 @@ ${body}
 export type Project = { name: string };
 export type ReqRow = {
   id: number; project: string; title: string; status: string; status_reason: string | null; updated_at: number; last_run: number | null;
-  body: string; done_when: string | null;
+  body: string; done_when: string | null; images: string | null; // attachment ids, comma-separated
 };
 export type GroupLock = { name: string; lock_reason: string | null };
 export type HomeData = {
@@ -67,10 +68,20 @@ export type HomeData = {
 
 const ago = (ms: number) => ms < 3600_000 ? `${Math.max(1, Math.round(ms / 60_000))} min ago` : ms < 86400_000 ? `${Math.round(ms / 3600_000)} h ago` : `${Math.round(ms / 86400_000)} d ago`;
 
+// Thumbnails of a request's images, each linking to the full one.
+function thumbs(images: string | null): Html {
+  if (!images) return html``;
+  return html`<div class="thumbs">${images.split(",").map((id) => html`<a href="/attachments/${id}"><img src="/attachments/${id}" alt="attached image ${id}" loading="lazy"></a>`)}</div>`;
+}
+
+// A file picker for images; on a phone it offers the photo library, the camera and files.
+const imagePicker = html`<div class="row"><label class="muted">Images (optional, up to 5 PNG, JPEG, GIF or WebP)
+  <input type="file" name="images" accept="image/png,image/jpeg,image/gif,image/webp" multiple></label></div>`;
+
 function reqLine(r: ReqRow): Html {
   return html`<div><span class="status">${r.status}</span> <strong>#${r.id}</strong> <span class="muted">${r.project}</span> ·
     ${r.last_run ? html`<a href="/runs/${r.last_run}">${r.title}</a>` : r.title}</div>
-    ${r.status_reason ? html`<div class="muted">${r.status_reason}</div>` : ""}`;
+    ${r.status_reason ? html`<div class="muted">${r.status_reason}</div>` : ""}${thumbs(r.images)}`;
 }
 
 const action = (id: number, name: string, label: string, cls = "") =>
@@ -80,8 +91,8 @@ function needsCard(r: ReqRow): Html {
   let actions: Html = html``;
   switch (r.status) {
     case "needs_info":
-      actions = html`<form method="post" action="/requests/${r.id}/answer"><textarea name="text" required placeholder="Your answer"></textarea>
-        <div class="row"><button class="primary">Answer</button></div></form><div class="row">${action(r.id, "cancel", "Cancel", "danger")}</div>`;
+      actions = html`<form method="post" action="/requests/${r.id}/answer" enctype="multipart/form-data"><textarea name="text" required placeholder="Your answer"></textarea>
+        ${imagePicker}<div class="row"><button class="primary">Answer</button></div></form><div class="row">${action(r.id, "cancel", "Cancel", "danger")}</div>`;
       break;
     case "needs_review":
       actions = html`<div class="row">${action(r.id, "approve", "Approve", "primary")} ${action(r.id, "reject", "Reject", "danger")}</div>`;
@@ -114,12 +125,13 @@ ${flash ? html`<div class="card bad">${flash}</div>` : ""}
   ${d.queue.length} in queue · backup ${d.backupAgeMs === null ? "never" : ago(d.backupAgeMs)}</div>
 
 <h2>New request</h2>
-<form method="post" action="/requests" class="card">
+<form method="post" action="/requests" class="card" enctype="multipart/form-data">
   <div class="chips">${d.projects.map((p, i) => html`<label><input type="radio" name="project" value="${p.name}" ${i === 0 ? new Html("checked") : ""} required>${p.name}</label>`)}</div>
   <div class="row"><input type="text" name="title" required maxlength="200" placeholder="What should change?"></div>
   <div class="row"><textarea name="body" placeholder="Details (optional)"></textarea></div>
   <div class="row"><input type="text" name="done_when" placeholder="Done when (optional)"></div>
   <div class="row"><input type="text" name="done_when_test" placeholder="Done-when test name (optional)"></div>
+  ${imagePicker}
   <div class="row"><button class="primary">Queue it</button></div>
 </form>
 
@@ -139,7 +151,7 @@ ${d.recent.map((r) => html`<div class="card">${reqLine(r)}${r.status === "done" 
 export type StepRow = { n: number; step: string; exit_code: number | null; started_at: number; ended_at: number | null };
 export type RunData = {
   run: { id: number; status: string; attempt: number; branch: string | null; current_step: string | null; flags: string; commit_sha: string | null; push_state: string };
-  req: { id: number; title: string; status: string; status_reason: string | null; project: string };
+  req: { id: number; title: string; status: string; status_reason: string | null; project: string; images: string | null };
   steps: StepRow[]; log: string; logStep: number | null; diffStat: string; diff: string; diffCut: boolean; recipe: string;
 };
 
@@ -153,7 +165,7 @@ export function runPage(d: RunData, user: User): string {
   const flags = (JSON.parse(d.run.flags || "[]") as { kind: string; path: string; detail?: string }[]);
   return page(`Run ${d.run.id}`, html`
 <div class="card"><span class="status">${d.req.status}</span> <strong>#${d.req.id}</strong> <span class="muted">${d.req.project}</span> · ${d.req.title}
-  ${d.req.status_reason ? html`<div class="muted">${d.req.status_reason}</div>` : ""}
+  ${d.req.status_reason ? html`<div class="muted">${d.req.status_reason}</div>` : ""}${thumbs(d.req.images)}
   <div class="muted">Run ${d.run.id} · attempt ${d.run.attempt} · ${d.run.branch ?? ""} · ${d.run.status}${d.run.current_step ? ` (${d.run.current_step})` : ""}
   ${d.run.commit_sha ? html` · commit ${d.run.commit_sha.slice(0, 7)} (${d.run.push_state})` : ""}</div></div>
 

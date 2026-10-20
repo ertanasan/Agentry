@@ -24,6 +24,7 @@
 import type { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { copyForRun } from "./attachments.ts";
 import { fenced, LeaseLost, LEASE_TTL_MS, runnerRow, setRequestStatus, type PushState, type RequestStatus } from "./db.ts";
 import * as g from "./git.ts";
 import { countRegression, inspect, type Flag } from "./inspect.ts";
@@ -344,8 +345,10 @@ function baseCounts(j: Job): { total: number; skipped: number } | null {
 
 async function agentStep(j: Job): Promise<Stop | null> {
   const s = begin(j, "agent");
+  // The request's images go into the run's temp dir, the one place outside the worktree the sandbox lets it read.
+  const images = copyForRun(j.ctx.db, j.ctx.home, j.req.id, join(j.sbx!.env.TMPDIR, "attachments"));
   const res = await j.ctx.agent.run({
-    worktree: j.wt, logPath: s.logPath, timeoutMs: timeoutMs(j.recipe, "agent"), sandbox: j.sbx!, onStart: s.onStart, prompt: prompt(j),
+    worktree: j.wt, logPath: s.logPath, timeoutMs: timeoutMs(j.recipe, "agent"), sandbox: j.sbx!, onStart: s.onStart, prompt: prompt(j, images),
   });
   s.end(res.outcome === "infra_error" ? 1 : 0);
   if (res.outcome === "infra_error") return infra(`agent: ${res.detail}`);
@@ -353,7 +356,7 @@ async function agentStep(j: Job): Promise<Stop | null> {
   return null;
 }
 
-function prompt(j: Job): string {
+function prompt(j: Job, images: string[]): string {
   const { req, recipe } = j;
   const answers = (j.ctx.db.query("SELECT payload FROM events WHERE request_id = ? AND type = 'answer' ORDER BY id").all(req.id) as { payload: string }[])
     .map((r) => `- ${(JSON.parse(r.payload) as { text: string }).text}`);
@@ -368,6 +371,7 @@ function prompt(j: Job): string {
   if (req.done_when) parts.push(`\nDone when: ${req.done_when}`);
   if (req.done_when_test) parts.push(`\nDone when a test matching "${req.done_when_test}" passes.`);
   if (answers.length) parts.push(`\n# Answers to your earlier questions\n${answers.join("\n")}`);
+  if (images.length) parts.push(`\n# Images attached to the request\nLook at each with the Read tool before you start:\n${images.map((p) => `- ${p}`).join("\n")}`);
   for (const name of ["CLAUDE.md", "AGENTS.md"]) {
     const path = join(j.wt, recipe.scope_path, name);
     if (existsSync(path)) parts.push(`\n# Project instructions (${recipe.scope_path}${name})\n\n${readFileSync(path, "utf8")}`);

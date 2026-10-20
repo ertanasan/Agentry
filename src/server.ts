@@ -11,6 +11,7 @@ import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import * as A from "./actions.ts";
+import { attachment, attachmentFile, checkUploads, MAX_IMAGE_BYTES, MAX_IMAGES_PER_REQUEST, saveUploads, type Upload } from "./attachments.ts";
 import {
   AuthError, endSession, finishLogin, finishRegistration, LoginThrottle, loginOptions, registrationOptions, registrationUser,
   relyingParty, SESSION_TTL_MS, sessionUser, type User,
@@ -55,6 +56,7 @@ export function startServer(o: ServerOptions) {
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: o.port ?? DEFAULT_PORT,
+    maxRequestBodySize: (MAX_IMAGES_PER_REQUEST + 1) * MAX_IMAGE_BYTES, // the images plus the form's text
     fetch: (req) => handle(req).catch((e) => {
       console.error(e);
       return text(500, "internal error");
@@ -140,23 +142,41 @@ export function startServer(o: ServerOptions) {
       return htmlRes(200, runPage(data, user));
     }
 
+    // An attached image, signed in only. Served so it can never act as a page: its sniffed type, nosniff, and a
+    // sandboxing CSP.
+    const att = url.pathname.match(/^\/attachments\/(\d+)$/);
+    if (att && req.method === "GET") {
+      const a = attachment(db, Number(att[1]));
+      const file = a && attachmentFile(o.home, a);
+      if (!a || !file || !existsSync(file)) return text(404, "not found");
+      return new Response(Bun.file(file), { headers: {
+        ...SECURITY_HEADERS, "content-type": a.mime, "content-security-policy": "default-src 'none'; sandbox",
+        "content-disposition": "inline", "cache-control": "private, max-age=86400",
+      } });
+    }
+
     if (req.method === "POST") {
       const isForm = /^(application\/x-www-form-urlencoded|multipart\/form-data)/.test(req.headers.get("content-type") ?? "");
-      return act(url.pathname, isForm ? await req.formData() : new FormData(), user);
+      const form = isForm ? await req.formData() : new FormData();
+      return act(url.pathname, form, await uploadsOf(form), user);
     }
     return text(404, "not found");
   }
 
-  function act(path: string, form: FormData, user: User): Response {
+  function act(path: string, form: FormData, uploads: Upload[], user: User): Response {
     const field = (k: string) => { const v = form.get(k); return typeof v === "string" ? v : undefined; };
     const optional = (k: string) => { const v = field(k)?.trim(); return v ? v : null; };
     try {
       asActor(`user:${user.name}`, () => {
         if (path === "/requests") {
-          A.addRequest(db, {
-            project: field("project") ?? "", title: field("title") ?? "", body: field("body") ?? "",
-            doneWhen: optional("done_when"), doneWhenTest: optional("done_when_test"),
-          });
+          const types = checkUploads(db, null, uploads);
+          db.transaction(() => {
+            const id = A.addRequest(db, {
+              project: field("project") ?? "", title: field("title") ?? "", body: field("body") ?? "",
+              doneWhen: optional("done_when"), doneWhenTest: optional("done_when_test"),
+            });
+            saveUploads(db, o.home, id, uploads, types);
+          })();
           return;
         }
         if (path === "/runner/resume") return A.resume(db);
@@ -166,7 +186,11 @@ export function startServer(o: ServerOptions) {
         if (!m) throw new A.ActionError("no such action", "not_found");
         const id = Number(m[1]);
         switch (m[2]) {
-          case "answer": return A.answer(db, id, field("text") ?? "");
+          case "answer": {
+            const types = checkUploads(db, id, uploads);
+            db.transaction(() => { A.answer(db, id, field("text") ?? ""); saveUploads(db, o.home, id, uploads, types); })();
+            return;
+          }
           case "approve": return A.approve(db, id);
           case "reject": return A.reject(db, id);
           case "retry": return A.retry(db, id, form.has("body") ? { body: field("body"), doneWhen: optional("done_when") } : {});
@@ -185,7 +209,8 @@ export function startServer(o: ServerOptions) {
 
   function homeData() {
     const rows = (where: string, order = "r.id") => db.query(`SELECT r.id, p.name AS project, r.title, r.status, r.status_reason, r.updated_at,
-      r.body, r.done_when, (SELECT MAX(id) FROM runs WHERE request_id = r.id) AS last_run
+      r.body, r.done_when, (SELECT MAX(id) FROM runs WHERE request_id = r.id) AS last_run,
+      (SELECT group_concat(id) FROM attachments WHERE request_id = r.id) AS images
       FROM requests r JOIN projects p ON p.id = r.project_id WHERE ${where} ORDER BY ${order}`).all() as ReqRow[];
     const runner = runnerRow(db);
     const last = lastBackupAt(db);
@@ -206,7 +231,8 @@ export function startServer(o: ServerOptions) {
     const run = db.query(`SELECT id, request_id, status, attempt, branch, current_step, flags, commit_sha, candidate_sha, base_sha, push_state
       FROM runs WHERE id = ?`).get(id) as any;
     if (!run) return null;
-    const req = db.query(`SELECT r.id, r.title, r.status, r.status_reason, p.name AS project, p.recipe FROM requests r
+    const req = db.query(`SELECT r.id, r.title, r.status, r.status_reason, p.name AS project, p.recipe,
+      (SELECT group_concat(id) FROM attachments WHERE request_id = r.id) AS images FROM requests r
       JOIN projects p ON p.id = r.project_id WHERE r.id = ?`).get(run.request_id) as any;
     const steps = (db.query("SELECT step, exit_code, started_at, ended_at, log_path FROM steps WHERE run_id = ? ORDER BY id").all(id) as
       (Omit<StepRow, "n"> & { log_path: string | null })[]).map((s, i) => ({ ...s, n: i + 1 }));
@@ -221,12 +247,18 @@ export function startServer(o: ServerOptions) {
       if (diff.length > MAX_DIFF_CHARS) { diff = diff.slice(0, MAX_DIFF_CHARS); diffCut = true; }
     }
     return {
-      run, req: { id: req.id, title: req.title, status: req.status, status_reason: req.status_reason, project: req.project },
+      run, req: { id: req.id, title: req.title, status: req.status, status_reason: req.status_reason, project: req.project, images: req.images },
       steps, log, logStep: chosen?.n ?? null, diffStat, diff, diffCut, recipe: JSON.stringify(JSON.parse(req.recipe), null, 2),
     };
   }
 
   return { server, url: publicUrl, stop: () => server.stop(true) };
+}
+
+// The non-empty files of a form's "images" field (a browser sends an empty one when none is chosen).
+async function uploadsOf(form: FormData): Promise<Upload[]> {
+  const files = form.getAll("images").filter((v): v is File => typeof v !== "string" && v.size > 0);
+  return Promise.all(files.map(async (f) => ({ name: f.name || "image", bytes: new Uint8Array(await f.arrayBuffer()) })));
 }
 
 function parseCookies(header: string | null): Record<string, string> {

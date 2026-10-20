@@ -2,7 +2,7 @@
 // Host / Origin / session guards, actions through actions.ts with the user as actor, escaping of request text
 // and logs, the bounded log tail, sign-in throttling and the security headers.
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { addUser } from "../src/accounts.ts";
 import { openDb } from "../src/db.ts";
@@ -26,7 +26,7 @@ async function setup() {
   stops.push(srv.stop);
   const url = srv.url;
 
-  const call = (path: string, o: { method?: string; json?: unknown; form?: Record<string, string>; cookie?: string; origin?: string | null; host?: string } = {}) => {
+  const call = (path: string, o: { method?: string; json?: unknown; form?: Record<string, string>; multipart?: FormData; cookie?: string; origin?: string | null; host?: string } = {}) => {
     const headers: Record<string, string> = {};
     if (o.cookie) headers.cookie = o.cookie;
     if (o.origin !== null && (o.method ?? "GET") === "POST") headers.origin = o.origin ?? url;
@@ -34,7 +34,7 @@ async function setup() {
     let body: string | undefined;
     if (o.json !== undefined) { headers["content-type"] = "application/json"; body = JSON.stringify(o.json); }
     if (o.form) { headers["content-type"] = "application/x-www-form-urlencoded"; body = new URLSearchParams(o.form).toString(); }
-    return fetch(url + path, { method: o.method ?? "GET", headers, body, redirect: "manual" });
+    return fetch(url + path, { method: o.method ?? "GET", headers, body: o.multipart ?? body, redirect: "manual" });
   };
   const sessionOf = (r: Response) => r.headers.get("set-cookie")!.split(";")[0];
 
@@ -211,6 +211,78 @@ describe("escaping (slice 2 review Q1)", () => {
     expect(body).toContain("THE END");
     expect(body.length).toBeLessThan(70_000);
     expect(body).toContain('hx-trigger="every 2s"'); // still running → keeps polling
+  });
+});
+
+// The first bytes are all the server looks at; the rest only gives the files a size.
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new Array(200).fill(7)]);
+const HEIC = new Uint8Array([0, 0, 0, 0x18, ...new TextEncoder().encode("ftypheic"), ...new Array(200).fill(7)]);
+
+describe("attached images", () => {
+  const requestForm = (files: [Uint8Array<ArrayBuffer>, string][], title = "Fix the search box") => {
+    const f = new FormData();
+    f.set("project", "vt-web"); f.set("title", title); f.set("body", "see the screenshot");
+    for (const [bytes, name] of files) f.append("images", new File([bytes], name));
+    return f;
+  };
+
+  test("a new request keeps its images; they show as thumbnails and are served signed-in only, as images", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    expect((await h.call("/requests", { method: "POST", cookie, multipart: requestForm([[PNG, "shot.png"]]) })).status).toBe(303);
+    expect(h.db.query("SELECT request_id, name, mime, size FROM attachments").get()).toEqual({ request_id: 1, name: "shot.png", mime: "image/png", size: PNG.length });
+    expect(existsSync(join(h.home, "attachments", "1", "1.png"))).toBe(true);
+    expect(await (await h.call("/", { cookie })).text()).toContain('<img src="/attachments/1"');
+
+    const r = await h.call("/attachments/1", { cookie });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toBe("image/png");
+    expect(r.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(r.headers.get("content-security-policy")).toContain("sandbox");
+    expect(new Uint8Array(await r.arrayBuffer())).toEqual(PNG);
+    expect((await h.call("/attachments/1")).headers.get("location")).toBe("/login");
+    expect((await h.call("/attachments/9", { cookie })).status).toBe(404);
+  });
+
+  test("a file that is not a supported image is refused, and no request is created", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    const fake = new TextEncoder().encode("<svg onload=alert(1)>");
+    const r = await h.call("/requests", { method: "POST", cookie, multipart: requestForm([[PNG, "ok.png"], [fake, "evil.png"]]) });
+    expect(r.status).toBe(400);
+    expect(await r.text()).toContain("evil.png is not a PNG, JPEG, GIF or WebP image");
+    const heic = await h.call("/requests", { method: "POST", cookie, multipart: requestForm([[HEIC, "IMG_1.HEIC"]]) });
+    expect(await heic.text()).toContain("IMG_1.HEIC is a HEIC photo");
+    expect(h.db.query("SELECT (SELECT COUNT(*) FROM requests) AS r, (SELECT COUNT(*) FROM attachments) AS a").get()).toEqual({ r: 0, a: 0 });
+  });
+
+  test("at most 5 images per request, counting those sent with answers", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    const six = Array.from({ length: 6 }, (_, i) => [PNG, `s${i}.png`] as [Uint8Array<ArrayBuffer>, string]);
+    expect((await h.call("/requests", { method: "POST", cookie, multipart: requestForm(six) })).status).toBe(400);
+
+    await h.call("/requests", { method: "POST", cookie, multipart: requestForm(six.slice(0, 4)) });
+    h.db.query("UPDATE requests SET status = 'needs_info' WHERE id = 1").run();
+    const answer = (files: [Uint8Array<ArrayBuffer>, string][]) => {
+      const f = new FormData();
+      f.set("text", "like this");
+      for (const [bytes, name] of files) f.append("images", new File([bytes], name));
+      return h.call("/requests/1/answer", { method: "POST", cookie, multipart: f });
+    };
+    expect((await answer(six.slice(0, 2))).status).toBe(400);
+    expect(h.db.query("SELECT status FROM requests").get()).toEqual({ status: "needs_info" });
+    expect((await answer(six.slice(0, 1))).status).toBe(303);
+    expect(h.db.query("SELECT status, (SELECT COUNT(*) FROM attachments) AS n FROM requests").get()).toEqual({ status: "queued", n: 5 });
+  });
+
+  test("a form with no file chosen adds the request without images", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    const f = requestForm([]);
+    f.append("images", new File([], ""));
+    expect((await h.call("/requests", { method: "POST", cookie, multipart: f })).status).toBe(303);
+    expect(h.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
   });
 });
 

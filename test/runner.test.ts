@@ -9,6 +9,7 @@ import type { Recipe } from "../src/recipe.ts";
 import type { AgentResult, Verdict } from "../src/adapters/types.ts";
 import { checkDeployable, parseVersion, redeploy, runNext, type RunnerCtx } from "../src/runner.ts";
 import { requestRedeploy, resolve } from "../src/actions.ts";
+import { saveUploads } from "../src/attachments.ts";
 import { recover, unresolvedPushes } from "../src/recovery.ts";
 import { head, makeFixture } from "./fixture.ts";
 
@@ -164,6 +165,24 @@ describe("runner: agent outcomes", () => {
     expect(h.prompts[1]).toContain("Keep your changes under app/. If the request needs a change");
     expect(h.prompts[1]).toContain("sends\nthe change to human review");
     expect(h.prompts[1]).toContain("do not edit build files");
+  });
+
+  test("attached images reach the agent: copied into the run's temp dir and named in the prompt", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+    let seen = null as Uint8Array | null;
+    const h = setup({
+      agent: (wt) => {
+        const path = h.prompts.at(-1)!.match(/^- (\/.+\/attachments\/1\.png)$/m)?.[1];
+        if (path) seen = new Uint8Array(readFileSync(path)); // what the agent's Read tool would open
+        editMain(wt);
+      },
+    });
+    const id = h.add();
+    saveUploads(h.db, h.ctx.home, id, [{ name: "shot.png", bytes: png }], ["image/png"]);
+    await runNext(h.ctx);
+    expect(h.req(id).status).toBe("done");
+    expect(h.prompts[0]).toContain("# Images attached to the request\nLook at each with the Read tool");
+    expect(seen).toEqual(png);
   });
 
   test("no changes → blocked_pre_push", async () => {

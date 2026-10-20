@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { backupIfDue, lastBackupAt, LOG_RETENTION_MS, runBackup } from "../src/backup.ts";
+import { saveUploads } from "../src/attachments.ts";
 import { openDb } from "../src/db.ts";
 import { git } from "../src/git.ts";
 import { makeFixture } from "./fixture.ts";
@@ -50,6 +51,16 @@ describe("backup", () => {
     if (!r.ok) return;
     expect(git(h.fx.repo, ["bundle", "verify", r.bundles[0]]).code).toBe(0);
     expect(git(h.fx.root, ["bundle", "list-heads", r.bundles[0]]).out).toContain("refs/heads/agentry/7-1");
+  });
+
+  test("copies the attached images, adding new ones on later days", async () => {
+    const h = setup();
+    const png = (n: number) => ({ name: `s${n}.png`, bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, n]) });
+    saveUploads(h.db, h.home, 1, [png(1)], ["image/png"]);
+    expect((await runBackup(h.db, h.home, h.dir)).ok).toBe(true);
+    saveUploads(h.db, h.home, 1, [png(2)], ["image/png"]);
+    expect((await runBackup(h.db, h.home, h.dir, Date.now() + DAY)).ok).toBe(true);
+    expect(readdirSync(join(h.dir, "attachments", "1")).sort()).toEqual(["1.png", "2.png"]);
   });
 
   test("no agentry branches → no bundle, still a backup", async () => {
