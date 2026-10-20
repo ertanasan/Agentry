@@ -20,6 +20,10 @@
   (subpath (param "WORKTREE")) (subpath (param "RUN_TMP")) (subpath (param "PKG_CACHE"))
   (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/dtracehelper") (regex #"^/dev/fd/"))
 
+; The per-user temp folder, only for a recipe with sandbox_user_temp (Swift Build writes there whatever TMPDIR
+; says); otherwise /nonexistent. Its caches (C/) and 0/ stay closed.
+(allow file-read* file-write* (subpath (param "USER_TEMP")))
+
 ; dotnet keeps its named mutexes in /tmp/.dotnet whatever TMPDIR says.
 (allow file-read* file-write* (regex #"^/private/tmp/\.dotnet"))
 

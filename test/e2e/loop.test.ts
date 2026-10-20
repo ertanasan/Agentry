@@ -28,7 +28,7 @@ case $prompt in
   *MODE:ask*)
     if [[ $prompt != *"# Answers to your earlier questions"*"use main.txt"* ]]; then out false '"NEEDS_INFO: Which file?"'; exit 0; fi
     echo more >> app/main.txt ;;
-  *MODE:outside*) echo more >> README.md ;;
+  *MODE:buildfile*) echo 'echo hi' > app/build.sh ;;
   *) echo more >> app/main.txt ;;
 esac
 out false '"done"'
@@ -111,15 +111,15 @@ describe("agentry CLI, end to end", () => {
 
   test("needs_review → reject cancels; approve resumes on the kept branch and ships the reviewed change", async () => {
     const h = setup();
-    const a = h.add("Touch the readme", "--body", "MODE:outside");
-    const b = h.add("Touch the readme too", "--body", "MODE:outside");
+    const a = h.add("Add a build script", "--body", "MODE:buildfile");
+    const b = h.add("Add a build script too", "--body", "MODE:buildfile");
     expect(h.ok("run", "--once")).toMatch(new RegExp(`#${a} → needs_review[\\s\\S]*#${b} → needs_review`));
     h.ok("reject", String(a));
     expect(h.req(a)).toMatchObject({ status: "canceled", status_reason: "rejected" });
     h.ok("approve", String(b));
     expect(h.ok("run", "--once")).toContain(`#${b} → done`);
     expect(h.req(b).attempts).toBe(1);
-    expect(g.git(h.fx.origin, ["show", "--name-only", "--format=", "main"]).out).toBe("README.md");
+    expect(g.git(h.fx.origin, ["show", "--name-only", "--format=", "main"]).out).toBe("app/build.sh");
   });
 
   test("blocked_pre_push → retry with a new body runs a new attempt on a new branch", async () => {

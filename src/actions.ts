@@ -12,14 +12,14 @@ export class ActionError extends Error {
 
 type Req = {
   id: number; status: RequestStatus; title: string; body: string; project_id: number;
-  done_when: string | null; done_when_test: string | null; deploy_group_id: number;
+  done_when: string | null; done_when_test: string | null;
 };
 
 // Moves a request from one of `from` to `to`, with an event. Callers needing more writes wrap it in theirs.
 function move(db: Database, id: number, from: RequestStatus[], to: RequestStatus, reason: string | null, event: string, payload: unknown = null): Req {
   return db.transaction(() => {
-    const req = db.query(`SELECT r.id, r.status, r.title, r.body, r.project_id, r.done_when, r.done_when_test, p.deploy_group_id
-      FROM requests r JOIN projects p ON p.id = r.project_id WHERE r.id = ?`).get(id) as Req | null;
+    const req = db.query(`SELECT r.id, r.status, r.title, r.body, r.project_id, r.done_when, r.done_when_test
+      FROM requests r WHERE r.id = ?`).get(id) as Req | null;
     if (!req) throw new ActionError(`no request #${id}`, "not_found");
     if (!from.includes(req.status)) throw new ActionError(`#${id} is ${req.status}; this needs ${from.join(" or ")}`);
     logEvent(db, id, event, payload);
@@ -28,18 +28,28 @@ function move(db: Database, id: number, from: RequestStatus[], to: RequestStatus
   })();
 }
 
-export type NewRequest = { project: string; title: string; body?: string; doneWhen?: string | null; doneWhenTest?: string | null; priority?: number };
+// `projects`: one or more, all in one repo; the runner deploys each of them.
+export type NewRequest = { projects: string[]; title: string; body?: string; doneWhen?: string | null; doneWhenTest?: string | null; priority?: number };
 
 export function addRequest(db: Database, r: NewRequest): number {
   if (!r.title.trim()) throw new ActionError("a request needs a title", "invalid");
-  const p = db.query("SELECT id FROM projects WHERE name = ?").get(r.project) as { id: number } | null;
-  if (!p) throw new ActionError(`no project "${r.project}"`, "not_found");
+  const names = [...new Set(r.projects.map((n) => n.trim()).filter(Boolean))];
+  if (!names.length) throw new ActionError("a request needs a project", "invalid");
+  const ps = names.map((name) => {
+    const p = db.query("SELECT id, repo_id FROM projects WHERE name = ?").get(name) as { id: number; repo_id: number } | null;
+    if (!p) throw new ActionError(`no project "${name}"`, "not_found");
+    return p;
+  });
+  if (new Set(ps.map((p) => p.repo_id)).size > 1) throw new ActionError("the projects of one request must share a repository", "invalid");
   const now = Date.now();
-  const id = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, priority, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(p.id, r.title.trim(), r.body ?? "", r.doneWhen ?? null, r.doneWhenTest ?? null, r.priority ?? 0, now, now)
-    .lastInsertRowid);
-  logEvent(db, id, "add");
-  return id;
+  return db.transaction(() => {
+    const id = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, priority, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(ps[0].id, r.title.trim(), r.body ?? "", r.doneWhen ?? null, r.doneWhenTest ?? null, r.priority ?? 0, now, now)
+      .lastInsertRowid);
+    for (const p of ps.slice(1)) db.query("INSERT INTO request_projects (request_id, project_id) VALUES (?, ?)").run(id, p.id);
+    logEvent(db, id, "add");
+    return id;
+  })();
 }
 
 // needs_info → queued; the answer reaches the next attempt's prompt.
@@ -76,12 +86,12 @@ export function cancel(db: Database, id: number): void {
   move(db, id, ["queued", "needs_info", "needs_review", "blocked_pre_push"], "canceled", "canceled", "cancel");
 }
 
-// blocked_post_push → done_manual, and the deploy group this request holds is freed.
+// blocked_post_push → done_manual, and the deploy groups this request holds are freed.
 export function resolve(db: Database, id: number): void {
   db.transaction(() => {
     const req = move(db, id, ["blocked_post_push"], "done_manual", "resolved by hand", "resolve");
-    db.query("UPDATE deploy_groups SET lock = 'free', lock_reason = NULL, locked_by_request = NULL, undeployed_sha = NULL WHERE id = ? AND locked_by_request = ?")
-      .run(req.deploy_group_id, req.id);
+    db.query("UPDATE deploy_groups SET lock = 'free', lock_reason = NULL, locked_by_request = NULL, undeployed_sha = NULL WHERE locked_by_request = ?")
+      .run(req.id);
   })();
 }
 
@@ -105,9 +115,11 @@ export function reopen(db: Database, id: number, what: string): number {
     if (orig.status !== "done") throw new ActionError(`#${id} is ${orig.status}; reopen needs done`);
     logEvent(db, id, "reopen", { text: what });
     const now = Date.now();
-    return Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, reopened_from, created_at, updated_at)
+    const added = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, reopened_from, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(orig.project_id, `Reopened #${id}: ${orig.title}`,
       `${what}\n\nOriginal request:\n${orig.body}`, orig.done_when, orig.done_when_test, id, now, now).lastInsertRowid);
+    db.query("INSERT OR IGNORE INTO request_projects (request_id, project_id) SELECT ?, project_id FROM request_projects WHERE request_id = ?").run(added, id);
+    return added;
   })();
   logEvent(db, newId, "add", { reopened_from: id });
   return newId;

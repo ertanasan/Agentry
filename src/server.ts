@@ -23,11 +23,13 @@ import { readTail } from "./proc.ts";
 import { parseRecipe } from "./recipe.ts";
 import { MAX_DIFF_CHARS } from "./verifier.ts";
 import {
-  APP_JS, homePage, loginPage, logBlock, messagePage, registerPage, runPage, type GroupLock, type ReqRow, type StepRow,
+  APP_JS, HOME_JS, homePage, loginPage, logBlock, messagePage, registerPage, runPage, type GroupLock, type ReqRow, type StepRow,
 } from "./views.ts";
 
 export const DEFAULT_PORT = 4747;
 const LOG_TAIL_BYTES = 64 * 1024;
+// The names of request r's projects, comma-separated.
+const PROJECT_NAMES = `(SELECT group_concat(p.name, ', ') FROM request_projects rp JOIN projects p ON p.id = rp.project_id WHERE rp.request_id = r.id)`;
 const SESSION_COOKIE = "agentry_session";
 const LOGIN_COOKIE = "agentry_login";
 
@@ -39,6 +41,7 @@ const STATIC: Record<string, { path?: string; body?: string; type: string }> = {
   "/static/htmx.js": { path: join(modules, "htmx.org", "dist", "htmx.min.js"), type: "text/javascript" },
   "/static/webauthn.js": { path: join(modules, "@simplewebauthn", "browser", "dist", "bundle", "index.umd.min.js"), type: "text/javascript" },
   "/static/app.js": { body: APP_JS, type: "text/javascript" },
+  "/static/home.js": { body: HOME_JS, type: "text/javascript" },
   "/static/icon.svg": { path: join(assets, "icon.svg"), type: "image/svg+xml" },
   "/static/apple-touch-icon.png": { path: join(assets, "apple-touch-icon.png"), type: "image/png" },  // iOS home screen
 };
@@ -172,7 +175,7 @@ export function startServer(o: ServerOptions) {
           const types = checkUploads(db, null, uploads);
           db.transaction(() => {
             const id = A.addRequest(db, {
-              project: field("project") ?? "", title: field("title") ?? "", body: field("body") ?? "",
+              projects: form.getAll("project").filter((v): v is string => typeof v === "string"), title: field("title") ?? "", body: field("body") ?? "",
               doneWhen: optional("done_when"), doneWhenTest: optional("done_when_test"),
             });
             saveUploads(db, o.home, id, uploads, types);
@@ -208,10 +211,10 @@ export function startServer(o: ServerOptions) {
   }
 
   function homeData() {
-    const rows = (where: string, order = "r.id") => db.query(`SELECT r.id, p.name AS project, r.title, r.status, r.status_reason, r.updated_at,
+    const rows = (where: string, order = "r.id") => db.query(`SELECT r.id, ${PROJECT_NAMES} AS project, r.title, r.status, r.status_reason, r.updated_at,
       r.body, r.done_when, (SELECT MAX(id) FROM runs WHERE request_id = r.id) AS last_run,
       (SELECT group_concat(id) FROM attachments WHERE request_id = r.id) AS images
-      FROM requests r JOIN projects p ON p.id = r.project_id WHERE ${where} ORDER BY ${order}`).all() as ReqRow[];
+      FROM requests r WHERE ${where} ORDER BY ${order}`).all() as ReqRow[];
     const runner = runnerRow(db);
     const last = lastBackupAt(db);
     return {
@@ -231,9 +234,11 @@ export function startServer(o: ServerOptions) {
     const run = db.query(`SELECT id, request_id, status, attempt, branch, current_step, flags, commit_sha, candidate_sha, base_sha, push_state
       FROM runs WHERE id = ?`).get(id) as any;
     if (!run) return null;
-    const req = db.query(`SELECT r.id, r.title, r.status, r.status_reason, p.name AS project, p.recipe,
+    const req = db.query(`SELECT r.id, r.title, r.status, r.status_reason, ${PROJECT_NAMES} AS project, p.recipe,
       (SELECT group_concat(id) FROM attachments WHERE request_id = r.id) AS images FROM requests r
       JOIN projects p ON p.id = r.project_id WHERE r.id = ?`).get(run.request_id) as any;
+    const recipes = db.query(`SELECT p.name, p.recipe FROM request_projects rp JOIN projects p ON p.id = rp.project_id
+      WHERE rp.request_id = ? ORDER BY p.id`).all(run.request_id) as { name: string; recipe: string }[];
     const steps = (db.query("SELECT step, exit_code, started_at, ended_at, log_path FROM steps WHERE run_id = ? ORDER BY id").all(id) as
       (Omit<StepRow, "n"> & { log_path: string | null })[]).map((s, i) => ({ ...s, n: i + 1 }));
     const chosen = n ? steps.find((s) => s.n === n) : steps.at(-1);
@@ -248,7 +253,8 @@ export function startServer(o: ServerOptions) {
     }
     return {
       run, req: { id: req.id, title: req.title, status: req.status, status_reason: req.status_reason, project: req.project, images: req.images },
-      steps, log, logStep: chosen?.n ?? null, diffStat, diff, diffCut, recipe: JSON.stringify(JSON.parse(req.recipe), null, 2),
+      steps, log, logStep: chosen?.n ?? null, diffStat, diff, diffCut,
+      recipe: recipes.map((p) => `${recipes.length > 1 ? `// ${p.name}\n` : ""}${JSON.stringify(JSON.parse(p.recipe), null, 2)}`).join("\n\n"),
     };
   }
 

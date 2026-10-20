@@ -57,13 +57,18 @@ describe("migrations (review D11)", () => {
     old.exec(BASE_SCHEMA);
     old.exec(`INSERT INTO repos (name, path) VALUES ('r', '/r'); INSERT INTO deploy_groups (name) VALUES ('g');
       INSERT INTO projects (name, repo_id, deploy_group_id, recipe) VALUES ('p', 1, 1, '{}');
-      INSERT INTO requests (project_id, title, status, created_at, updated_at) VALUES (1, 'old one', 'done', 1, 1);`);
+      INSERT INTO requests (project_id, title, status, created_at, updated_at) VALUES (1, 'old one', 'done', 1, 1);
+      INSERT INTO runs (request_id, attempt, status, tests_total, tests_skipped, started_at) VALUES (1, 1, 'passed', 214, 2, 1);`);
     old.close();
 
     const db = openDb(path);
     expect(version(db)).toBe(MIGRATIONS.length);
     expect(columns(db)).toContain("redeploy_requested");
     expect(db.query("SELECT title, status, redeploy_requested FROM requests").all()).toEqual([{ title: "old one", status: "done", redeploy_requested: 0 }]);
+    expect(db.query("SELECT * FROM request_projects").all()).toEqual([{ request_id: 1, project_id: 1 }]);
+    expect(db.query("SELECT * FROM run_tests").all()).toEqual([{ run_id: 1, project_id: 1, total: 214, skipped: 2 }]);
+    db.query("INSERT INTO requests (project_id, title, created_at, updated_at) VALUES (1, 'new one', 2, 2)").run();
+    expect(db.query("SELECT project_id FROM request_projects WHERE request_id = 2").all()).toEqual([{ project_id: 1 }]);
     db.close();
     const again = openDb(path); // idempotent
     expect(version(again)).toBe(MIGRATIONS.length);

@@ -24,6 +24,7 @@ export type SandboxPaths = {
   keyHelper?: string;  // default KEY_HELPER when claudeBin is set
   pkgCache?: string;   // default PKG_CACHE
   userHome?: string;   // the home to deny; default os.homedir()
+  userTemp?: boolean;  // open the per-user temp folder (a recipe's sandbox_user_temp)
 };
 
 let userDir: string | undefined;
@@ -75,6 +76,7 @@ export function sandbox(p: SandboxPaths): { wrap: string[]; env: Record<string, 
     GIT_DIR: p.gitDir ? realpathSync(p.gitDir) : NONE,
     CLAUDE_BIN: p.claudeBin ? realpathSync(p.claudeBin) : NONE,
     KEY_HELPER: existsSync(keyHelper) ? realpathSync(keyHelper) : keyHelper,
+    USER_TEMP: p.userTemp ? join(darwinUserDir(), "T") : NONE,
   };
   const wrap = ["sandbox-exec", ...Object.entries(params).flatMap(([k, v]) => ["-D", `${k}=${v}`]), "-f", PROFILE];
 

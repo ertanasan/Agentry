@@ -161,9 +161,9 @@ describe("runner: agent outcomes", () => {
     expect(h.lastRun(id).branch).toBe(`agentry/${id}-2`);
     expect(h.prompts[1]).toContain("The /words one");
     expect(h.prompts[1]).toContain("# Request: Change main");
-    // Out-of-scope changes are allowed and gated by review (design step 4), never forbidden; build files stay off limits.
-    expect(h.prompts[1]).toContain("Keep your changes under app/. If the request needs a change");
-    expect(h.prompts[1]).toContain("sends\nthe change to human review");
+    // A change outside the selected projects is never deployed, so the agent asks instead of making it.
+    expect(h.prompts[1]).toContain("Change files only under app/. If the request needs a change");
+    expect(h.prompts[1]).toContain("change nothing and reply with a\nsingle line `NEEDS_INFO:");
     expect(h.prompts[1]).toContain("do not edit build files");
   });
 
@@ -204,13 +204,13 @@ describe("runner: agent outcomes", () => {
 });
 
 describe("runner: gates", () => {
-  test("a change outside scope → needs_review; approve resumes at build with the edits intact", async () => {
-    const h = setup({ agent: (wt) => { writeFileSync(join(wt, "README.md"), "edited\n"); } });
+  test("a review flag → needs_review; approve resumes at build with the edits intact", async () => {
+    const h = setup({ agent: (wt) => { writeFileSync(join(wt, "app/build.sh"), "echo hi\n"); } });
     const id = h.add();
     await runNext(h.ctx);
     const reviewed = h.lastRun(id);
-    expect(h.req(id)).toMatchObject({ status: "needs_review", status_reason: "out_of_scope: README.md" });
-    expect(JSON.parse(reviewed.flags)).toEqual([{ kind: "out_of_scope", path: "README.md" }]);
+    expect(h.req(id)).toMatchObject({ status: "needs_review", status_reason: "build_file: app/build.sh" });
+    expect(JSON.parse(reviewed.flags)).toEqual([{ kind: "build_file", path: "app/build.sh" }]);
     expect(h.originHead()).toBe(h.initial);
     expect(h.worktrees()).toEqual([]);
 
@@ -218,7 +218,37 @@ describe("runner: gates", () => {
     await runNext(h.ctx);
     expect(h.req(id)).toMatchObject({ status: "done", attempts: 1 });
     expect(h.prompts.length).toBe(1);
-    expect(g.git(h.fx.origin, ["show", "main:README.md"]).out).toBe("edited");
+    expect(g.git(h.fx.origin, ["show", "main:app/build.sh"]).out).toBe("echo hi");
+  });
+
+  test("a change outside the selected projects → blocked_pre_push, and approval can't push it through", async () => {
+    const h = setup({ agent: (wt) => { editMain(wt); mkdirSync(join(wt, "ios")); writeFileSync(join(wt, "ios/App.swift"), "x\n"); } });
+    h.project("p-ios", { ...h.recipe, deploy_group: "g-ios", scope_path: "ios/" });
+    const id = h.add();
+    await runNext(h.ctx);
+    const stopped = h.lastRun(id);
+    expect(h.req(id)).toMatchObject({ status: "blocked_pre_push", status_reason: "changed files outside the selected projects: ios/App.swift (p-ios, not selected)" });
+    expect(h.originHead()).toBe(h.initial);
+
+    h.db.query("UPDATE requests SET status = 'queued', resume_run = ? WHERE id = ?").run(stopped.id, id);
+    await runNext(h.ctx);
+    expect(h.req(id).status).toBe("blocked_pre_push");
+    expect(h.originHead()).toBe(h.initial);
+    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith(h.initial.slice(0, 7));
+  });
+
+  test("build_unsandboxed builds outside the sandbox, after the files the agent left behind are cleaned", async () => {
+    const h = setup({ agent: (wt) => { editMain(wt); mkdirSync(join(wt, "obj")); writeFileSync(join(wt, "obj/planted.targets"), "x\n"); } });
+    // The user's checkout is unreadable from the sandbox; an ignored file the agent wrote must be gone.
+    const build = `test ! -e obj/planted.targets && cat '${h.fx.repo}/README.md'`;
+    h.db.query("UPDATE projects SET recipe = ?").run(JSON.stringify({ ...h.recipe, build_cmd: build, build_unsandboxed: true }));
+    const id = h.add();
+    await runNext(h.ctx);
+    expect(h.req(id).status).toBe("done");
+    h.db.query("UPDATE projects SET recipe = ?").run(JSON.stringify({ ...h.recipe, build_cmd: `cat '${h.fx.repo}/README.md'` }));
+    const sandboxed = h.add();
+    await runNext(h.ctx);
+    expect(h.req(sandboxed)).toMatchObject({ status: "blocked_pre_push", status_reason: "build failed (exit 1)" });
   });
 
   test("failing tests → blocked_pre_push, nothing pushed", async () => {
@@ -520,6 +550,112 @@ describe("runner: drift guard (D5, D10, C1)", () => {
       expect(await runNext(h.ctx)).toEqual({ kind: "idle" });
     });
   }
+});
+
+describe("runner: a request with several projects", () => {
+  // A second project in the same repo: scope web/, its own group and "production" directory.
+  function second(h: ReturnType<typeof setup>, r: Partial<Recipe> = {}) {
+    const prod2 = join(h.fx.root, "prod2");
+    mkdirSync(prod2);
+    writeFileSync(join(prod2, "VERSION"), `${h.initial.slice(0, 7)} 2026-10-17 12:00\n`);
+    const recipe: Recipe = {
+      ...h.recipe, deploy_group: "g2", scope_path: "web/",
+      deploy_cmd: `test ! -e '${prod2}/fail' && printf '%s 2026-10-18 09:00\\n' "$(git rev-parse --short HEAD)" > '${prod2}/VERSION'`,
+      targets: [{ name: "prod2", live_version_cmd: `cat '${prod2}/VERSION'` }], ...r,
+    };
+    return { prod2, recipe, id: h.project("p2", recipe) };
+  }
+  const both = (h: ReturnType<typeof setup>, p2: number) => {
+    const id = h.add();
+    h.db.query("INSERT INTO request_projects (request_id, project_id) VALUES (?, ?)").run(id, p2);
+    return id;
+  };
+  const editBoth: AgentFn = (wt) => { editMain(wt); mkdirSync(join(wt, "web"), { recursive: true }); writeFileSync(join(wt, "web/page.txt"), "page\n"); };
+  const steps = (runId: number, step: string) => (h: ReturnType<typeof setup>) =>
+    (h.db.query("SELECT log_path FROM steps WHERE run_id = ? AND step = ? ORDER BY id").all(runId, step) as { log_path: string }[]);
+
+  test("both scopes are allowed, a shared test command runs once, and each project deploys in deploy_order", async () => {
+    const h = setup({ agent: editBoth });
+    const order = join(h.fx.root, "order");
+    h.db.query("UPDATE projects SET recipe = ? WHERE name = 'p1'").run(JSON.stringify({ ...h.recipe, deploy_cmd: `${h.recipe.deploy_cmd} && echo p1 >> '${order}'` }));
+    const p2 = second(h);
+    p2.recipe.deploy_cmd += ` && echo p2 >> '${order}'`;
+    p2.recipe.deploy_order = -1;
+    h.db.query("UPDATE projects SET recipe = ? WHERE name = 'p2'").run(JSON.stringify(p2.recipe));
+    const id = both(h, p2.id);
+    await runNext(h.ctx);
+    const run = h.lastRun(id);
+    expect(h.req(id)).toMatchObject({ status: "done", status_reason: "deployed" });
+    expect(readFileSync(order, "utf8")).toBe("p2\np1\n");
+    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith(run.commit_sha.slice(0, 7));
+    expect(readFileSync(join(p2.prod2, "VERSION"), "utf8")).toStartWith(run.commit_sha.slice(0, 7));
+    expect(steps(run.id, "test")(h).length).toBe(1);
+    expect(h.prompts[0]).toContain("Change files only under web/, app/.");
+  });
+
+  test("a shared deploy command runs once", async () => {
+    const h = setup({ agent: editBoth });
+    const p2 = second(h, { deploy_cmd: h.recipe.deploy_cmd, targets: h.recipe.targets });
+    const id = both(h, p2.id);
+    await runNext(h.ctx);
+    expect(h.req(id).status).toBe("done");
+    expect(steps(h.lastRun(id).id, "deploy")(h).length).toBe(1);
+  });
+
+  test("a failed deploy blocks only its group; the one before stays live, and re-run deploy ships just the failed one", async () => {
+    const h = setup({ agent: editBoth });
+    const p2 = second(h, { deploy_order: 1 });
+    writeFileSync(join(p2.prod2, "fail"), "");
+    const id = both(h, p2.id);
+    await runNext(h.ctx);
+    const sha = h.lastRun(id).commit_sha;
+    expect(h.req(id)).toMatchObject({ status: "blocked_post_push", status_reason: "p2: deploy failed (exit 1)" });
+    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith(sha.slice(0, 7));
+    expect(h.group("g1")).toMatchObject({ lock: "free" });
+    expect(h.group("g2")).toMatchObject({ lock: "blocked", locked_by_request: id, undeployed_sha: sha });
+
+    rmSync(join(p2.prod2, "fail"));
+    requestRedeploy(h.db, id);
+    await runNext(h.ctx);
+    expect(h.req(id)).toMatchObject({ status: "done", status_reason: "deployed" });
+    expect(steps(h.lastRun(id).id, "deploy")(h).length).toBe(1);
+    expect(readFileSync(join(p2.prod2, "VERSION"), "utf8")).toStartWith(sha.slice(0, 7));
+    expect(h.group("g2")).toMatchObject({ lock: "free", locked_by_request: null });
+  });
+
+  test("a request waits while any of its projects' groups is blocked", async () => {
+    const h = setup({ agent: editBoth });
+    const p2 = second(h);
+    h.db.query("UPDATE deploy_groups SET lock = 'blocked', lock_reason = 'held' WHERE name = 'g2'").run();
+    const id = both(h, p2.id);
+    expect(await runNext(h.ctx)).toEqual({ kind: "idle" });
+    expect(h.req(id).status).toBe("queued");
+  });
+
+  test("each project's test baseline is its own: a combined run doesn't raise a single project's", async () => {
+    const h = setup({
+      agent: editBoth, recipe: { test_cmd: "mkdir -p TestResults && cp app/trx.xml TestResults/a.trx", test_result_file: "TestResults/a.trx" },
+      files: { "app/trx.xml": trx(["A", "B", "C"]), "web/trx.xml": trx(["W"]) },
+    });
+    const p2 = second(h, { test_cmd: "mkdir -p TestResults && cp web/trx.xml TestResults/w.trx", test_result_file: "TestResults/w.trx" });
+    const combined = both(h, p2.id);
+    await runNext(h.ctx);
+    expect(h.req(combined)).toMatchObject({ status: "done" });
+    expect(h.lastRun(combined).tests_total).toBe(4);
+    h.setAgent(editMain);
+    const alone = h.add();
+    await runNext(h.ctx);
+    expect(h.req(alone).status).toBe("done");
+  });
+
+  test("projects of different repositories in one request → blocked_pre_push before any work", async () => {
+    const h = setup({ agent: editBoth });
+    const p2 = second(h, { repo: join(h.fx.root, "elsewhere") });
+    const id = both(h, p2.id);
+    await runNext(h.ctx);
+    expect(h.req(id)).toMatchObject({ status: "blocked_pre_push", status_reason: "p2 is not in the same repository and branch as p1" });
+    expect(h.prompts).toEqual([]);
+  });
 });
 
 describe("parseVersion", () => {

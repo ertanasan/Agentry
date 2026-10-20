@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "VocaTrain_ios: the SwiftUI app and VocaTrainKit. No deploy: a request ends as built, and scripts/testflight.sh uploads by hand.",
+    "The app build runs unsandboxed (build_unsandboxed): xcodebuild resolves the local VocaTrainKit package through the user's SwiftPM cache, which the sandbox must not open. Xcode project files are build files, so a change to them needs review first.",
+    "The tests are VocaTrainKit's (swift test, no simulator) in the sandbox. Swift Build writes to the per-user temp folder whatever TMPDIR says (sandbox_user_temp), and SwiftPM's own caches are pointed into the run's temp dir. The simulator UI tests (scripts/test.sh) need the dev API and the test account, so they don't run here.",
+    "deploy_order 10: in a request with vt-backend, the server deploys before the app that calls it."
+  ],
+  "repo": "/path/to/VocaTrain",
+  "deploy_group": "vt-ios",
+  "deploy_order": 10,
+  "scope_path": "VocaTrain_ios/",
+  "build_cmd": "xcodebuild build -quiet -project VocaTrain_ios/VocaTrain.xcodeproj -scheme VocaTrain -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath .build/DerivedData CODE_SIGNING_ALLOWED=NO",
+  "build_unsandboxed": true,
+  "sandbox_user_temp": true,
+  "test_cmd": "cd VocaTrain_ios/VocaTrainKit && CLANG_MODULE_CACHE_PATH=\"$TMPDIR/clang-module-cache\" swift test --disable-sandbox --cache-path \"$TMPDIR/swiftpm/cache\" --config-path \"$TMPDIR/swiftpm/config\" --security-path \"$TMPDIR/swiftpm/security\"",
+  "test_globs": ["VocaTrain_ios/VocaTrainKit/Tests/**", "VocaTrain_ios/VocaTrainUITests/**"],
+  "skip_patterns": ["XCTSkip", "\\.disabled\\(", "withKnownIssue"],
+  "timeouts_s": { "build": 1800, "test": 1200 }
+}

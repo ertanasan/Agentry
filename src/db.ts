@@ -97,6 +97,22 @@ export const MIGRATIONS: string[] = [
      id INTEGER PRIMARY KEY, request_id INTEGER NOT NULL REFERENCES requests(id), name TEXT NOT NULL,
      mime TEXT NOT NULL, size INTEGER NOT NULL, created_at INTEGER NOT NULL);
    CREATE INDEX attachments_request ON attachments(request_id);`,
+  // 4: a request may span several projects of one repo. requests.project_id stays the first one, and the trigger
+  // puts it in request_projects on every insert. Test counts move to one row per project, so each project's
+  // baseline is its own even when one test command served several.
+  `CREATE TABLE request_projects (
+     request_id INTEGER NOT NULL REFERENCES requests(id), project_id INTEGER NOT NULL REFERENCES projects(id),
+     PRIMARY KEY (request_id, project_id));
+   INSERT INTO request_projects (request_id, project_id) SELECT id, project_id FROM requests;
+   CREATE TRIGGER request_first_project AFTER INSERT ON requests BEGIN
+     INSERT OR IGNORE INTO request_projects (request_id, project_id) VALUES (NEW.id, NEW.project_id);
+   END;
+   CREATE TABLE run_tests (
+     run_id INTEGER NOT NULL REFERENCES runs(id), project_id INTEGER NOT NULL REFERENCES projects(id),
+     total INTEGER NOT NULL, skipped INTEGER NOT NULL);
+   INSERT INTO run_tests (run_id, project_id, total, skipped)
+     SELECT ru.id, r.project_id, ru.tests_total, ru.tests_skipped FROM runs ru JOIN requests r ON r.id = ru.request_id
+     WHERE ru.tests_total IS NOT NULL;`,
 ];
 
 export function openDb(path: string): Database {

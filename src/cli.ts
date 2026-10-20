@@ -28,7 +28,7 @@ const RESOLVE_EVERY_MS = 60_000;
 
 const USAGE = `usage: agentry <command>
   project add <name> <recipe.json>
-  add <project> <title> [--body B] [--done-when D] [--done-when-test T] [--priority N]
+  add <project>[,<project>...] <title> [--body B] [--done-when D] [--done-when-test T] [--priority N]
   list [--all]
   run [--once]                       work the queue (--once: stop when idle or paused)
   answer <id> <text>                 needs_info → queued
@@ -122,9 +122,9 @@ function projectAdd(db: Database, args: string[]): number {
 
 function add(db: Database, args: string[], o: Record<string, string | boolean | undefined>): number {
   const [project, ...title] = args;
-  if (!project || !title.length) fail("usage: agentry add <project> <title> [--body B] [--done-when D] [--done-when-test T]");
+  if (!project || !title.length) fail("usage: agentry add <project>[,<project>...] <title> [--body B] [--done-when D] [--done-when-test T]");
   const id = A.addRequest(db, {
-    project, title: title.join(" "), body: o.body as string | undefined, doneWhen: o["done-when"] as string | undefined,
+    projects: project.split(","), title: title.join(" "), body: o.body as string | undefined, doneWhen: o["done-when"] as string | undefined,
     doneWhenTest: o["done-when-test"] as string | undefined, priority: Number(o.priority ?? 0),
   });
   console.log(`#${id} queued`);
@@ -132,7 +132,8 @@ function add(db: Database, args: string[], o: Record<string, string | boolean | 
 }
 
 function list(db: Database, all: boolean): number {
-  const rows = db.query(`SELECT r.id, r.status, r.status_reason, r.title, p.name AS project FROM requests r JOIN projects p ON p.id = r.project_id
+  const rows = db.query(`SELECT r.id, r.status, r.status_reason, r.title, (SELECT group_concat(p.name) FROM request_projects rp
+    JOIN projects p ON p.id = rp.project_id WHERE rp.request_id = r.id) AS project FROM requests r
     ${all ? "" : "WHERE r.status NOT IN ('done', 'done_manual', 'canceled')"} ORDER BY r.id`).all() as
     { id: number; status: string; status_reason: string | null; title: string; project: string }[];
   for (const r of rows) {

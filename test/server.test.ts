@@ -149,6 +149,28 @@ describe("actions", () => {
     expect(h.db.query("SELECT actor FROM events WHERE type = 'add'").get()).toEqual({ actor: "user:ertan" });
   });
 
+  test("a request can name several projects of one repo, never projects of different repos or none", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    const recipe = (scope: string) => JSON.stringify({ repo: h.fx.repo, deploy_group: "g1", scope_path: scope, test_cmd: "true" });
+    h.db.query("INSERT INTO projects (name, repo_id, deploy_group_id, recipe) VALUES ('vt-ios', 1, 1, ?)").run(recipe("ios/"));
+    h.db.query("INSERT INTO repos (name, path) VALUES ('other', '/other')").run();
+    h.db.query("INSERT INTO projects (name, repo_id, deploy_group_id, recipe) VALUES ('habit', 2, 1, ?)").run(recipe("x/"));
+    const post = (projects: string[]) => {
+      const form = new URLSearchParams([...projects.map((p) => ["project", p]), ["title", "t"]]);
+      return fetch(h.url + "/requests", { method: "POST", redirect: "manual", body: form, headers: { cookie, origin: h.url, "content-type": "application/x-www-form-urlencoded" } });
+    };
+    expect((await post(["vt-web", "vt-ios"])).status).toBe(303);
+    expect(h.db.query("SELECT p.name FROM request_projects rp JOIN projects p ON p.id = rp.project_id WHERE rp.request_id = 1 ORDER BY p.name").all())
+      .toEqual([{ name: "vt-ios" }, { name: "vt-web" }]);
+    expect(await (await h.call("/", { cookie })).text()).toMatch(/#1<\/strong> <span class="muted">vt-web, vt-ios<\/span>/);
+    const mixed = await post(["vt-web", "habit"]);
+    expect(mixed.status).toBe(400);
+    expect(await mixed.text()).toContain("the projects of one request must share a repository");
+    expect((await post([])).status).toBe(400);
+    expect(h.db.query("SELECT COUNT(*) AS n FROM requests").get()).toEqual({ n: 1 });
+  });
+
   test("an action on the wrong state is refused with the reason; an unknown request is 404", async () => {
     const h = await setup();
     const { cookie } = await h.signUp();

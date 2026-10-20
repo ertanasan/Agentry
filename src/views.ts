@@ -38,6 +38,9 @@ button.danger { color: var(--bad); }
 form.inline { display: inline; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; } .chips label { border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; }
 .chips input { margin-right: 4px; }
+details.combo { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+details.combo summary { padding: 8px 10px; cursor: pointer; min-height: 40px; }
+details.combo label { display: flex; gap: 8px; align-items: center; padding: 8px 10px; min-height: 40px; border-top: 1px solid var(--line); }
 pre { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow-x: auto; font: 12px/1.4 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow-y: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; } td, th { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
 a { color: var(--accent); }
@@ -126,7 +129,8 @@ ${flash ? html`<div class="card bad">${flash}</div>` : ""}
 
 <h2>New request</h2>
 <form method="post" action="/requests" class="card" enctype="multipart/form-data">
-  <div class="chips">${d.projects.map((p, i) => html`<label><input type="radio" name="project" value="${p.name}" ${i === 0 ? new Html("checked") : ""} required>${p.name}</label>`)}</div>
+  <details class="combo"><summary>Projects: <span data-picked>choose one or more</span></summary>
+    ${d.projects.map((p) => html`<label><input type="checkbox" name="project" value="${p.name}">${p.name}</label>`)}</details>
   <div class="row"><input type="text" name="title" required maxlength="200" placeholder="What should change?"></div>
   <div class="row"><textarea name="body" placeholder="Details (optional)"></textarea></div>
   <div class="row"><input type="text" name="done_when" placeholder="Done when (optional)"></div>
@@ -145,7 +149,7 @@ ${d.queue.length ? d.queue.map((r) => html`<div class="card">${reqLine(r)}</div>
 ${d.recent.map((r) => html`<div class="card">${reqLine(r)}${r.status === "done" ? html`<details><summary>Reopen</summary>
   <form method="post" action="/requests/${r.id}/reopen"><textarea name="text" required placeholder="What's wrong?"></textarea>
   <div class="row"><button>Reopen</button></div></form></details>` : ""}</div>`)}
-`, user);
+`, user, html`<script src="/static/home.js" defer></script>`);
 }
 
 export type StepRow = { n: number; step: string; exit_code: number | null; started_at: number; ended_at: number | null };
@@ -208,6 +212,18 @@ export function registerPage(code: string, name: string): string {
 export function messagePage(title: string, message: string, user?: User | null): string {
   return page(title, html`<div class="card">${message}</div><p><a href="/">Back</a></p>`, user);
 }
+
+// The home page's project picker (served as /static/home.js): the summary names the ticked projects, and the
+// form isn't sent with none.
+export const HOME_JS = `
+for (const combo of document.querySelectorAll("details.combo")) {
+  const picked = () => [...combo.querySelectorAll("input:checked")].map((i) => i.value);
+  const show = () => { combo.querySelector("[data-picked]").textContent = picked().join(", ") || "choose one or more"; };
+  combo.addEventListener("change", show);
+  combo.closest("form").addEventListener("submit", (e) => { if (!picked().length) { e.preventDefault(); combo.open = true; } });
+  show();
+}
+`;
 
 // The browser half of sign-in and registration (served as /static/app.js).
 export const APP_JS = `

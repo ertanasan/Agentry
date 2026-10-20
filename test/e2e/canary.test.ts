@@ -123,3 +123,25 @@ describe("sandbox canary: allowed", () => {
     expect(r.out).toContain("Claude Code");
   });
 });
+
+describe("sandbox canary: the per-user temp folder (a recipe's sandbox_user_temp)", () => {
+  const temp = Bun.spawnSync(["getconf", "DARWIN_USER_TEMP_DIR"]).stdout.toString().trim();
+  const file = join(temp, `agentry-canary-${process.pid}`);
+
+  test("closed by default", () => expectDenied(`touch '${file}'`));
+
+  test("open when asked; the caches next to it stay closed", async () => {
+    const open = sandbox({ worktree: wt, runTmp: join(fx.root, "run-tmp-2"), pkgCache, gitDir: join(fx.repo, ".git"), userTemp: true });
+    const run = async (command: string) => {
+      const logPath = join(fx.root, "logs", `${++n}.log`);
+      const r = await runStep(command, { cwd: wt, logPath, timeoutMs: 30_000, wrap: open.wrap, env: open.env });
+      return { code: r.exitCode, out: readFileSync(logPath, "utf8") };
+    };
+    try {
+      expect((await run(`touch '${file}' && cat '${file}'`)).code).toBe(0);
+    } finally { if (existsSync(file)) unlinkSync(file); }
+    const caches = await run(`ls '${join(temp, "..", "C")}' >/dev/null`);
+    expect(caches.code).not.toBe(0);
+    expect(caches.out).toContain("Operation not permitted");
+  });
+});

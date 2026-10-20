@@ -31,11 +31,11 @@ export type Resolution = "pushed" | "not_pushed" | "unknown";
 
 type RunRow = {
   id: number; request_id: number; current_step: string | null; pgid: number | null; base_sha: string | null;
-  commit_sha: string | null; push_state: PushState; recipe: string; deploy_group_id: number;
+  commit_sha: string | null; push_state: PushState; recipe: string;
 };
 
 const RUN_COLUMNS = `ru.id, ru.request_id, ru.current_step, ru.pgid, ru.base_sha, ru.commit_sha, ru.push_state,
-  p.recipe, p.deploy_group_id`;
+  p.recipe`;
 const RUN_JOIN = "FROM runs ru JOIN requests r ON r.id = ru.request_id JOIN projects p ON p.id = r.project_id";
 
 export async function recover(ctx: RecoveryCtx, o: { graceMs?: number; now?: number } = {}): Promise<RecoveryReport> {
@@ -116,12 +116,12 @@ export async function resolvePushUnknown(ctx: RecoveryCtx, runId: number): Promi
     if (sha) {
       db.query("UPDATE runs SET push_state = 'pushed', commit_sha = ? WHERE id = ?").run(sha, run.id);
       setRequestStatus(db, run.request_id, "blocked_post_push", `${sha.slice(0, 7)} is on origin; deploy not run`);
-      lockGroup(db, run, `${sha.slice(0, 7)} pushed, not deployed`, sha);
+      lockGroups(db, run, `${sha.slice(0, 7)} pushed, not deployed`, sha);
     } else {
       db.query("UPDATE runs SET push_state = 'not_pushed' WHERE id = ?").run(run.id);
       setRequestStatus(db, run.request_id, "blocked_pre_push", "push did not reach origin");
-      db.query("UPDATE deploy_groups SET lock = 'free', lock_reason = NULL, locked_by_request = NULL, undeployed_sha = NULL WHERE id = ? AND locked_by_request = ?")
-        .run(run.deploy_group_id, run.request_id);
+      db.query("UPDATE deploy_groups SET lock = 'free', lock_reason = NULL, locked_by_request = NULL, undeployed_sha = NULL WHERE locked_by_request = ?")
+        .run(run.request_id);
     }
   });
   return sha ? "pushed" : "not_pushed";
@@ -144,12 +144,15 @@ async function interrupt(ctx: RecoveryCtx, run: RunRow, now: number): Promise<"b
     db.query("UPDATE runs SET status = 'interrupted', current_step = NULL, pgid = NULL, push_state = ?, commit_sha = ?, ended_at = ? WHERE id = ?")
       .run(pushState, sha || run.commit_sha, now, run.id);
     setRequestStatus(db, run.request_id, status, reason, now);
-    if (post) lockGroup(db, run, reason, sha || run.commit_sha);
+    if (post) lockGroups(db, run, reason, sha || run.commit_sha);
   });
   return status;
 }
 
-function lockGroup(db: Database, run: RunRow, reason: string, sha: string | null): void {
-  db.query("UPDATE deploy_groups SET lock = 'blocked', lock_reason = ?, locked_by_request = ?, undeployed_sha = ? WHERE id = ?")
-    .run(reason, run.request_id, sha, run.deploy_group_id);
+// Which of the request's projects were deployed is not known, so all their groups are blocked; a re-run
+// deploy skips the ones already live.
+function lockGroups(db: Database, run: RunRow, reason: string, sha: string | null): void {
+  db.query(`UPDATE deploy_groups SET lock = 'blocked', lock_reason = ?, locked_by_request = ?, undeployed_sha = ? WHERE id IN (
+    SELECT p.deploy_group_id FROM request_projects rp JOIN projects p ON p.id = rp.project_id WHERE rp.request_id = ?)`)
+    .run(reason, run.request_id, sha, run.request_id);
 }
