@@ -2,8 +2,11 @@
 #   C:\Agentry\agentry.cmd <command> [args]          what an administrator types (setup writes agentry.cmd)
 #   ... -Log C:\Agentry\logs\run.log run             what the startup tasks run, as AgentryRunner
 # `run` and `serve` belong to the startup tasks: started by hand they would run as you, not as AgentryRunner.
-param([string]$Log = '', [Parameter(ValueFromRemainingArguments)][string[]]$Rest)
+# No param block: a named -Log would also bind by position, and an advanced script would take --all for a parameter.
 $ErrorActionPreference = 'Stop'
+$Log = ''
+$Rest = @($args)
+if ($Rest.Count -ge 2 -and $Rest[0] -eq '-Log') { $Log = $Rest[1]; $Rest = @($Rest | Select-Object -Skip 2) }
 $root = Split-Path (Split-Path $PSScriptRoot)  # <root>\app\setup -> <root>
 . (Join-Path $root 'agentry-env.ps1')
 $bun = Join-Path $root 'bin\bun.exe'

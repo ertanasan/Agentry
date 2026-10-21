@@ -181,8 +181,11 @@ if (Test-Path (Join-Path $app '.git')) {
 } else {
   git clone --quiet --branch $Branch $Repo $app; Assert-Exit 'git clone'
 }
+# Copies, not hard links into this administrator's package cache: linked files keep the cache's access list, which
+# AgentryRunner cannot read.
+Remove-Item (Join-Path $app 'node_modules') -Recurse -Force -ErrorAction SilentlyContinue
 Push-Location $app
-try { & $bunExe install --frozen-lockfile; Assert-Exit 'bun install' } finally { Pop-Location }
+try { & $bunExe install --frozen-lockfile --backend copyfile; Assert-Exit 'bun install' } finally { Pop-Location }
 $csc = Join-Path ([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) 'csc.exe'
 & $csc /nologo /optimize "/out:$app\tools\runas\agentry-runas.exe" "$app\tools\runas\runas.cs"; Assert-Exit 'Compiling agentry-runas'
 
