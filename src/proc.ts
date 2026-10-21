@@ -1,9 +1,9 @@
-// Runs one step command in its own process group (eng review D8).
-// On timeout the whole group gets SIGTERM, then SIGKILL after a grace period, and the result is returned only
-// once no process of the group is left. Leftovers of a step that exited normally are swept the same way.
+// Runs one step command as a process tree of its own (eng review D8): a process group on the Mac, a job object on
+// Windows (platform.ts). On timeout the whole tree is stopped (SIGTERM, then SIGKILL after a grace period, where
+// the system has signals), and the result is returned only once no process of it is left. Leftovers of a step
+// that exited normally are swept the same way.
 // A command line runs through the platform's shell; an argv array runs as is, with no shell (winhost review
 // D16). Output reaches the log through Agentry, which stops writing at maxLogBytes (D15).
-import { spawn } from "node:child_process";
 import { closeSync, createWriteStream, mkdirSync, openSync, readSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { platform } from "./platform.ts";
@@ -30,34 +30,19 @@ export type StepOptions = {
 };
 
 export function groupAlive(pgid: number): boolean {
-  try { process.kill(-pgid, 0); return true; }
-  catch (e: any) { return e.code === "EPERM"; }
+  return platform.treeAlive(pgid);
 }
 
-function signalGroup(pgid: number, signal: NodeJS.Signals): void {
-  try { process.kill(-pgid, signal); } catch { /* group already gone */ }
-}
-
-// Terminates every process in the group: SIGTERM, wait up to graceMs, then SIGKILL, then wait until it is gone.
+// Terminates every process in the tree and waits until it is gone (on the Mac: SIGTERM, up to graceMs, then SIGKILL).
 export async function killGroup(pgid: number, graceMs = 20_000): Promise<void> {
-  if (!groupAlive(pgid)) return;
-  signalGroup(pgid, "SIGTERM");
-  const deadline = Date.now() + graceMs;
-  while (groupAlive(pgid) && Date.now() < deadline) await Bun.sleep(50);
-  if (groupAlive(pgid)) signalGroup(pgid, "SIGKILL");
-  while (groupAlive(pgid)) await Bun.sleep(50);
+  await platform.killTree(pgid, graceMs);
 }
 
 export async function runStep(command: string | string[], opts: StepOptions): Promise<StepResult> {
   mkdirSync(dirname(opts.logPath), { recursive: true });
   const argv = [...(opts.wrap ?? []), ...(typeof command === "string" ? platform.shell(command) : command)];
   const stdin = opts.stdinPath ? openSync(opts.stdinPath, "r") : "ignore";
-  const child = spawn(argv[0], argv.slice(1), {
-    cwd: opts.cwd,
-    env: opts.env ?? (process.env as Record<string, string>),
-    stdio: [stdin, "pipe", "pipe"],
-    detached: true, // new session, so the child leads its own process group
-  });
+  const child = platform.spawnTree(argv, { cwd: opts.cwd, env: opts.env, stdin });
   if (typeof stdin === "number") closeSync(stdin);
   const pgid = child.pid!;
   opts.onStart?.(pgid);

@@ -14,7 +14,7 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <img alt="Runtime: Bun" src="https://img.shields.io/badge/runtime-Bun-black">
   <img alt="Language: TypeScript" src="https://img.shields.io/badge/language-TypeScript-3178c6">
-  <img alt="Platform: macOS" src="https://img.shields.io/badge/runner-macOS-lightgrey">
+  <img alt="Runner: macOS | Windows" src="https://img.shields.io/badge/runner-macOS%20%7C%20Windows-lightgrey">
   <img alt="Agent: Claude Code" src="https://img.shields.io/badge/agent-Claude%20Code-d97757">
 </p>
 
@@ -61,7 +61,7 @@ next action. Nothing reaches production on a guess.
 | | |
 |---|---|
 | **Request to production** | One request goes from plain-language intent to a deployed, verified commit with no hand-offs. |
-| **Sandboxed agent** | The agent, the build, the tests and the verifier run under a macOS `sandbox-exec` allowlist. They cannot read your home folder, keychain, SSH agent or your own checkout. |
+| **Sandboxed agent** | The agent, the build, the tests and the verifier run under a macOS `sandbox-exec` allowlist, or on Windows as a separate low-privilege user inside a job object. They cannot read your home folder, keychain, SSH agent or your own checkout. |
 | **Scope enforcement** | Each project owns a folder. If a change touches a file outside the selected projects, the request stops before push, and no approval can override that. |
 | **Anti-gaming gates** | Changes to build files and gate paths, deleted tests, newly skipped tests and lower test counts all wait for human review. |
 | **Independent verifier** | A second, read-only model call checks the diff against your *done-when* line, and is told to be strict. Passing tests alone don't count as proof. |
@@ -263,6 +263,17 @@ A **sandbox canary** test suite runs the real profile against your real home fol
 the worktree fail, that the SSH agent and login keychain can't be reached, and that the environment is
 scrubbed.
 
+**On Windows** there is no `sandbox-exec`, so the boundary is a Windows user. Agentry runs as `AgentryRunner`, and
+every sandboxed step runs as `AgentrySandbox`, a second standard user. For each run, the runner grants that user
+write access to the worktree, the run's temp dir and the package cache only, and read access to the repo's git
+metadata. Everything else is the Windows default for a user with no files of its own. Setup also denies it writing
+the top-level folders of `C:\` that every user may otherwise change, and logging on to SQL Server. Each step
+runs inside a job object with a memory cap (8 GB) and a CPU cap (50 %), so it can't starve the machine's other
+services. `setup/windows-setup.ps1 -SelfTest` runs the Windows checks
+([`test/windows.test.ts`](test/windows.test.ts)) as the runner account: the step runs as the sandbox user, can't
+read the runner's secrets or `C:\Sites`, can't write the runner's home, and is stopped by the memory cap and
+killed with its whole tree on a timeout.
+
 ### 2. A locked-down agent
 
 - Claude Code runs headless with an explicit tool list (`Bash, Read, Edit, Write, Glob, Grep` for the agent;
@@ -295,7 +306,8 @@ executes code at build time needs a person's approval**: `*.csproj`, `*.props`, 
 ### 5. Credentials
 
 - Claude is authenticated with an **API-key helper** script or a **`claude setup-token` subscription token**,
-  saved with mode `600` by `agentry token`. Neither touches the keychain.
+  saved with mode `600` by `agentry token` (on Windows, in `C:\Agentry\home`, which only `AgentryRunner` and
+  administrators can read). Neither touches the keychain.
 - The tests, build and agent never see your git credentials, SSH keys or cloud credentials. Agentry pushes and
   deploys from outside the sandbox, after the gates.
 
@@ -326,6 +338,9 @@ We'd rather you know where the boundaries are:
   dedicated, revocable key.
 - Deploy commands, and builds marked `build_unsandboxed`, run with your privileges. That's why the review gates
   above exist.
+- On Windows, the sandbox user **can read whatever Windows lets every user read**, and it can **list the names**
+  (not read the contents) of the files in Agentry's own folder, because PowerShell needs to look its starting
+  folder up in each parent. Firewall rules per user don't cover loopback, so it can reach local services too.
 
 ## Fail-safe controls
 
@@ -362,7 +377,8 @@ tests and verifier still have to pass.
 
 - **Process groups everywhere.** Every step and every git command runs in its own process group. On a timeout,
   the whole group gets `SIGTERM`, then `SIGKILL` after a grace period. Leftover processes from a step that
-  exited normally are cleaned up the same way.
+  exited normally are cleaned up the same way. On Windows, a small helper ([`tools/runas`](tools/runas)) puts
+  each one in a job object instead, and killing the helper kills the whole tree.
 - **Per-step timeouts**, with defaults and per-recipe overrides: agent 30 min, build 15, test 20, verify 5,
   deploy 30, version read 1.
 - **Capped logs.** Step output stops being written at 50 MB, after a marker line, so a runaway step can't fill
@@ -435,7 +451,7 @@ A screenshot often explains a bug faster than a paragraph does.
 
 ### Requirements
 
-- **macOS** for the runner (steps run under `sandbox-exec`)
+- **macOS**, or **Windows** with the setup script below
 - [**Bun**](https://bun.sh) and **git**
 - The [**Claude Code**](https://docs.anthropic.com/en/docs/claude-code) CLI on `PATH` (or set `AGENTRY_CLAUDE_BIN`)
 - Either an Anthropic **API key** or a **Claude subscription** token from `claude setup-token`
@@ -479,6 +495,31 @@ agentry serve                       # http://127.0.0.1:4747, with nightly backup
 
 Open the link on the device that will hold the passkey, create the passkey, and you're signed in. Run
 `agentry run` and `agentry serve` side by side, as login items or services, so the queue keeps working.
+
+### On Windows
+
+[`setup/windows-setup.ps1`](setup/windows-setup.ps1) installs a standalone Agentry (its own database, web UI and
+runner) in `C:\Agentry`. Run it in an elevated Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File windows-setup.ps1 -GitName "Your Name" -GitEmail you@example.com `
+  -PublicUrl https://myhost.example.ts.net -DeployFolders C:\Sites\MyApp -DeployServices MyApp
+```
+
+It creates the `AgentryRunner` and `AgentrySandbox` accounts, installs Bun and Claude Code, compiles the run-as
+helper, and registers two startup tasks that run `agentry serve` and `agentry run` as `AgentryRunner`. It prints
+an SSH key to add to each repository as a write-access deploy key. Then:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File windows-setup.ps1 -SelfTest   # the Windows checks, as AgentryRunner
+# run setup again with -Clone git@github.com:you/MyApp.git, then:
+C:\Agentry\agentry.cmd project add api recipe.json   # "repo": "C:\\Agentry\\repos\\MyApp"
+C:\Agentry\agentry.cmd token                          # then: Start-ScheduledTask 'Agentry runner'
+C:\Agentry\agentry.cmd user add alice --owner
+```
+
+Recipe commands run in Windows PowerShell 5.1, which has no `&&`: use `;` and
+`if ($LASTEXITCODE) { exit $LASTEXITCODE }`.
 
 ## Recipes
 
@@ -559,7 +600,7 @@ agentry backup                        back up now
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AGENTRY_HOME` | `~/.agentry` | Database, worktrees, run logs, caches, attachments, credentials |
+| `AGENTRY_HOME` | `~/.agentry` (Windows setup: `C:\Agentry\home`) | Database, worktrees, run logs, caches, attachments, credentials |
 | `AGENTRY_PORT` | `4747` | Web UI port (always bound to `127.0.0.1`) |
 | `AGENTRY_PUBLIC_URL` | `http://localhost:<port>` | The URL browsers use. Sets the passkey origin and the allowed Host/Origin. |
 | `AGENTRY_BACKUP_DIR` | `$AGENTRY_HOME/backups` | Backup destination. If you set it, the folder must already exist. |
@@ -595,7 +636,8 @@ src/
   actions.ts        every state action, shared by the CLI and the web UI
   db.ts             schema, migrations, lease, fenced writes, audit log
   git.ts            pinned worktrees, bounded async git
-  proc.ts           process groups, timeouts, capped logs
+  proc.ts           process trees, timeouts, capped logs
+  platform.ts       shell and process trees per system (platform-windows.ts: PowerShell, job objects, sandbox user)
   server.ts         HTTP routes, auth checks, security headers
   views.ts          server-rendered pages (escape-by-default templates)
   accounts.ts       passkeys, sessions, invites, sign-in throttle
@@ -603,6 +645,8 @@ src/
   backup.ts         nightly backups and log retention
   adapters/         the Claude Code adapter and the agent/verifier contracts
   results/trx.ts    TRX test-result parser
+tools/runas/        agentry-runas.exe (C#): runs a step in a job object, as the sandbox user if asked
+setup/              windows-setup.ps1 and its launcher; spike/: the isolation spike behind the Windows design
 ```
 
 The agent and the verifier sit behind small adapter interfaces ([`src/adapters/types.ts`](src/adapters/types.ts)),
@@ -617,8 +661,10 @@ bun run eval:verifier # the done-when verifier against 10 labeled cases, with th
 ```
 
 - **End-to-end tests** drive the full loop against real git repositories, with a fake agent and a fake pusher.
-- **The sandbox canary** checks the real sandbox profile against your real home folder. The keychain and SSH-agent
-  checks are opt-in, with `AGENTRY_CANARY_SECRETS=1`.
+- **The sandbox canary** (macOS) checks the real sandbox profile against your real home folder. The keychain and
+  SSH-agent checks are opt-in, with `AGENTRY_CANARY_SECRETS=1`.
+- **The Windows checks** ([`test/windows.test.ts`](test/windows.test.ts)) run steps under the run-as helper and as
+  the sandbox user on a real Windows machine: `windows-setup.ps1 -SelfTest`.
 - **The verifier eval** runs the real, sandboxed verifier on labeled cases, including tests that assert nothing,
   wrong fields and missed edge cases, and must score 10/10. Its base snapshot isn't included in this repository.
 
@@ -631,7 +677,8 @@ bun run eval:verifier # the done-when verifier against 10 labeled cases, with th
 | Other test frameworks | ✅ Pass/fail through the exit code. Count checks need a TRX file. |
 | iOS / Swift | ✅ Build-only projects (`built`), sandboxed `swift test` |
 | Web UI with passkeys | ✅ Available |
-| Windows runner | 🚧 In progress. The isolation design (separate low-privilege user, job objects, file ACLs) has been validated with [`setup/spike/`](setup/spike). Until it ships, run Windows builds through a Windows deploy target, or use a dedicated machine or VM. |
+| Windows runner | ✅ Available: a standalone instance set up by [`setup/windows-setup.ps1`](setup/windows-setup.ps1). Steps run as a low-privilege user in job objects. |
+| One queue across machines | Planned: a runner on another machine claiming work from one server. Today each machine runs its own instance. |
 
 ## License
 

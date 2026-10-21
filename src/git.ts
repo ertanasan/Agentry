@@ -8,15 +8,15 @@
 // fsmonitor and hooks are off (push keeps the repository's own hooks, e.g. git-lfs pre-push, which live in the
 // shared git dir the sandbox can only read). The runner also stops a run whose pointer changed (eng review D12).
 //
-// Every operation the runner uses is async and bounded: each git process runs in its own process group with a
+// Every operation the runner uses is async and bounded: each git process runs as its own process tree with a
 // timeout (network 120 s, ls-remote 30 s, other commands 120 s; git-lfs hooks and filters make "local"
 // commands network-bound too) and is killed with its group when it overruns. While it runs, its process group
 // is reported to `observer`, so the runner records it and a restarted runner kills a leftover push before
 // asking the remote what happened (slice 2 review D12, D13). The synchronous `git` is for tests and tooling.
-import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { platform } from "./platform.ts";
 import { killGroup } from "./proc.ts";
 
 export type GitResult = { code: number; out: string; err: string };
@@ -46,9 +46,9 @@ export function git(cwd: string, args: string[]): GitResult {
 
 // One git command in its own process group, killed with its group after `timeoutMs` (exit code 124).
 export async function run(cwd: string, args: string[], timeoutMs = timeouts.local): Promise<GitResult> {
-  const child = spawn("git", pinnedArgs(cwd, args), {
-    cwd, stdio: ["ignore", "pipe", "pipe"], detached: true,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, // never wait for a credential prompt
+  const child = platform.spawnTree(["git", ...pinnedArgs(cwd, args)], {
+    cwd, stdin: "ignore",
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } as Record<string, string>, // never wait for a credential prompt
   });
   const pgid = child.pid!;
   observer.onStart?.(pgid);

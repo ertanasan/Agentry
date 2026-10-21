@@ -150,7 +150,8 @@ export async function redeploy(ctx: RunnerCtx, requestId: number): Promise<Reque
     attempt: last.attempt, branch: last.branch, base: last.base_sha, candidate: last.candidate_sha, commit: sha, pushState: last.push_state,
   });
   return execute(j, async () => {
-    if ((await g.fetch(j.repo, j.remote)).code !== 0) throw new Error("git fetch failed");
+    const f = await g.fetch(j.repo, j.remote);
+    if (f.code !== 0) throw new Error(fetchFailed(f));
     if (!await g.isAncestor(j.repo, sha, `${j.remote}/${j.branch}`)) throw new Error(`${sha.slice(0, 7)} is not on ${j.remote}/${j.branch}`);
     // Origin has the commit: record that on this run and on earlier unknown pushes of it (slice 2 review D10).
     w(ctx, () => ctx.db.query("UPDATE runs SET push_state = 'pushed' WHERE request_id = ? AND commit_sha = ? AND push_state IN ('push_unknown', 'push_started')")
@@ -232,7 +233,8 @@ function finish(j: Job, s: Stop): void {
 async function pipeline(j: Job, resumed: boolean): Promise<Stop> {
   const odd = j.parts.find((p) => p.recipe.repo !== j.repo || (p.recipe.remote ?? "origin") !== j.remote || (p.recipe.branch ?? "main") !== j.branch);
   if (odd) return pre(`${odd.name} is not in the same repository and branch as ${j.parts[0].name}`);
-  if ((await g.fetch(j.repo, j.remote)).code !== 0) return infra("git fetch failed");
+  const f = await g.fetch(j.repo, j.remote);
+  if (f.code !== 0) return infra(fetchFailed(f));
   const drift = await driftGuard(j);
   if (drift) return { status: "queued", reason: drift.reason, requeue: true, lock: { reason: drift.reason, sha: null, groups: [drift.group] } };
 
@@ -265,7 +267,8 @@ async function deliver(j: Job, approved: boolean): Promise<Stop> {
   if (stopped) return stopped;
   let sha = await g.amendMessage(j.wt, commitMessage(j.req));
   for (let round = 0; ; round++) {
-    if ((await g.fetch(j.repo, j.remote)).code !== 0) return infra("git fetch failed");
+    const f = await g.fetch(j.repo, j.remote);
+  if (f.code !== 0) return infra(fetchFailed(f));
     const head = await g.remoteHead(j.repo, j.remote, j.branch);
     if (!await g.isAncestor(j.repo, head, sha)) {
       if (!await g.rebaseOnto(j.wt, `${j.remote}/${j.branch}`)) return pre(`rebase onto ${j.remote}/${j.branch} had conflicts`);
@@ -557,6 +560,12 @@ async function liveVersion(j: Job, recipe: Recipe, t: Target): Promise<LiveVersi
 }
 
 // A VERSION line is "<short-sha>[+uncommitted] <date> <time>" (D10). The SHA must still be resolved (C1).
+// "git fetch failed", with git's last line of complaint, so a paused runner says why.
+function fetchFailed(r: g.GitResult): string {
+  const why = r.err.split("\n").map((l) => l.trim()).filter(Boolean).at(-1);
+  return why ? `git fetch failed: ${why}` : "git fetch failed";
+}
+
 export function parseVersion(text: string): { short: string; uncommitted: boolean } | null {
   for (const line of text.split("\n")) {
     const m = line.trim().match(/^([0-9a-f]{4,40})(\+uncommitted)?(\s|$)/);

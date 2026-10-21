@@ -121,7 +121,7 @@ describe("runner: git that hangs (slice 2 review D12)", () => {
       const id = h.add();
       await runNext(h.ctx);
       expect(h.req(id)).toMatchObject({ status: "queued", attempts: 0 });
-      expect(runnerRow(h.db).pause_reason).toBe("git fetch failed");
+      expect(runnerRow(h.db).pause_reason).toStartWith("git fetch failed");
     } finally { Object.assign(g.timeouts, saved); server.stop(true); }
   });
 });
