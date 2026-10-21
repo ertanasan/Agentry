@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { availableParallelism, totalmem } from "node:os";
 import { join } from "node:path";
 import * as A from "./actions.ts";
-import { attachment, attachmentFile, checkUploads, MAX_IMAGE_BYTES, MAX_IMAGES_PER_REQUEST, saveUploads, type Upload } from "./attachments.ts";
+import { attachment, attachmentFile, checkUploads, MAX_FILE_BYTES, MAX_FILES_PER_REQUEST, saveUploads, type Upload } from "./attachments.ts";
 import {
   addUser, AuthError, endSession, finishLogin, finishRegistration, finishStepUp, LoginThrottle, loginOptions, recentlyVerified,
   registrationOptions, registrationUser, relyingParty, removeUser, resetUser, SESSION_TTL_MS, sessionUser, stepUpOptions, type User,
@@ -62,7 +62,7 @@ export function startServer(o: ServerOptions) {
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: o.port ?? DEFAULT_PORT,
-    maxRequestBodySize: (MAX_IMAGES_PER_REQUEST + 1) * MAX_IMAGE_BYTES, // the images plus the form's text
+    maxRequestBodySize: (MAX_FILES_PER_REQUEST + 1) * MAX_FILE_BYTES, // the files plus the form's text
     fetch: (req) => handle(req).catch((e) => {
       console.error(e);
       return text(500, "internal error");
@@ -167,16 +167,18 @@ export function startServer(o: ServerOptions) {
       return htmlRes(200, runPage(data, user));
     }
 
-    // An attached image, signed in only. Served so it can never act as a page: its sniffed type, nosniff, and a
-    // sandboxing CSP.
+    // An attached file, signed in only. Served so it can never act as a page: its sniffed type (text always as plain
+    // text), nosniff, and a sandboxing CSP. Images and text show in the browser; PDF and Office files download.
     const att = url.pathname.match(/^\/attachments\/(\d+)$/);
     if (att && req.method === "GET") {
       const a = attachment(db, Number(att[1]));
       const file = a && attachmentFile(o.home, a);
       if (!a || !file || !existsSync(file)) return text(404, "not found");
+      const plain = a.mime === "text/plain";
+      const inline = plain || a.mime.startsWith("image/");
       return new Response(Bun.file(file), { headers: {
-        ...SECURITY_HEADERS, "content-type": a.mime, "content-security-policy": "default-src 'none'; sandbox",
-        "content-disposition": "inline", "cache-control": "private, max-age=86400",
+        ...SECURITY_HEADERS, "content-type": plain ? "text/plain; charset=utf-8" : a.mime, "content-security-policy": "default-src 'none'; sandbox",
+        "content-disposition": inline ? "inline" : `attachment; filename*=UTF-8''${encodeURIComponent(a.name)}`, "cache-control": "private, max-age=86400",
       } });
     }
 
@@ -279,7 +281,7 @@ export function startServer(o: ServerOptions) {
   function homeData() {
     const rows = (where: string, order = "r.id") => db.query(`SELECT r.id, ${PROJECT_NAMES} AS project, r.title, r.status, r.status_reason, r.updated_at,
       r.body, r.done_when, (SELECT MAX(id) FROM runs WHERE request_id = r.id) AS last_run,
-      (SELECT group_concat(id) FROM attachments WHERE request_id = r.id) AS images
+      (SELECT json_group_array(json_object('id', id, 'name', name, 'mime', mime)) FROM (SELECT id, name, mime FROM attachments WHERE request_id = r.id ORDER BY id)) AS files
       FROM requests r WHERE ${where} ORDER BY ${order}`).all() as ReqRow[];
     const runner = runnerRow(db);
     const last = lastBackupAt(db);
@@ -301,7 +303,7 @@ export function startServer(o: ServerOptions) {
       FROM runs WHERE id = ?`).get(id) as any;
     if (!run) return null;
     const req = db.query(`SELECT r.id, r.title, r.status, r.status_reason, ${PROJECT_NAMES} AS project, p.recipe,
-      (SELECT group_concat(id) FROM attachments WHERE request_id = r.id) AS images FROM requests r
+      (SELECT json_group_array(json_object('id', id, 'name', name, 'mime', mime)) FROM (SELECT id, name, mime FROM attachments WHERE request_id = r.id ORDER BY id)) AS files FROM requests r
       JOIN projects p ON p.id = r.project_id WHERE r.id = ?`).get(run.request_id) as any;
     const recipes = db.query(`SELECT p.name, p.recipe FROM request_projects rp JOIN projects p ON p.id = rp.project_id
       WHERE rp.request_id = ? ORDER BY p.id`).all(run.request_id) as { name: string; recipe: string }[];
@@ -318,7 +320,7 @@ export function startServer(o: ServerOptions) {
       if (diff.length > MAX_DIFF_CHARS) { diff = diff.slice(0, MAX_DIFF_CHARS); diffCut = true; }
     }
     return {
-      run, req: { id: req.id, title: req.title, status: req.status, status_reason: req.status_reason, project: req.project, images: req.images },
+      run, req: { id: req.id, title: req.title, status: req.status, status_reason: req.status_reason, project: req.project, files: req.files },
       steps, log, logStep: chosen?.n ?? null, diffStat, diff, diffCut,
       recipe: recipes.map((p) => `${recipes.length > 1 ? `// ${p.name}\n` : ""}${JSON.stringify(JSON.parse(p.recipe), null, 2)}`).join("\n\n"),
     };
@@ -327,10 +329,10 @@ export function startServer(o: ServerOptions) {
   return { server, url: publicUrl, stop: () => server.stop(true) };
 }
 
-// The non-empty files of a form's "images" field (a browser sends an empty one when none is chosen).
+// The non-empty files of a form's "files" field (a browser sends an empty one when none is chosen).
 async function uploadsOf(form: FormData): Promise<Upload[]> {
-  const files = form.getAll("images").filter((v): v is File => typeof v !== "string" && v.size > 0);
-  return Promise.all(files.map(async (f) => ({ name: f.name || "image", bytes: new Uint8Array(await f.arrayBuffer()) })));
+  const files = form.getAll("files").filter((v): v is File => typeof v !== "string" && v.size > 0);
+  return Promise.all(files.map(async (f) => ({ name: f.name || "file", bytes: new Uint8Array(await f.arrayBuffer()) })));
 }
 
 function parseCookies(header: string | null): Record<string, string> {

@@ -46,7 +46,7 @@ next action. Nothing reaches production on a guess.
 - [Security model](#security-model)
 - [Fail-safe controls](#fail-safe-controls)
 - [The web UI](#the-web-ui)
-- [Image attachments](#image-attachments)
+- [File attachments](#file-attachments)
 - [Getting started](#getting-started)
 - [Recipes](#recipes)
 - [CLI reference](#cli-reference)
@@ -72,7 +72,7 @@ next action. Nothing reaches production on a guess.
 | **Deploy-group locks** | Projects that deploy to the same target never deploy at the same time. After a failed deploy, the group stays locked until a person resolves it. |
 | **Parallel workers** | Up to 8 requests run at once, each in its own worktree and sandbox. Pushes and deploys still take turns within each deploy group. |
 | **Crash-safe runner** | A lease, fenced writes and startup recovery mean a killed runner never double-deploys, never loses track of a push and never leaves processes behind. |
-| **Phone-friendly web UI** | Sign in with a passkey (Face ID, Touch ID or Windows Hello), queue requests, attach screenshots, answer the agent's questions, approve, retry and re-deploy from anywhere. Owners manage workers, projects and users there, after a fresh passkey check. |
+| **Phone-friendly web UI** | Sign in with a passkey (Face ID, Touch ID or Windows Hello), queue requests, attach screenshots and documents, answer the agent's questions, approve, retry and re-deploy from anywhere. Owners manage workers, projects and users there, after a fresh passkey check. |
 | **Human in the loop where it matters** | The agent can ask a question instead of guessing. You review only the changes that carry risk. |
 | **Audit trail and backups** | Every state change is logged with who made it. Nightly backups cover the database, every in-flight branch and all attachments. |
 
@@ -107,7 +107,7 @@ flowchart LR
 3. **Worktree.** The run gets a new git worktree on branch `agentry/<request>-<attempt>`, starting at the remote
    head. Agentry never checks out, resets or commits to your own checkout.
 4. **Agent.** Claude Code makes the change inside the sandbox. Its prompt includes the request, the done-when
-   line, your earlier answers, any attached images, and the `CLAUDE.md` / `AGENTS.md` of each selected project.
+   line, your earlier answers, any attached files, and the `CLAUDE.md` / `AGENTS.md` of each selected project.
    If the request is ambiguous, or the change needs code outside its scope, the agent replies `NEEDS_INFO`
    and changes nothing.
 5. **Candidate commit and inspection.** Everything the agent changed is committed as a candidate, and the diff
@@ -130,7 +130,7 @@ iOS app you upload to TestFlight yourself.
 | State | Meaning | Actions |
 |---|---|---|
 | `queued` / `running` | Waiting for the runner, or in progress. | Cancel (queued) |
-| `needs_info` | The agent asked a question. | **Answer** (with optional images), Cancel |
+| `needs_info` | The agent asked a question. | **Answer** (with optional files), Cancel |
 | `needs_review` | A gate flagged a risky change: build file, deleted or skipped test, gate path. | **Approve** (resumes at build), Reject |
 | `blocked_pre_push` | Stopped before anything left the machine: build, tests, verifier, scope or a rebase conflict. | **Retry**, **Retry with edits**, Cancel |
 | `blocked_post_push` | The commit is on `origin` but the deploy failed or couldn't be confirmed. Its deploy groups are locked. | **Re-run deploy**, Mark resolved |
@@ -429,7 +429,7 @@ system's light or dark mode.
 
 - **Status line:** runner online or offline, queue length, and the age of the last backup.
 - **New request:** a multi-select project picker, title, details, a done-when line, an optional done-when test
-  name, and up to five images.
+  name, and up to five files.
 - **Needs you:** every request waiting on a person, with the actions that fit its state. Also shown here: a
   paused runner (**Resume**), a blocked deploy group (**Unblock**), and a warning when the last backup is more
   than 48 hours old.
@@ -462,19 +462,31 @@ To reach it from outside the machine, put Agentry behind an HTTPS reverse proxy 
 Tailscale Serve), and set `AGENTRY_PUBLIC_URL` to the address your browser sees. Passkeys require HTTPS
 everywhere except `localhost`.
 
-## Image attachments
+## File attachments
 
-A screenshot often explains a bug faster than a paragraph does.
+A screenshot or a spec often explains a change faster than a paragraph does.
 
-- Attach up to **5 images per request**, each up to **10 MB**, when you **add** a request or **answer** the
+- Attach up to **5 files per request**, each up to **10 MB**, when you **add** a request or **answer** the
   agent's question. On a phone, the picker offers the camera, the photo library and files.
-- Agentry accepts **PNG, JPEG, GIF and WebP**, identified by their first bytes and never by file name or the
-  browser's content type. HEIC photos get a clear message telling you to send a screenshot or a JPEG.
-- Each run copies the images into its sandboxed temp dir, the one place outside the worktree the agent can
-  read. The prompt lists them and tells the agent to look at each one before it starts.
-- Images are immutable and only signed-in users can view them. They're served with their detected type,
-  `nosniff`, and a `sandbox` Content-Security-Policy, so an uploaded file can never act as a page.
-- Images are included in the [nightly backup](#backups-and-retention).
+- Agentry accepts the files the agent can read:
+
+  | Type | Formats | How the agent reads it |
+  |---|---|---|
+  | Images | PNG, JPEG, GIF, WebP | Claude's Read tool shows them |
+  | PDF | `.pdf` | The Read tool shows it |
+  | Text | UTF-8 with no NUL bytes: `.txt`, `.md`, `.json`, `.csv`, `.log`, `.yaml`, `.xml`, `.sql` and the like | Reads it as is |
+  | Office | `.docx`, `.xlsx`, `.pptx` | Unpacks it (a ZIP of XML) in its temp dir and reads the XML |
+
+- Types are identified by the file's bytes, never by its name or the browser's content type. Archives,
+  executables and other binary files are refused, and so are old `.doc`/`.xls`/`.ppt` files and HEIC photos,
+  each with a message saying what to send instead.
+- Each run copies the files into its sandboxed temp dir, the one place outside the worktree the agent can read.
+  The prompt lists them by name and tells the agent to read each one before it starts.
+- Files are immutable and only signed-in users can open them. They're served with their detected type,
+  `nosniff` and a `sandbox` Content-Security-Policy, so an uploaded file can never act as a page: text is always
+  plain text, images and text show in the browser, and PDF and Office files download.
+- A file's text reaches the agent like the request's own text does, so attach only what you'd type in a request.
+- Files are included in the [nightly backup](#backups-and-retention).
 
 ## Getting started
 
@@ -660,7 +672,7 @@ need a manual step.
 - A **consistent copy of the database** made with SQLite `VACUUM INTO`, safe while the runner writes.
 - A **git bundle of every `agentry/*` branch** in each repository, because requests waiting for review or a retry
   exist only on those branches.
-- A copy of all **attached images**.
+- A copy of all **attached files**.
 
 The 14 newest days are kept. Run logs older than 90 days are deleted, while their run records and summaries
 stay. Every backup, and every failure, is an audit event, and the UI warns when the newest backup is more than
@@ -684,7 +696,7 @@ src/
   server.ts         HTTP routes, auth and role checks, security headers
   views.ts          server-rendered pages (escape-by-default templates)
   accounts.ts       passkeys, sessions, step-up checks, invites, sign-in throttle
-  attachments.ts    image upload, type detection, per-run delivery
+  attachments.ts    file upload, type detection, per-run delivery
   backup.ts         nightly backups and log retention
   adapters/         the Claude Code adapter and the agent/verifier contracts
   results/trx.ts    TRX test-result parser

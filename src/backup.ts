@@ -1,6 +1,6 @@
 // Nightly backup (winhost design "Backups", review D11/D17): a consistent copy of the database with SQLite's
 // VACUUM INTO (safe while the runner writes), plus a git bundle of each repository's agentry/* branches, since
-// requests waiting for review or retry live only there, and a copy of the attached images. Keeps the 14 newest days. The same job deletes run
+// requests waiting for review or retry live only there, and a copy of the attached files. Keeps the 14 newest days. The same job deletes run
 // logs older than 90 days. Every backup, or its failure, is an audit event; the UI warns after 48 hours.
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -49,9 +49,9 @@ export async function runBackup(db: Database, home: string, dir: string, now = D
       bundles.push(bundle);
     }
 
-    // Attached images never change, so one growing copy (new files only) is enough.
-    const images = join(home, "attachments");
-    if (existsSync(images)) cpSync(images, join(dir, "attachments"), { recursive: true, force: false });
+    // Attached files never change, so one growing copy (new files only) is enough.
+    const files = join(home, "attachments");
+    if (existsSync(files)) cpSync(files, join(dir, "attachments"), { recursive: true, force: false });
 
     const removed = pruneOldBackups(dir);
     const logsPruned = pruneOldLogs(db, home, now);
