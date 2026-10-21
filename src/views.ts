@@ -50,7 +50,7 @@ a { color: var(--accent); }
 export function page(title: string, body: Html, user?: User | null, extraHead: Html = html``): string {
   return html`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title} · Agentry</title><link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<title>${title} · Agentry</title><link rel="icon" href="/static/icon.png" type="image/png">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png"><meta name="apple-mobile-web-app-title" content="Agentry"><style>${new Html(CSS)}</style>${extraHead}</head>
 <body><main>
 <header><h1><a href="/">Agentry</a></h1>${user ? html`<span class="muted">${user.name} · <form class="inline" method="post" action="/logout"><button>Sign out</button></form></span>` : ""}</header>

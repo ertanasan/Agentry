@@ -42,7 +42,7 @@ const STATIC: Record<string, { path?: string; body?: string; type: string }> = {
   "/static/webauthn.js": { path: join(modules, "@simplewebauthn", "browser", "dist", "bundle", "index.umd.min.js"), type: "text/javascript" },
   "/static/app.js": { body: APP_JS, type: "text/javascript" },
   "/static/home.js": { body: HOME_JS, type: "text/javascript" },
-  "/static/icon.svg": { path: join(assets, "icon.svg"), type: "image/svg+xml" },
+  "/static/icon.png": { path: join(assets, "icon.png"), type: "image/png" },
   "/static/apple-touch-icon.png": { path: join(assets, "apple-touch-icon.png"), type: "image/png" },  // iOS home screen
 };
 
