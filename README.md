@@ -481,56 +481,56 @@ A screenshot often explains a bug faster than a paragraph does.
 ### Requirements
 
 - **macOS:** [**Bun**](https://bun.sh), **git**, and the [**Claude Code**](https://docs.anthropic.com/en/docs/claude-code)
-  CLI on `PATH` (or set `AGENTRY_CLAUDE_BIN`)
+  CLI on `PATH`
 - **Windows:** **git** and an elevated Windows PowerShell. The setup script installs Bun and Claude Code, so skip
   to [On Windows](#on-windows).
 - Either an Anthropic **API key** or a **Claude subscription** token from `claude setup-token`
 
-### Install
+### On macOS
 
 ```sh
 git clone https://github.com/ertanasan/Agentry.git
 cd Agentry
-bun install
-alias agentry="bun $PWD/src/cli.ts"
+setup/mac-setup.sh --public-url https://myhost.tailnet.ts.net --owner alice
 ```
 
-### Authenticate the agent
+[`setup/mac-setup.sh`](setup/mac-setup.sh) sets Agentry up for the user who runs it:
 
-Pick one of these:
+- It installs the **`agentry` command** in `~/.local/bin`, with your public URL and port saved in it.
+- It adds **launchd agents** that run `agentry serve` and `agentry run` from login, start them again if they stop,
+  and log to `~/.agentry/serve.log` and `runner.log`. A stopped runner finishes the requests it's running first.
+- It asks for a **Claude token** if none is saved (paste the output of `claude setup-token`).
+- With `--owner`, it creates the **first owner** and prints their one-time passkey link (30 minutes). Open it on
+  the device that will hold the passkey.
+- It checks that the web UI **answers**, locally and at the public URL.
+
+Leave out `--public-url` to use the UI only on this Mac, at `http://localhost:4747`. To use it from your phone or
+another machine, give the HTTPS address you'll open there, for example your Tailscale Serve name (`tailscale serve
+--bg 4747`). The server accepts only that address and `localhost`, and a passkey works only at the address it was
+created for.
+
+Run the script again at any time, for example after `git pull`: it keeps the URL and port of the last run unless
+you give new ones. `--self-test` runs the sandbox canary against your Mac and checks the UI and the runner, and
+`--uninstall` removes the agents and the command (your data in `~/.agentry` stays).
+
+To use an API key instead of a subscription, write an executable script that prints the key (use a dedicated,
+revocable key):
 
 ```sh
-# Subscription: paste the output of `claude setup-token`, then Ctrl-D
-agentry token
-
-# API key: an executable script that prints the key (use a dedicated, revocable key)
 printf '#!/bin/sh\necho sk-ant-api03-...\n' > ~/.agentry/api-key-helper && chmod 700 ~/.agentry/api-key-helper
 ```
 
-### Register a project, queue a request, run
+### Register a project and queue a request
 
 ```sh
 agentry project add api recipes/my-api.json
 agentry add api "Return 404 for unknown word ids" \
   --done-when "GET /words/{id} with an unknown id returns 404 with a problem+json body"
-agentry run                 # works the queue; Ctrl-C finishes the requests in progress and stops
+agentry list
 ```
 
-### Open the web UI
-
-```sh
-agentry user add alice --owner      # prints a one-time passkey link (30 minutes)
-agentry serve                       # http://127.0.0.1:4747, with nightly backups
-```
-
-Open the link on the device that will hold the passkey, create the passkey, and you're signed in. Run
-`agentry run` and `agentry serve` side by side, as login items or services, so the queue keeps working. (On
-Windows, setup registers both as startup tasks.)
-
-To use the UI from your phone or another machine, set `AGENTRY_PUBLIC_URL` to the HTTPS address you'll open (for
-example your Tailscale Serve name) for both `agentry user add` and `agentry serve`. The server accepts only that
-address and `localhost`, and a passkey works only at the address it was created for. Then raise **Workers** on
-the settings page if the machine has room for more than one request at a time.
+Or queue it from the web UI. The runner picks it up within seconds. Raise **Workers** on the settings page if the
+machine has room for more than one request at a time.
 
 ### On Windows
 
@@ -539,20 +539,24 @@ runner) in `C:\Agentry`. Run it in an elevated Windows PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File windows-setup.ps1 -GitName "Your Name" -GitEmail you@example.com `
-  -PublicUrl https://myhost.example.ts.net -DeployFolders C:\Sites\MyApp -DeployServices MyApp
+  -PublicUrl https://myhost.example.ts.net -Owner alice -DeployFolders C:\Sites\MyApp -DeployServices MyApp
 ```
 
 It creates the `AgentryRunner` and `AgentrySandbox` accounts, installs Bun and Claude Code, compiles the run-as
-helper, and registers two startup tasks that run `agentry serve` and `agentry run` as `AgentryRunner`. It prints
-an SSH key to add to each repository as a write-access deploy key. Then:
+helper, and registers two startup tasks that run `agentry serve` and `agentry run` as `AgentryRunner`. It puts
+`agentry` on the machine's `PATH`, checks that the web UI answers, and with `-Owner` creates the first owner and
+prints their passkey link. It also prints an SSH key to add to each repository as a write-access deploy key. Then,
+in a new shell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File windows-setup.ps1 -SelfTest   # the Windows checks, as AgentryRunner
 # run setup again with -Clone git@github.com:you/MyApp.git, then:
-C:\Agentry\agentry.cmd project add api recipe.json   # "repo": "C:\\Agentry\\repos\\MyApp"
-C:\Agentry\agentry.cmd token                          # then: Start-ScheduledTask 'Agentry runner'
-C:\Agentry\agentry.cmd user add alice --owner
+agentry project add api recipe.json   # "repo": "C:\\Agentry\\repos\\MyApp"
+agentry token                          # then: Start-ScheduledTask 'Agentry runner'
 ```
+
+Run setup again to update Agentry or change its options. `-Uninstall` removes the startup tasks and takes
+`agentry` off `PATH`; the accounts and `C:\Agentry` stay.
 
 Recipe commands run in Windows PowerShell 5.1, which has no `&&`: use `;` and
 `if ($LASTEXITCODE) { exit $LASTEXITCODE }`.
@@ -685,7 +689,7 @@ src/
   adapters/         the Claude Code adapter and the agent/verifier contracts
   results/trx.ts    TRX test-result parser
 tools/runas/        agentry-runas.exe (C#): runs a step in a job object, as the sandbox user if asked
-setup/              windows-setup.ps1 and its launcher; spike/: the isolation spike behind the Windows design
+setup/              mac-setup.sh; windows-setup.ps1 and its launcher; spike/: the isolation spike behind the Windows design
 ```
 
 The agent and the verifier sit behind small adapter interfaces ([`src/adapters/types.ts`](src/adapters/types.ts)),

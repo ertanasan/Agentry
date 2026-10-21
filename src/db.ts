@@ -122,7 +122,9 @@ export const MIGRATIONS: string[] = [
 
 export function openDb(path: string): Database {
   const db = new Database(path, { create: true });
-  db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+  // The busy timeout first: the server and the runner start together (login, startup tasks), and the second to open
+  // the database must wait for the first's journal setup, not fail with "database is locked".
+  db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
   db.exec(BASE_SCHEMA);
   migrate(db);
   return db;
