@@ -65,7 +65,7 @@ export function sandbox(p: SandboxPaths): { wrap: string[]; env: Record<string, 
   mkdirSync(pkgCache, { recursive: true });
   if (process.platform === "win32") {
     // claude and the API key helper need no grant: setup makes Agentry's bin folder readable by the sandbox user.
-    return windowsSandbox({ worktree: p.worktree, runTmp, pkgCache, gitDir: p.gitDir, passwordFile: SANDBOX_PASSWORD });
+    return windowsSandbox({ worktree: p.worktree, runTmp, pkgCache, gitDir: p.gitDir, passwordFile: SANDBOX_PASSWORD, home: AGENTRY_HOME });
   }
   const home = join(runTmp, "home");
   const claudeConfig = join(runTmp, "claude");

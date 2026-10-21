@@ -4,7 +4,7 @@
 // which may write only the folders `windowsSandbox` grants it for the run.
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Platform } from "./platform.ts";
 
 export const RUNAS = join(import.meta.dir, "../tools/runas/agentry-runas.exe");
@@ -48,6 +48,7 @@ function exists(pid: number): boolean {
 
 export type WindowsSandboxPaths = {
   worktree: string; runTmp: string; pkgCache: string; gitDir?: string; passwordFile: string;
+  home: string; // Agentry's home, which setup lets the sandbox list; the folders between it and the run's are listed here
 };
 
 // The run's folders, opened to AgentrySandbox (modify; the git dir read-only), and the step's environment: a fresh
@@ -58,6 +59,11 @@ export function windowsSandbox(p: WindowsSandboxPaths): { wrap: string[]; env: R
   for (const d of [home, join(home, "AppData", "Roaming"), join(home, "AppData", "Local"), claudeConfig, p.pkgCache]) mkdirSync(d, { recursive: true });
   for (const d of [p.worktree, p.runTmp, p.pkgCache]) grant(d, "M");
   if (p.gitDir) grant(p.gitDir, "RX");
+  // PowerShell (and Node's realpath) look a starting folder up in each of its parents: without listing them, PowerShell
+  // starts with no current location and resolves relative paths against C:\. Names only, and not inherited.
+  for (const d of [p.worktree, p.runTmp, p.pkgCache]) {
+    for (let up = dirname(d); up.length > p.home.length && up.toLowerCase().startsWith(p.home.toLowerCase()); up = dirname(up)) listable(up);
+  }
 
   const wrap = [RUNAS, "--memory-mb", String(STEP_MEMORY_MB), "--cpu-percent", String(STEP_CPU_PERCENT),
     "--sandbox", SANDBOX_USER, p.passwordFile, p.runTmp, "--"];
@@ -91,6 +97,15 @@ export function windowsSandbox(p: WindowsSandboxPaths): { wrap: string[]; env: R
 
 // Gives AgentrySandbox `rights` (icacls: M modify, RX read) on a folder and everything in it.
 function grant(dir: string, rights: "M" | "RX"): void {
-  const p = Bun.spawnSync(["icacls", dir, "/grant", `${SANDBOX_USER}:(OI)(CI)${rights}`, "/T", "/C", "/Q"], { stdout: "pipe", stderr: "pipe" });
-  if (p.exitCode !== 0) throw new Error(`icacls ${dir}: ${(p.stdout.toString() + p.stderr.toString()).trim()}`);
+  icacls([dir, "/grant", `${SANDBOX_USER}:(OI)(CI)${rights}`, "/T", "/C", "/Q"]);
+}
+
+// Lets AgentrySandbox list a folder's names (not read its files or anything below it).
+function listable(dir: string): void {
+  icacls([dir, "/grant", `${SANDBOX_USER}:(RD,RA)`, "/Q"]);
+}
+
+function icacls(args: string[]): void {
+  const p = Bun.spawnSync(["icacls", ...args], { stdout: "pipe", stderr: "pipe" });
+  if (p.exitCode !== 0) throw new Error(`icacls ${args.join(" ")}: ${(p.stdout.toString() + p.stderr.toString()).trim()}`);
 }

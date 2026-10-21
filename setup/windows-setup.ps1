@@ -9,7 +9,8 @@
 #   AgentryRunner   standard user that runs Agentry (startup tasks "Agentry runner" and "Agentry server"). Owns
 #                   <root>\home (database, worktrees, logs of runs, the claude token), <root>\repos and <root>\logs.
 #   AgentrySandbox  standard user that runs the agent, build, test and verify steps. It may read <root>\app and <root>\bin,
-#                   and write only the folders the runner grants it for a run (src/platform-windows.ts). It is denied
+#                   list the names (not read the files) in <root> and <root>\home, and write only the folders the runner
+#                   grants it for a run (src/platform-windows.ts). It is denied
 #                   writing the top-level folders of C:\ that every user may otherwise change, and SQL Server logins.
 #   <root>\app      this repository, checked out from -Repo, with tools\runas\agentry-runas.exe compiled.
 #   <root>\bin      bun.exe (pinned, checksum checked) and claude.exe.
@@ -131,6 +132,9 @@ foreach ($d in $Root, $app, $bin, $home_, (Join-Path $Root 'repos'), $logs) { Ne
 icacls $Root /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' "${runner}:(OI)(CI)RX" /Q | Out-Null; Assert-Exit "icacls $Root"
 foreach ($d in $app, $bin) { icacls $d /grant "${sandbox}:(OI)(CI)RX" /Q | Out-Null; Assert-Exit "icacls $d" }
 foreach ($d in $home_, (Join-Path $Root 'repos'), $logs) { icacls $d /grant "${runner}:(OI)(CI)M" /Q | Out-Null; Assert-Exit "icacls $d" }
+# PowerShell looks its starting folder up in each parent, so the sandbox may list (names only) <root> and the home;
+# the runner opens the folders below for each run.
+foreach ($d in $Root, $home_) { icacls $d /grant "${sandbox}:(RD,RA)" /Q | Out-Null; Assert-Exit "icacls $d" }
 $pwFile = Join-Path $home_ 'sandbox-password'
 [IO.File]::WriteAllText($pwFile, $passwords[$sandbox])
 icacls $pwFile /inheritance:r /grant:r "${runner}:R" 'Administrators:F' 'SYSTEM:F' /Q | Out-Null; Assert-Exit "icacls $pwFile"
