@@ -14,7 +14,7 @@ import { parseArgs } from "node:util";
 import * as A from "./actions.ts";
 import { claudeAgent, resolveAuth } from "./adapters/claude.ts";
 import { acquireLease, asActor, LeaseLost, openDb, releaseLease, runnerRow, startHeartbeat } from "./db.ts";
-import { addUser, AuthError, resetUser } from "./accounts.ts";
+import { addUser, AuthError, removeUser, resetUser } from "./accounts.ts";
 import { backupIfDue, runBackup } from "./backup.ts";
 import { DEFAULT_PORT, startServer } from "./server.ts";
 import { parseRecipe } from "./recipe.ts";
@@ -43,7 +43,8 @@ const USAGE = `usage: agentry <command>
   serve                              the web UI on 127.0.0.1:$AGENTRY_PORT (default 4747), with nightly backups
   user add <name> [--owner]          create a web UI account; prints a one-time passkey link (30 min)
   user reset <name>                  revoke a user's passkeys and sessions; prints a new link
-  backup                             back up the database and agentry/* branches now
+  user remove <name>                 delete a web UI account with its passkeys and sessions
+  backup                            back up the database and agentry/* branches now
 
 Environment: AGENTRY_HOME (default ~/.agentry), AGENTRY_PUBLIC_URL (e.g. https://agentry.example.com; default
 http://localhost:<port>), AGENTRY_PORT, AGENTRY_BACKUP_DIR (default $AGENTRY_HOME/backups), AGENTRY_CLAUDE_BIN, AGENTRY_MODEL.`;
@@ -269,8 +270,15 @@ async function serve(db: Database): Promise<number> {
 
 function userCmd(db: Database, args: string[], owner: boolean): number {
   const [sub, name] = args;
-  if (!name || (sub !== "add" && sub !== "reset")) fail("usage: agentry user add <name> [--owner] | agentry user reset <name>");
+  if (!name || !["add", "reset", "remove"].includes(sub)) {
+    fail("usage: agentry user add <name> [--owner] | agentry user reset <name> | agentry user remove <name>");
+  }
   try {
+    if (sub === "remove") {
+      removeUser(db, name);
+      console.log(`removed ${name}`);
+      return 0;
+    }
     const code = sub === "add" ? addUser(db, name, owner ? "owner" : "admin") : resetUser(db, name);
     console.log(`Open this on the device that will hold ${name}'s passkey (valid 30 minutes, once):\n${publicUrl()}/register/${code}`);
   } catch (e) {

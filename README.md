@@ -591,6 +591,7 @@ agentry token                         save a `claude setup-token` token (paste, 
 agentry serve                         the web UI, with nightly backups
 agentry user add <name> [--owner]     create a web UI account; prints a one-time passkey link
 agentry user reset <name>             revoke a user's passkeys and sessions; prints a new link
+agentry user remove <name>            delete a web UI account with its passkeys and sessions (not the last owner)
 agentry backup                        back up now
 ```
 
