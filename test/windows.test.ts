@@ -92,7 +92,8 @@ describe.if(win && existsSync(SANDBOX_PASSWORD))("windows: the AgentrySandbox us
   beforeAll(() => {
     root = scratch(join(AGENTRY_HOME, "selftest"));
     wt = join(root, "worktree");
-    mkdirSync(wt);
+    mkdirSync(join(wt, "src", "deep"), { recursive: true });
+    writeFileSync(join(wt, "src", "deep", "checked-out.txt"), "by the runner"); // there before the grant, like a checkout
     sbx = sandbox({ worktree: wt, runTmp: join(root, "tmp"), pkgCache: join(root, "cache") });
   });
   afterAll(() => { rmSync(root, { recursive: true, force: true }); });
@@ -113,6 +114,13 @@ describe.if(win && existsSync(SANDBOX_PASSWORD))("windows: the AgentrySandbox us
     const r = await run(`$ErrorActionPreference = 'Stop'; Set-Content made.txt 'by the sandbox'; Set-Content -LiteralPath '${join(sbx.env.TEMP, "t.txt")}' x; exit 0`);
     expect({ exitCode: r.exitCode, log: r.log }).toEqual({ exitCode: 0, log: "" });
     expect(readFileSync(join(wt, "made.txt"), "utf8")).toContain("by the sandbox");
+  }, SLOW);
+
+  test("it changes files the runner checked out before the run", async () => {
+    const f = join(wt, "src", "deep", "checked-out.txt");
+    const r = await run(`$ErrorActionPreference = 'Stop'; Add-Content -LiteralPath '${f}' ' and the sandbox'; exit 0`);
+    expect(r.exitCode).toBe(0);
+    expect(readFileSync(f, "utf8")).toContain("by the runner and the sandbox");
   }, SLOW);
 
   test("it can neither read the runner's secrets nor write the runner's home", async () => {

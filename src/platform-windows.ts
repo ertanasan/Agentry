@@ -95,9 +95,10 @@ export function windowsSandbox(p: WindowsSandboxPaths): { wrap: string[]; env: R
   return { wrap, env };
 }
 
-// Gives AgentrySandbox `rights` (icacls: M modify, RX read) on a folder and everything in it.
+// Gives AgentrySandbox `rights` (icacls: M modify, RX read) on a folder and everything in it: Windows passes an
+// inheritable grant on to what the folder already holds.
 function grant(dir: string, rights: "M" | "RX"): void {
-  icacls([dir, "/grant", `${SANDBOX_USER}:(OI)(CI)${rights}`, "/T", "/C", "/Q"]);
+  icacls([dir, "/grant", `${SANDBOX_USER}:(OI)(CI)${rights}`, "/Q"]);
 }
 
 // Lets AgentrySandbox list a folder's names (not read its files or anything below it).

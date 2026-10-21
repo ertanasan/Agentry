@@ -208,7 +208,10 @@ if (-not (Test-Path $key)) {
 }
 Set-Content (Join-Path $ssh 'known_hosts') 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' -Encoding ASCII
 $publicKey = Get-Content "$key.pub"
-icacls $ssh /inheritance:r /grant:r "${runner}:(OI)(CI)F" 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' /T /Q | Out-Null; Assert-Exit "icacls $ssh"
+# The folder gets the access list and its files inherit it (icacls /T would give files an empty one: folder-only
+# inheritance flags don't apply to files, but removing what they inherited does).
+icacls $ssh /inheritance:r /grant:r "${runner}:(OI)(CI)F" 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' /Q | Out-Null; Assert-Exit "icacls $ssh"
+icacls "$ssh\*" /reset /Q | Out-Null; Assert-Exit "icacls $ssh\*"
 icacls $ssh /setowner $runner /T /Q | Out-Null
 # Windows' own OpenSSH checks the key's real access list. Git's ssh sees an owner-only key as too open when its
 # owner runs it, and ignores the key.
