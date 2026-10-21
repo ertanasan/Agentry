@@ -7,7 +7,8 @@
 <p align="center">
   <strong>An AI software-delivery queue with guardrails.</strong><br>
   Describe a change. Agentry has an AI agent build it in a sandbox, puts it through tests and an independent
-  review, then pushes and deploys it, and confirms that production is running the new commit.
+  review, then pushes and deploys it, and confirms that production is running the new commit.<br>
+  Runs on macOS and Windows.
 </p>
 
 <p align="center">
@@ -70,7 +71,7 @@ next action. Nothing reaches production on a guess.
 | **Multi-repository queue** | Register any number of projects across any number of repositories. They all share one prioritized queue. |
 | **Deploy-group locks** | Projects that deploy to the same target never deploy at the same time. After a failed deploy, the group stays locked until a person resolves it. |
 | **Crash-safe runner** | A lease, fenced writes and startup recovery mean a killed runner never double-deploys, never loses track of a push and never leaves processes behind. |
-| **Phone-friendly web UI** | Sign in with a passkey (Face ID / Touch ID), queue requests, attach screenshots, answer the agent's questions, approve, retry and re-deploy from anywhere. |
+| **Phone-friendly web UI** | Sign in with a passkey (Face ID, Touch ID or Windows Hello), queue requests, attach screenshots, answer the agent's questions, approve, retry and re-deploy from anywhere. |
 | **Human in the loop where it matters** | The agent can ask a question instead of guessing. You review only the changes that carry risk. |
 | **Audit trail and backups** | Every state change is logged with who made it. Nightly backups cover the database, every in-flight branch and all attachments. |
 
@@ -451,9 +452,10 @@ A screenshot often explains a bug faster than a paragraph does.
 
 ### Requirements
 
-- **macOS**, or **Windows** with the setup script below
-- [**Bun**](https://bun.sh) and **git**
-- The [**Claude Code**](https://docs.anthropic.com/en/docs/claude-code) CLI on `PATH` (or set `AGENTRY_CLAUDE_BIN`)
+- **macOS:** [**Bun**](https://bun.sh), **git**, and the [**Claude Code**](https://docs.anthropic.com/en/docs/claude-code)
+  CLI on `PATH` (or set `AGENTRY_CLAUDE_BIN`)
+- **Windows:** **git** and an elevated Windows PowerShell. The setup script installs Bun and Claude Code, so skip
+  to [On Windows](#on-windows).
 - Either an Anthropic **API key** or a **Claude subscription** token from `claude setup-token`
 
 ### Install
@@ -494,7 +496,8 @@ agentry serve                       # http://127.0.0.1:4747, with nightly backup
 ```
 
 Open the link on the device that will hold the passkey, create the passkey, and you're signed in. Run
-`agentry run` and `agentry serve` side by side, as login items or services, so the queue keeps working.
+`agentry run` and `agentry serve` side by side, as login items or services, so the queue keeps working. (On
+Windows, setup registers both as startup tasks.)
 
 ### On Windows
 
@@ -655,7 +658,7 @@ so the pipeline doesn't depend on one model or CLI.
 ## Quality
 
 ```sh
-bun test              # 183 tests: runner, gates, recovery, git, server, accounts, backups, end-to-end loop
+bun test              # 237 tests: runner, gates, recovery, git, server, accounts, backups, Windows, end-to-end loop
 bun run typecheck
 bun run eval:verifier # the done-when verifier against 10 labeled cases, with the real model
 ```
