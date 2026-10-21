@@ -306,7 +306,8 @@ executes code at build time needs a person's approval**: `*.csproj`, `*.props`, 
 ### 5. Credentials
 
 - Claude is authenticated with an **API-key helper** script or a **`claude setup-token` subscription token**,
-  saved with mode `600` by `agentry token`. Neither touches the keychain.
+  saved with mode `600` by `agentry token` (on Windows, in `C:\Agentry\home`, which only `AgentryRunner` and
+  administrators can read). Neither touches the keychain.
 - The tests, build and agent never see your git credentials, SSH keys or cloud credentials. Agentry pushes and
   deploys from outside the sandbox, after the gates.
 
@@ -599,7 +600,7 @@ agentry backup                        back up now
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AGENTRY_HOME` | `~/.agentry` | Database, worktrees, run logs, caches, attachments, credentials |
+| `AGENTRY_HOME` | `~/.agentry` (Windows setup: `C:\Agentry\home`) | Database, worktrees, run logs, caches, attachments, credentials |
 | `AGENTRY_PORT` | `4747` | Web UI port (always bound to `127.0.0.1`) |
 | `AGENTRY_PUBLIC_URL` | `http://localhost:<port>` | The URL browsers use. Sets the passkey origin and the allowed Host/Origin. |
 | `AGENTRY_BACKUP_DIR` | `$AGENTRY_HOME/backups` | Backup destination. If you set it, the folder must already exist. |
@@ -660,8 +661,10 @@ bun run eval:verifier # the done-when verifier against 10 labeled cases, with th
 ```
 
 - **End-to-end tests** drive the full loop against real git repositories, with a fake agent and a fake pusher.
-- **The sandbox canary** checks the real sandbox profile against your real home folder. The keychain and SSH-agent
-  checks are opt-in, with `AGENTRY_CANARY_SECRETS=1`.
+- **The sandbox canary** (macOS) checks the real sandbox profile against your real home folder. The keychain and
+  SSH-agent checks are opt-in, with `AGENTRY_CANARY_SECRETS=1`.
+- **The Windows checks** ([`test/windows.test.ts`](test/windows.test.ts)) run steps under the run-as helper and as
+  the sandbox user on a real Windows machine: `windows-setup.ps1 -SelfTest`.
 - **The verifier eval** runs the real, sandboxed verifier on labeled cases, including tests that assert nothing,
   wrong fields and missed edge cases, and must score 10/10. Its base snapshot isn't included in this repository.
 
