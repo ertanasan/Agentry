@@ -1,17 +1,21 @@
-// The sandbox for every step that runs agent-written code: agent, build, test and verifier (eng review D4, D14).
+// The sandbox for every step that runs agent-written code: agent, build, test and verifier (eng review D4, D14):
+// sandbox-exec with sandbox/run.sb on the Mac, the AgentrySandbox user on Windows (platform-windows.ts).
 // Pass `wrap` to runStep's `wrap` and `env` as its `env`. The step gets a scrubbed environment whose HOME,
 // TMPDIR and CLAUDE_CONFIG_DIR all live in the run's own temp dir, so nothing carries over between runs.
 import { chmodSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { windowsSandbox } from "./platform-windows.ts";
 
 export const PROFILE = join(import.meta.dir, "../sandbox/run.sb");
-export const AGENTRY_HOME = join(homedir(), ".agentry");
+export const AGENTRY_HOME = process.env.AGENTRY_HOME ?? join(homedir(), ".agentry");
 // Agentry's own NuGet cache, writable from the sandbox. Deploy runs unsandboxed with the user's ~/.nuget,
 // so a run that tampers with this cache can only affect later sandboxed runs.
 export const PKG_CACHE = join(AGENTRY_HOME, "cache", "nuget");
 // apiKeyHelper script for `claude -p`. It must print the key itself (no other file is readable).
 export const KEY_HELPER = join(AGENTRY_HOME, "api-key-helper");
+// Windows: AgentrySandbox's password, written by setup/windows-setup.ps1 and readable only by the runner account.
+export const SANDBOX_PASSWORD = join(AGENTRY_HOME, "sandbox-password");
 
 const PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 const NONE = "/nonexistent";
@@ -59,6 +63,10 @@ export function sandbox(p: SandboxPaths): { wrap: string[]; env: Record<string, 
   const runTmp = realpathSync(p.runTmp);
   const pkgCache = p.pkgCache ?? PKG_CACHE;
   mkdirSync(pkgCache, { recursive: true });
+  if (process.platform === "win32") {
+    // claude and the API key helper need no grant: setup makes Agentry's bin folder readable by the sandbox user.
+    return windowsSandbox({ worktree: p.worktree, runTmp, pkgCache, gitDir: p.gitDir, passwordFile: SANDBOX_PASSWORD });
+  }
   const home = join(runTmp, "home");
   const claudeConfig = join(runTmp, "claude");
   mkdirSync(home, { recursive: true });
