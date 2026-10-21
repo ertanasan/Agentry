@@ -126,10 +126,12 @@ $hidden = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAc
 New-Item $hidden -Force | Out-Null
 foreach ($u in $runner, $sandbox) { New-ItemProperty $hidden -Name $u -Value 0 -PropertyType DWord -Force | Out-Null }  # not on the sign-in screen
 
-# 2. Folders. <root> lets nobody but the two accounts in; the sandbox only reads app and bin.
+# 2. Folders. <root> lets nobody but the two accounts in; the sandbox only reads app and bin. The admin running setup
+# may also read it unelevated (Explorer runs without the Administrators group), but not the password file or SSH key.
 Step "Folders under $Root"
 foreach ($d in $Root, $app, $bin, $home_, (Join-Path $Root 'repos'), $logs) { New-Item -ItemType Directory -Force $d | Out-Null }
-icacls $Root /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' "${runner}:(OI)(CI)RX" /Q | Out-Null; Assert-Exit "icacls $Root"
+$admin = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+icacls $Root /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' "${runner}:(OI)(CI)RX" "*${admin}:(OI)(CI)RX" /Q | Out-Null; Assert-Exit "icacls $Root"
 foreach ($d in $app, $bin) { icacls $d /grant "${sandbox}:(OI)(CI)RX" /Q | Out-Null; Assert-Exit "icacls $d" }
 foreach ($d in $home_, (Join-Path $Root 'repos'), $logs) { icacls $d /grant "${runner}:(OI)(CI)M" /Q | Out-Null; Assert-Exit "icacls $d" }
 # PowerShell looks its starting folder up in each parent, so the sandbox may list (names only) <root> and the home;
