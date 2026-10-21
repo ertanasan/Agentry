@@ -291,6 +291,12 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 foreach ($cmd in 'run', 'serve') {
   $name = $tasks[$cmd]
   if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) { Stop-ScheduledTask -TaskName $name; Unregister-ScheduledTask -TaskName $name -Confirm:$false }
+}
+# Stopping a task ends its launcher; make sure no Agentry process of the old tasks outlives it.
+Get-CimInstance Win32_Process -Filter "Name = 'bun.exe'" | Where-Object { $_.CommandLine -like "*$app\src\cli.ts*" } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+foreach ($cmd in 'run', 'serve') {
+  $name = $tasks[$cmd]
   $action = New-ScheduledTaskAction -Execute 'powershell.exe' -WorkingDirectory $home_ `
     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$launcher`" -Log `"$logs\$cmd.log`" $cmd"
   Register-ScheduledTask -TaskName $name -Action $action -Trigger (New-ScheduledTaskTrigger -AtStartup) -Settings $settings `

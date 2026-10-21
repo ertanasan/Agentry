@@ -12,8 +12,14 @@ $root = Split-Path (Split-Path $PSScriptRoot)  # <root>\app\setup -> <root>
 $bun = Join-Path $root 'bin\bun.exe'
 $cli = Join-Path $root 'app\src\cli.ts'
 if ($Log) {
-  # cmd's redirection appends the bytes as they come; PowerShell 5.1's would re-encode them as UTF-16.
-  cmd /c "`"$bun`" `"$cli`" $($Rest -join ' ') >> `"$Log`" 2>&1"
+  # A startup task: keep the command running. Task Scheduler restarts a task that fails to start, not one that exits
+  # (a crash, or a runner that finds the lease still held by the one it replaces).
+  while ($true) {
+    # cmd's redirection appends the bytes as they come; PowerShell 5.1's would re-encode them as UTF-16.
+    cmd /c "`"$bun`" `"$cli`" $($Rest -join ' ') >> `"$Log`" 2>&1"
+    Add-Content -LiteralPath $Log "agentry $($Rest -join ' '): exited with code $LASTEXITCODE at $(Get-Date -Format s); starting again in 30 s"
+    Start-Sleep -Seconds 30
+  }
 } else {
   & $bun $cli @Rest
 }
