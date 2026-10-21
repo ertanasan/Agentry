@@ -34,7 +34,7 @@
 import type { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { copyForRun } from "./attachments.ts";
+import { copyForRun, DOCX, PPTX, XLSX, type RunFile } from "./attachments.ts";
 import { fenced, LeaseLost, LEASE_TTL_MS, runnerRow, setRequestStatus, type PushState, type RequestStatus } from "./db.ts";
 import * as g from "./git.ts";
 import { countRegression, inspect, type Flag, type Owner } from "./inspect.ts";
@@ -460,10 +460,10 @@ function otherProjects(j: Job): Owner[] {
 
 async function agentStep(j: Job): Promise<Stop | null> {
   const s = begin(j, "agent");
-  // The request's images go into the run's temp dir, the one place outside the worktree the sandbox lets it read.
-  const images = copyForRun(j.ctx.db, j.ctx.home, j.req.id, join(j.sbx!.env.TMPDIR, "attachments"));
+  // The request's files go into the run's temp dir, the one place outside the worktree the sandbox lets it read.
+  const files = copyForRun(j.ctx.db, j.ctx.home, j.req.id, join(j.sbx!.env.TMPDIR, "attachments"));
   const res = await j.ctx.agent.run({
-    worktree: j.wt, logPath: s.logPath, timeoutMs: longest(j, "agent"), sandbox: j.sbx!, onStart: s.onStart, prompt: prompt(j, images),
+    worktree: j.wt, logPath: s.logPath, timeoutMs: longest(j, "agent"), sandbox: j.sbx!, onStart: s.onStart, prompt: prompt(j, files),
   });
   s.end(res.outcome === "infra_error" ? 1 : 0);
   if (res.outcome === "infra_error") return infra(`agent: ${res.detail}`);
@@ -471,7 +471,12 @@ async function agentStep(j: Job): Promise<Stop | null> {
   return null;
 }
 
-function prompt(j: Job, images: string[]): string {
+// Where an Office file keeps its text, for the agent that unpacks it.
+const OFFICE_XML: Record<string, string> = {
+  [DOCX]: "word/document.xml", [XLSX]: "xl/sharedStrings.xml and xl/worksheets/", [PPTX]: "ppt/slides/",
+};
+
+function prompt(j: Job, files: RunFile[]): string {
   const { req } = j;
   const scopes = j.parts.map((p) => p.recipe.scope_path);
   const answers = (j.ctx.db.query("SELECT payload FROM events WHERE request_id = ? AND type = 'answer' ORDER BY id").all(req.id) as { payload: string }[])
@@ -487,7 +492,11 @@ function prompt(j: Job, images: string[]): string {
   if (req.done_when) parts.push(`\nDone when: ${req.done_when}`);
   if (req.done_when_test) parts.push(`\nDone when a test matching "${req.done_when_test}" passes.`);
   if (answers.length) parts.push(`\n# Answers to your earlier questions\n${answers.join("\n")}`);
-  if (images.length) parts.push(`\n# Images attached to the request\nLook at each with the Read tool before you start:\n${images.map((p) => `- ${p}`).join("\n")}`);
+  if (files.length) {
+    const line = (f: RunFile) => `- ${f.path} (${f.name})${OFFICE_XML[f.mime] ? `: an Office file, a ZIP of XML. Unpack it into a new folder next to it
+  (\`unzip\` on macOS, \`tar -xf\` on Windows) and read ${OFFICE_XML[f.mime]}` : ""}`;
+    parts.push(`\n# Files attached to the request\nRead each one before you start (the Read tool shows images and PDFs):\n${files.map(line).join("\n")}`);
+  }
   for (const scope of scopes) {
     for (const name of ["CLAUDE.md", "AGENTS.md"]) {
       const path = join(j.wt, scope, name);

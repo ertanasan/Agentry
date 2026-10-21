@@ -242,11 +242,18 @@ describe("escaping (slice 2 review Q1)", () => {
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new Array(200).fill(7)]);
 const HEIC = new Uint8Array([0, 0, 0, 0x18, ...new TextEncoder().encode("ftypheic"), ...new Array(200).fill(7)]);
 
-describe("attached images", () => {
+const bytes = (...parts: (string | number[])[]) =>
+  new Uint8Array(parts.flatMap((p) => typeof p === "string" ? [...new TextEncoder().encode(p)] : p)) as Uint8Array<ArrayBuffer>;
+const ZIP = [0x50, 0x4b, 0x03, 0x04];
+const PDF = bytes("%PDF-1.7\n1 0 obj\n", [0xe2, 0xe3, 0xcf, 0xd3], "\n%%EOF\n");
+// What an Office file's ZIP holds by name: its parts are listed uncompressed.
+const DOCX = bytes(ZIP, "[Content_Types].xml", [0, 1, 2], "word/document.xml", [0, 9]);
+
+describe("attached files", () => {
   const requestForm = (files: [Uint8Array<ArrayBuffer>, string][], title = "Fix the search box") => {
     const f = new FormData();
     f.set("project", "vt-web"); f.set("title", title); f.set("body", "see the screenshot");
-    for (const [bytes, name] of files) f.append("images", new File([bytes], name));
+    for (const [bytes, name] of files) f.append("files", new File([bytes], name));
     return f;
   };
 
@@ -268,19 +275,59 @@ describe("attached images", () => {
     expect((await h.call("/attachments/9", { cookie })).status).toBe(404);
   });
 
-  test("a file that is not a supported image is refused, and no request is created", async () => {
+  test("PDF, Office and text files are kept; PDF and Office download, text shows as plain text", async () => {
     const h = await setup();
     const { cookie } = await h.signUp();
-    const fake = new TextEncoder().encode("<svg onload=alert(1)>");
-    const r = await h.call("/requests", { method: "POST", cookie, multipart: requestForm([[PNG, "ok.png"], [fake, "evil.png"]]) });
-    expect(r.status).toBe(400);
-    expect(await r.text()).toContain("evil.png is not a PNG, JPEG, GIF or WebP image");
-    const heic = await h.call("/requests", { method: "POST", cookie, multipart: requestForm([[HEIC, "IMG_1.HEIC"]]) });
-    expect(await heic.text()).toContain("IMG_1.HEIC is a HEIC photo");
+    const json = bytes('{"word": "über"}\n');
+    const files: [Uint8Array<ArrayBuffer>, string][] = [[PDF, "spec.pdf"], [DOCX, "brief notes.docx"], [json, "data.json"]];
+    expect((await h.call("/requests", { method: "POST", cookie, multipart: requestForm(files) })).status).toBe(303);
+    expect(h.db.query("SELECT name, mime FROM attachments ORDER BY id").all()).toEqual([
+      { name: "spec.pdf", mime: "application/pdf" },
+      { name: "brief notes.docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+      { name: "data.json", mime: "text/plain" },
+    ]);
+    for (const f of ["1.pdf", "2.docx", "3.json"]) expect(existsSync(join(h.home, "attachments", "1", f))).toBe(true);
+    const home = await (await h.call("/", { cookie })).text();
+    expect(home).toContain('<a class="file" href="/attachments/2">brief notes.docx</a>');
+
+    const docx = await h.call("/attachments/2", { cookie });
+    expect(docx.headers.get("content-disposition")).toBe("attachment; filename*=UTF-8''brief%20notes.docx");
+    expect((await h.call("/attachments/1", { cookie })).headers.get("content-type")).toBe("application/pdf");
+    const text = await h.call("/attachments/3", { cookie });
+    expect(text.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(text.headers.get("content-disposition")).toBe("inline");
+    expect(await text.text()).toBe('{"word": "über"}\n');
+  });
+
+  test("markup sent as a file is kept as text, never served as a page", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    const svg = bytes("<svg onload=alert(1)>");
+    expect((await h.call("/requests", { method: "POST", cookie, multipart: requestForm([[svg, "evil.png"]]) })).status).toBe(303);
+    expect(existsSync(join(h.home, "attachments", "1", "1.txt"))).toBe(true);
+    expect(await (await h.call("/", { cookie })).text()).not.toContain('<img src="/attachments/1"');
+    const r = await h.call("/attachments/1", { cookie });
+    expect(r.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(r.headers.get("content-security-policy")).toContain("sandbox");
+  });
+
+  test("archives, executables, old Office files and HEIC photos are refused, and no request is created", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    const refused = async (file: Uint8Array<ArrayBuffer>, name: string) => {
+      const r = await h.call("/requests", { method: "POST", cookie, multipart: requestForm([[PNG, "ok.png"], [file, name]]) });
+      expect(r.status).toBe(400);
+      return r.text();
+    };
+    expect(await refused(bytes(ZIP, "notes.txt", [0, 0]), "notes.zip")).toContain("notes.zip is an archive");
+    expect(await refused(bytes([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1], [0, 0, 0]), "old.doc")).toContain("old.doc is an old Office file");
+    expect(await refused(bytes("MZ", [0x90, 0, 3, 0]), "setup.exe")).toContain("setup.exe is not a supported file");
+    expect(await refused(bytes([0xff, 0xfe, 0xfd]), "blob.bin")).toContain("blob.bin is not a supported file");
+    expect(await refused(HEIC, "IMG_1.HEIC")).toContain("IMG_1.HEIC is a HEIC photo");
     expect(h.db.query("SELECT (SELECT COUNT(*) FROM requests) AS r, (SELECT COUNT(*) FROM attachments) AS a").get()).toEqual({ r: 0, a: 0 });
   });
 
-  test("at most 5 images per request, counting those sent with answers", async () => {
+  test("at most 5 files per request, counting those sent with answers", async () => {
     const h = await setup();
     const { cookie } = await h.signUp();
     const six = Array.from({ length: 6 }, (_, i) => [PNG, `s${i}.png`] as [Uint8Array<ArrayBuffer>, string]);
@@ -291,7 +338,7 @@ describe("attached images", () => {
     const answer = (files: [Uint8Array<ArrayBuffer>, string][]) => {
       const f = new FormData();
       f.set("text", "like this");
-      for (const [bytes, name] of files) f.append("images", new File([bytes], name));
+      for (const [bytes, name] of files) f.append("files", new File([bytes], name));
       return h.call("/requests/1/answer", { method: "POST", cookie, multipart: f });
     };
     expect((await answer(six.slice(0, 2))).status).toBe(400);
@@ -300,11 +347,11 @@ describe("attached images", () => {
     expect(h.db.query("SELECT status, (SELECT COUNT(*) FROM attachments) AS n FROM requests").get()).toEqual({ status: "queued", n: 5 });
   });
 
-  test("a form with no file chosen adds the request without images", async () => {
+  test("a form with no file chosen adds the request without files", async () => {
     const h = await setup();
     const { cookie } = await h.signUp();
     const f = requestForm([]);
-    f.append("images", new File([], ""));
+    f.append("files", new File([], ""));
     expect((await h.call("/requests", { method: "POST", cookie, multipart: f })).status).toBe(303);
     expect(h.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
   });

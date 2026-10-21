@@ -167,21 +167,24 @@ describe("runner: agent outcomes", () => {
     expect(h.prompts[1]).toContain("do not edit build files");
   });
 
-  test("attached images reach the agent: copied into the run's temp dir and named in the prompt", async () => {
+  test("attached files reach the agent: copied into the run's temp dir and named in the prompt", async () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
     let seen = null as Uint8Array | null;
     const h = setup({
       agent: (wt) => {
-        const path = h.prompts.at(-1)!.match(/^- (\/.+\/attachments\/1\.png)$/m)?.[1];
+        const path = h.prompts.at(-1)!.match(/^- (\/.+\/attachments\/1\.png) \(shot\.png\)$/m)?.[1];
         if (path) seen = new Uint8Array(readFileSync(path)); // what the agent's Read tool would open
         editMain(wt);
       },
     });
     const id = h.add();
-    saveUploads(h.db, h.ctx.home, id, [{ name: "shot.png", bytes: png }], ["image/png"]);
+    saveUploads(h.db, h.ctx.home, id, [{ name: "shot.png", bytes: png }, { name: "brief.docx", bytes: new Uint8Array([1]) }],
+      ["image/png", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]);
     await runNext(h.ctx);
     expect(h.req(id).status).toBe("done");
-    expect(h.prompts[0]).toContain("# Images attached to the request\nLook at each with the Read tool");
+    expect(h.prompts[0]).toContain("# Files attached to the request\nRead each one before you start");
+    expect(h.prompts[0]).toMatch(/^- \/.+\/attachments\/2\.docx \(brief\.docx\): an Office file, a ZIP of XML\. Unpack it/m);
+    expect(h.prompts[0]).toContain("and read word/document.xml");
     expect(seen).toEqual(png);
   });
 

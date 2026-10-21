@@ -32,6 +32,7 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: v
 input[type=text], input[type=number], textarea, select { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
 textarea { min-height: 84px; resize: vertical; }
 .thumbs img { height: 56px; max-width: 120px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); margin: 6px 6px 0 0; }
+.thumbs a.file { display: inline-block; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; margin: 6px 6px 0 0; font-size: 14px; }
 button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; min-height: 40px; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.danger { color: var(--bad); }
@@ -62,7 +63,7 @@ ${body}
 export type Project = { name: string };
 export type ReqRow = {
   id: number; project: string; title: string; status: string; status_reason: string | null; updated_at: number; last_run: number | null;
-  body: string; done_when: string | null; images: string | null; // attachment ids, comma-separated
+  body: string; done_when: string | null; files: string; // the attachments, a JSON array of FileRef
 };
 export type GroupLock = { name: string; lock_reason: string | null };
 export type HomeData = {
@@ -72,20 +73,26 @@ export type HomeData = {
 
 const ago = (ms: number) => ms < 3600_000 ? `${Math.max(1, Math.round(ms / 60_000))} min ago` : ms < 86400_000 ? `${Math.round(ms / 3600_000)} h ago` : `${Math.round(ms / 86400_000)} d ago`;
 
-// Thumbnails of a request's images, each linking to the full one.
-function thumbs(images: string | null): Html {
-  if (!images) return html``;
-  return html`<div class="thumbs">${images.split(",").map((id) => html`<a href="/attachments/${id}"><img src="/attachments/${id}" alt="attached image ${id}" loading="lazy"></a>`)}</div>`;
+export type FileRef = { id: number; name: string; mime: string };
+
+// A request's attachments: images as thumbnails, other files by name, each linking to the file.
+function thumbs(files: string): Html {
+  const list = JSON.parse(files) as FileRef[];
+  if (!list.length) return html``;
+  return html`<div class="thumbs">${list.map((f) => f.mime.startsWith("image/")
+    ? html`<a href="/attachments/${f.id}"><img src="/attachments/${f.id}" alt="${f.name}" loading="lazy"></a>`
+    : html`<a class="file" href="/attachments/${f.id}">${f.name}</a>`)}</div>`;
 }
 
-// A file picker for images; on a phone it offers the photo library, the camera and files.
-const imagePicker = html`<div class="row"><label class="muted">Images (optional, up to 5 PNG, JPEG, GIF or WebP)
-  <input type="file" name="images" accept="image/png,image/jpeg,image/gif,image/webp" multiple></label></div>`;
+// A file picker; on a phone it offers the photo library, the camera and files.
+const ACCEPT = "image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,.docx,.xlsx,.pptx,text/plain,.txt,.md,.json,.csv,.tsv,.log,.yaml,.yml,.xml,.html,.sql,.toml,.ini,.diff,.patch";
+const filePicker = html`<div class="row"><label class="muted">Files (optional, up to 5 of 10 MB: images, PDF, text or Office documents)
+  <input type="file" name="files" accept="${ACCEPT}" multiple></label></div>`;
 
 function reqLine(r: ReqRow): Html {
   return html`<div><span class="status">${r.status}</span> <strong>#${r.id}</strong> <span class="muted">${r.project}</span> ·
     ${r.last_run ? html`<a href="/runs/${r.last_run}">${r.title}</a>` : r.title}</div>
-    ${r.status_reason ? html`<div class="muted">${r.status_reason}</div>` : ""}${thumbs(r.images)}`;
+    ${r.status_reason ? html`<div class="muted">${r.status_reason}</div>` : ""}${thumbs(r.files)}`;
 }
 
 const action = (id: number, name: string, label: string, cls = "") =>
@@ -96,7 +103,7 @@ function needsCard(r: ReqRow): Html {
   switch (r.status) {
     case "needs_info":
       actions = html`<form method="post" action="/requests/${r.id}/answer" enctype="multipart/form-data"><textarea name="text" required placeholder="Your answer"></textarea>
-        ${imagePicker}<div class="row"><button class="primary">Answer</button></div></form><div class="row">${action(r.id, "cancel", "Cancel", "danger")}</div>`;
+        ${filePicker}<div class="row"><button class="primary">Answer</button></div></form><div class="row">${action(r.id, "cancel", "Cancel", "danger")}</div>`;
       break;
     case "needs_review":
       actions = html`<div class="row">${action(r.id, "approve", "Approve", "primary")} ${action(r.id, "reject", "Reject", "danger")}</div>`;
@@ -136,7 +143,7 @@ ${flash ? html`<div class="card bad">${flash}</div>` : ""}
   <div class="row"><textarea name="body" placeholder="Details (optional)"></textarea></div>
   <div class="row"><input type="text" name="done_when" placeholder="Done when (optional)"></div>
   <div class="row"><input type="text" name="done_when_test" placeholder="Done-when test name (optional)"></div>
-  ${imagePicker}
+  ${filePicker}
   <div class="row"><button class="primary">Queue it</button></div>
 </form>
 
@@ -156,7 +163,7 @@ ${d.recent.map((r) => html`<div class="card">${reqLine(r)}${r.status === "done" 
 export type StepRow = { n: number; step: string; exit_code: number | null; started_at: number; ended_at: number | null };
 export type RunData = {
   run: { id: number; status: string; attempt: number; branch: string | null; current_step: string | null; flags: string; commit_sha: string | null; push_state: string };
-  req: { id: number; title: string; status: string; status_reason: string | null; project: string; images: string | null };
+  req: { id: number; title: string; status: string; status_reason: string | null; project: string; files: string };
   steps: StepRow[]; log: string; logStep: number | null; diffStat: string; diff: string; diffCut: boolean; recipe: string;
 };
 
@@ -170,7 +177,7 @@ export function runPage(d: RunData, user: User): string {
   const flags = (JSON.parse(d.run.flags || "[]") as { kind: string; path: string; detail?: string }[]);
   return page(`Run ${d.run.id}`, html`
 <div class="card"><span class="status">${d.req.status}</span> <strong>#${d.req.id}</strong> <span class="muted">${d.req.project}</span> · ${d.req.title}
-  ${d.req.status_reason ? html`<div class="muted">${d.req.status_reason}</div>` : ""}${thumbs(d.req.images)}
+  ${d.req.status_reason ? html`<div class="muted">${d.req.status_reason}</div>` : ""}${thumbs(d.req.files)}
   <div class="muted">Run ${d.run.id} · attempt ${d.run.attempt} · ${d.run.branch ?? ""} · ${d.run.status}${d.run.current_step ? ` (${d.run.current_step})` : ""}
   ${d.run.commit_sha ? html` · commit ${d.run.commit_sha.slice(0, 7)} (${d.run.push_state})` : ""}</div></div>
 
