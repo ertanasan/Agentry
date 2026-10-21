@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   addUser, AuthError, finishLogin, finishRegistration, LoginThrottle, loginOptions, REGISTRATION_TTL_MS, registrationOptions,
-  relyingParty, resetUser, SESSION_TTL_MS, sessionUser,
+  relyingParty, removeUser, resetUser, SESSION_TTL_MS, sessionUser,
 } from "../src/accounts.ts";
 import { openDb } from "../src/db.ts";
 import { SoftPasskey } from "./helpers/passkey.ts";
@@ -118,6 +118,36 @@ describe("reset (lost device)", () => {
     const first = addUser(db, "ertan", "admin");
     resetUser(db, "ertan");
     await expect(registrationOptions(db, rp, first)).rejects.toThrow("invalid, used or expired");
+  });
+});
+
+describe("remove", () => {
+  test("removing a user deletes their passkeys, sessions and links; the name can be used again", async () => {
+    const { db, key, session } = await registered();
+    addUser(db, "alice", "owner");
+    const pending = addUser(db, "bob", "admin");
+    removeUser(db, "ertan");
+    removeUser(db, "bob");
+    expect(sessionUser(db, session)).toBeNull();
+    await expect(signIn(db, key)).rejects.toThrow("unknown passkey");
+    await expect(registrationOptions(db, rp, pending)).rejects.toThrow("invalid, used or expired");
+    for (const t of ["credentials", "sessions", "registrations"]) {
+      expect(db.query(`SELECT COUNT(*) AS n FROM ${t} WHERE user_id NOT IN (SELECT id FROM users)`).get()).toEqual({ n: 0 });
+    }
+    expect(db.query("SELECT name FROM users").all()).toEqual([{ name: "alice" }]);
+    expect(() => addUser(db, "ertan", "admin")).not.toThrow();
+  });
+
+  test("the last owner and unknown users are refused", () => {
+    const db = openDb(":memory:");
+    addUser(db, "ertan", "owner");
+    addUser(db, "bob", "admin");
+    expect(() => removeUser(db, "ertan")).toThrow("last owner");
+    expect(() => removeUser(db, "nobody")).toThrow("no user nobody");
+    removeUser(db, "bob");
+    addUser(db, "alice", "owner");
+    removeUser(db, "ertan");
+    expect(db.query("SELECT name FROM users").all()).toEqual([{ name: "alice" }]);
   });
 });
 

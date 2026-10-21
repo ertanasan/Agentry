@@ -2,6 +2,7 @@
 // no password (winhost design "Accounts and login"). Accounts are created on the server's machine with
 // `agentry user add`, which prints a one-time registration link (30 minutes, single use) to open on the device
 // that will hold the passkey. `agentry user reset` revokes a user's passkeys and sessions and prints a new link.
+// `agentry user remove` deletes the account.
 // Verification is @simplewebauthn/server's; user verification (biometric or device PIN) is required.
 // Only hashes of registration codes, login challenge ids and session tokens are stored.
 import type { Database } from "bun:sqlite";
@@ -52,6 +53,20 @@ export function resetUser(db: Database, name: string, now = Date.now()): string 
     db.query("UPDATE registrations SET used_at = ? WHERE user_id = ? AND used_at IS NULL").run(now, user.id);
     logEvent(db, null, "user_reset", { name }, now);
     return issueRegistration(db, user.id, now);
+  })();
+}
+
+// Deletes the user with their passkeys, sessions and registration links; the name can then be used again. Events keep
+// the name as their actor. The last owner stays, so the web UI always has someone who can sign in.
+export function removeUser(db: Database, name: string, now = Date.now()): void {
+  const user = db.query("SELECT id, role FROM users WHERE name = ?").get(name) as { id: number; role: Role } | null;
+  if (!user) throw new AuthError(`no user ${name}`);
+  const owners = (db.query("SELECT COUNT(*) AS n FROM users WHERE role = 'owner' AND disabled = 0").get() as { n: number }).n;
+  if (user.role === "owner" && owners <= 1) throw new AuthError(`${name} is the last owner; add another with \`agentry user add <name> --owner\` first`);
+  db.transaction(() => {
+    for (const table of ["credentials", "sessions", "registrations"]) db.query(`DELETE FROM ${table} WHERE user_id = ?`).run(user.id);
+    db.query("DELETE FROM users WHERE id = ?").run(user.id);
+    logEvent(db, null, "user_remove", { name }, now);
   })();
 }
 
