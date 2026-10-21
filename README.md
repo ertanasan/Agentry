@@ -70,8 +70,9 @@ next action. Nothing reaches production on a guess.
 | **Multi-project requests** | One request can span several projects in one repository: one change, one commit, deploys in a set order. |
 | **Multi-repository queue** | Register any number of projects across any number of repositories. They all share one prioritized queue. |
 | **Deploy-group locks** | Projects that deploy to the same target never deploy at the same time. After a failed deploy, the group stays locked until a person resolves it. |
+| **Parallel workers** | Up to 8 requests run at once, each in its own worktree and sandbox. Pushes and deploys still take turns within each deploy group. |
 | **Crash-safe runner** | A lease, fenced writes and startup recovery mean a killed runner never double-deploys, never loses track of a push and never leaves processes behind. |
-| **Phone-friendly web UI** | Sign in with a passkey (Face ID, Touch ID or Windows Hello), queue requests, attach screenshots, answer the agent's questions, approve, retry and re-deploy from anywhere. |
+| **Phone-friendly web UI** | Sign in with a passkey (Face ID, Touch ID or Windows Hello), queue requests, attach screenshots, answer the agent's questions, approve, retry and re-deploy from anywhere. Owners manage workers, projects and users there, after a fresh passkey check. |
 | **Human in the loop where it matters** | The agent can ask a question instead of guessing. You review only the changes that carry risk. |
 | **Audit trail and backups** | Every state change is logged with who made it. Nightly backups cover the database, every in-flight branch and all attachments. |
 
@@ -98,8 +99,8 @@ flowchart LR
   LV -- no --> BPP([blocked_post_push<br/>group locked])
 ```
 
-1. **Pick.** The runner takes the highest-priority, oldest queued request whose projects are enabled and whose
-   deploy groups are all free.
+1. **Pick.** Whenever a worker is free, the runner takes the highest-priority, oldest queued request whose
+   projects are enabled and whose deploy groups are all free.
 2. **Drift guard.** Before it touches a deploying group, Agentry reads every target's live version. A target that
    runs a commit missing from `origin`, or one with uncommitted changes, blocks its group. Agentry never builds on
    top of a production state it can't explain.
@@ -526,6 +527,11 @@ Open the link on the device that will hold the passkey, create the passkey, and 
 `agentry run` and `agentry serve` side by side, as login items or services, so the queue keeps working. (On
 Windows, setup registers both as startup tasks.)
 
+To use the UI from your phone or another machine, set `AGENTRY_PUBLIC_URL` to the HTTPS address you'll open (for
+example your Tailscale Serve name) for both `agentry user add` and `agentry serve`. The server accepts only that
+address and `localhost`, and a passkey works only at the address it was created for. Then raise **Workers** on
+the settings page if the machine has room for more than one request at a time.
+
 ### On Windows
 
 [`setup/windows-setup.ps1`](setup/windows-setup.ps1) installs a standalone Agentry (its own database, web UI and
@@ -637,6 +643,9 @@ agentry backup                        back up now
 | `AGENTRY_CLAUDE_BIN` | `claude` on `PATH` | The Claude Code binary |
 | `AGENTRY_MODEL` | Claude Code's default | Model for the agent and the verifier |
 
+Runner settings (workers, pause, enabled projects) live in the database and are changed on the
+[settings page](#the-web-ui), so they apply without a restart.
+
 State lives in one SQLite database (WAL mode) with numbered, transactional schema migrations, so upgrades never
 need a manual step.
 
@@ -657,20 +666,20 @@ stay. Every backup, and every failure, is an audit event, and the UI warns when 
 
 ```
 src/
-  cli.ts            command line, runner loop, lease + heartbeat
-  runner.ts         the pipeline: worktree → agent → gates → push → deploy → confirm
+  cli.ts            command line, runner worker pool, lease + heartbeat
+  runner.ts         the pipeline: worktree → agent → gates → push → deploy → confirm; deploy groups take turns
   inspect.ts        diff gates (scope, build files, gate paths, deleted/skipped tests)
   verifier.ts       the done-when verifier
   sandbox.ts        sandbox parameters and the scrubbed environment   (sandbox/run.sb: the profile)
   recovery.ts       startup recovery and push-outcome resolution
   actions.ts        every state action, shared by the CLI and the web UI
   db.ts             schema, migrations, lease, fenced writes, audit log
-  git.ts            pinned worktrees, bounded async git
+  git.ts            pinned worktrees, bounded async git, one shared-git-dir write at a time per repo
   proc.ts           process trees, timeouts, capped logs
   platform.ts       shell and process trees per system (platform-windows.ts: PowerShell, job objects, sandbox user)
-  server.ts         HTTP routes, auth checks, security headers
+  server.ts         HTTP routes, auth and role checks, security headers
   views.ts          server-rendered pages (escape-by-default templates)
-  accounts.ts       passkeys, sessions, invites, sign-in throttle
+  accounts.ts       passkeys, sessions, step-up checks, invites, sign-in throttle
   attachments.ts    image upload, type detection, per-run delivery
   backup.ts         nightly backups and log retention
   adapters/         the Claude Code adapter and the agent/verifier contracts
@@ -685,7 +694,7 @@ so the pipeline doesn't depend on one model or CLI.
 ## Quality
 
 ```sh
-bun test              # 251 tests: runner, gates, recovery, git, server, accounts, backups, Windows, end-to-end loop
+bun test              # 251 tests: runner, parallel workers, gates, recovery, git, server, accounts, backups, Windows, end-to-end loop
 bun run typecheck
 bun run eval:verifier # the done-when verifier against 10 labeled cases, with the real model
 ```
@@ -706,7 +715,8 @@ bun run eval:verifier # the done-when verifier against 10 labeled cases, with th
 | .NET (TRX results) | ✅ Full support: counts, regression checks, named done-when tests |
 | Other test frameworks | ✅ Pass/fail through the exit code. Count checks need a TRX file. |
 | iOS / Swift | ✅ Build-only projects (`built`), sandboxed `swift test` |
-| Web UI with passkeys | ✅ Available |
+| Web UI with passkeys | ✅ Available, with owner-only settings behind a passkey step-up |
+| Parallel workers | ✅ Available: up to 8 requests at once per instance. On Windows they share one sandbox user (see [Known limits](#known-limits)). |
 | Windows runner | ✅ Available: a standalone instance set up by [`setup/windows-setup.ps1`](setup/windows-setup.ps1). Steps run as a low-privilege user in job objects. |
 | One queue across machines | Planned: a runner on another machine claiming work from one server. Today each machine runs its own instance. |
 
