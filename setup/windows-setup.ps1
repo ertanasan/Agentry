@@ -210,7 +210,11 @@ Set-Content (Join-Path $ssh 'known_hosts') 'github.com ssh-ed25519 AAAAC3NzaC1lZ
 $publicKey = Get-Content "$key.pub"
 icacls $ssh /inheritance:r /grant:r "${runner}:(OI)(CI)F" 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' /T /Q | Out-Null; Assert-Exit "icacls $ssh"
 icacls $ssh /setowner $runner /T /Q | Out-Null
-$gitSsh = "'$(($gitUsr -replace '\\', '/'))/ssh.exe' -i '$(($key -replace '\\', '/'))' -o IdentitiesOnly=yes -o UserKnownHostsFile='$((Join-Path $ssh 'known_hosts') -replace '\\', '/')' -o StrictHostKeyChecking=yes"
+# Windows' own OpenSSH checks the key's real access list. Git's ssh sees an owner-only key as too open when its
+# owner runs it, and ignores the key.
+$sshExe = Get-Command ssh.exe -ErrorAction SilentlyContinue
+$sshExe = if ($sshExe) { $sshExe.Source } else { Join-Path $gitUsr 'ssh.exe' }
+$gitSsh = "'$($sshExe -replace '\\', '/')' -i '$(($key -replace '\\', '/'))' -o IdentitiesOnly=yes -o UserKnownHostsFile='$((Join-Path $ssh 'known_hosts') -replace '\\', '/')' -o StrictHostKeyChecking=yes"
 
 # Clones belong to AgentryRunner, or its git refuses them as another user's ("dubious ownership").
 foreach ($url in $Clone) {
