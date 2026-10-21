@@ -100,16 +100,18 @@ describe.if(win && existsSync(SANDBOX_PASSWORD))("windows: the AgentrySandbox us
     step(command, { cwd: wt, wrap: o.wrap ?? sbx.wrap, env: sbx.env, timeoutMs: o.timeoutMs });
 
   test("steps run as AgentrySandbox, with the run's own profile and temp", async () => {
-    const r = await run("whoami; $env:USERPROFILE; $env:TEMP");
+    const r = await run("whoami; $env:USERPROFILE; $env:TEMP; \"cwd=$PWD\"; [Environment]::CurrentDirectory");
     expect(r.exitCode).toBe(0);
     expect(r.log.toLowerCase()).toContain("\\agentrysandbox");
     expect(r.log).toContain(sbx.env.USERPROFILE);
     expect(r.log).toContain(sbx.env.TEMP);
+    expect(r.log).toContain(`cwd=${wt}`);
+    expect(r.log).not.toContain("CLIXML");
   }, SLOW);
 
   test("it writes the worktree and the run's temp", async () => {
-    const r = await run(`Set-Content made.txt 'by the sandbox'; Set-Content -LiteralPath '${join(sbx.env.TEMP, "t.txt")}' x; exit 0`);
-    expect(r.exitCode).toBe(0);
+    const r = await run(`$ErrorActionPreference = 'Stop'; Set-Content made.txt 'by the sandbox'; Set-Content -LiteralPath '${join(sbx.env.TEMP, "t.txt")}' x; exit 0`);
+    expect({ exitCode: r.exitCode, log: r.log }).toEqual({ exitCode: 0, log: "" });
     expect(readFileSync(join(wt, "made.txt"), "utf8")).toContain("by the sandbox");
   }, SLOW);
 

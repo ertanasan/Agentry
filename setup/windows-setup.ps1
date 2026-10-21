@@ -45,11 +45,11 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
   throw 'Run this in an elevated PowerShell (Run as administrator).'
 }
 function Step([string]$what) { Write-Host "==> $what" }
-function Check-Exit([string]$what) { if ($LASTEXITCODE -ne 0) { throw "$what failed (exit $LASTEXITCODE)" } }
+function Assert-Exit([string]$what) { if ($LASTEXITCODE -ne 0) { throw "$what failed (exit $LASTEXITCODE)" } }
 
 # Runs a registered task and waits until it has run and finished. A new account's first logon builds its profile, so
 # the task can sit queued a while first.
-function Run-Task([string]$name, [int]$minutes) {
+function Invoke-Task([string]$name, [int]$minutes) {
   Start-ScheduledTask -TaskName $name
   $notFinished = 0x41301, 0x41303, 0x41325  # running, has not run yet, queued
   $deadline = (Get-Date).AddMinutes($minutes)
@@ -65,7 +65,7 @@ if ($SelfTest) {
   if (-not (Get-ScheduledTask -TaskName $tasks.selftest -ErrorAction SilentlyContinue)) { throw 'Run the full setup first.' }
   $log = Join-Path $logs 'selftest.log'
   Remove-Item $log -ErrorAction SilentlyContinue
-  $result = Run-Task $tasks.selftest 15
+  $result = Invoke-Task $tasks.selftest 15
   if (Test-Path $log) { Get-Content $log }
   "selftest task result: $result"
   exit $(if ($result -eq 0) { 0 } else { 1 })
@@ -120,7 +120,6 @@ foreach ($u in $runner, $sandbox) {
   Add-LocalGroupMember Users $u -ErrorAction SilentlyContinue
 }
 $runnerSid = (Get-LocalUser $runner).SID.Value
-$sandboxSid = (Get-LocalUser $sandbox).SID.Value
 [UserRight]::Grant($runnerSid, 'SeBatchLogonRight')  # the startup tasks log on as a batch job
 $hidden = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList'
 New-Item $hidden -Force | Out-Null
@@ -129,12 +128,12 @@ foreach ($u in $runner, $sandbox) { New-ItemProperty $hidden -Name $u -Value 0 -
 # 2. Folders. <root> lets nobody but the two accounts in; the sandbox only reads app and bin.
 Step "Folders under $Root"
 foreach ($d in $Root, $app, $bin, $home_, (Join-Path $Root 'repos'), $logs) { New-Item -ItemType Directory -Force $d | Out-Null }
-icacls $Root /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' "${runner}:(OI)(CI)RX" /Q | Out-Null; Check-Exit "icacls $Root"
-foreach ($d in $app, $bin) { icacls $d /grant "${sandbox}:(OI)(CI)RX" /Q | Out-Null; Check-Exit "icacls $d" }
-foreach ($d in $home_, (Join-Path $Root 'repos'), $logs) { icacls $d /grant "${runner}:(OI)(CI)M" /Q | Out-Null; Check-Exit "icacls $d" }
+icacls $Root /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' "${runner}:(OI)(CI)RX" /Q | Out-Null; Assert-Exit "icacls $Root"
+foreach ($d in $app, $bin) { icacls $d /grant "${sandbox}:(OI)(CI)RX" /Q | Out-Null; Assert-Exit "icacls $d" }
+foreach ($d in $home_, (Join-Path $Root 'repos'), $logs) { icacls $d /grant "${runner}:(OI)(CI)M" /Q | Out-Null; Assert-Exit "icacls $d" }
 $pwFile = Join-Path $home_ 'sandbox-password'
 [IO.File]::WriteAllText($pwFile, $passwords[$sandbox])
-icacls $pwFile /inheritance:r /grant:r "${runner}:R" 'Administrators:F' 'SYSTEM:F' /Q | Out-Null; Check-Exit "icacls $pwFile"
+icacls $pwFile /inheritance:r /grant:r "${runner}:R" 'Administrators:F' 'SYSTEM:F' /Q | Out-Null; Assert-Exit "icacls $pwFile"
 
 # 3. Bun, pinned and checked against the release's SHA-256 list.
 Step "Bun $BunVersion"
@@ -146,8 +145,8 @@ if ($have -ne $BunVersion) {
   New-Item -ItemType Directory -Force $tmp | Out-Null
   try {
     Invoke-WebRequest "$base/bun-windows-x64.zip" -OutFile "$tmp\bun.zip" -UseBasicParsing
-    $sums = (Invoke-WebRequest "$base/SHASUMS256.txt" -UseBasicParsing).Content
-    $want = ($sums -split "`n" | Where-Object { $_ -match 'bun-windows-x64\.zip$' }) -replace '\s.*$', ''
+    Invoke-WebRequest "$base/SHASUMS256.txt" -OutFile "$tmp\sums.txt" -UseBasicParsing  # served as bytes, not text
+    $want = (Get-Content "$tmp\sums.txt" | Where-Object { $_ -match '\sbun-windows-x64\.zip$' }) -replace '\s.*$', ''
     $got = (Get-FileHash "$tmp\bun.zip" -Algorithm SHA256).Hash
     if (-not $want -or $got -ne $want.ToUpper()) { throw "bun-windows-x64.zip does not match SHASUMS256.txt ($got vs $want)" }
     Expand-Archive "$tmp\bun.zip" $tmp -Force
@@ -163,7 +162,7 @@ if (-not (Test-Path $claudeExe)) {
   $src = if ($found) { $found.Source } else { Join-Path $env:USERPROFILE '.local\bin\claude.exe' }
   if (-not (Test-Path $src)) {
     Write-Host 'Installing Claude Code with the official installer (claude.ai/install.ps1)'
-    Invoke-Expression (Invoke-WebRequest 'https://claude.ai/install.ps1' -UseBasicParsing).Content
+    Invoke-RestMethod 'https://claude.ai/install.ps1' | Invoke-Expression
   }
   if (-not (Test-Path $src)) { throw "No claude.exe at $src after installing" }
   Copy-Item $src $claudeExe
@@ -173,25 +172,36 @@ if (-not (Test-Path $claudeExe)) {
 # 5. Agentry itself, and the run-as helper. The runner can read but not change its own code.
 Step "Agentry from $Repo ($Branch)"
 if (Test-Path (Join-Path $app '.git')) {
-  git -C $app fetch --quiet origin $Branch; Check-Exit 'git fetch'
-  git -C $app reset --quiet --hard "origin/$Branch"; Check-Exit 'git reset'
+  git -C $app fetch --quiet origin $Branch; Assert-Exit 'git fetch'
+  git -C $app reset --quiet --hard "origin/$Branch"; Assert-Exit 'git reset'
 } else {
-  git clone --quiet --branch $Branch $Repo $app; Check-Exit 'git clone'
+  git clone --quiet --branch $Branch $Repo $app; Assert-Exit 'git clone'
 }
 Push-Location $app
-try { & $bunExe install --frozen-lockfile; Check-Exit 'bun install' } finally { Pop-Location }
+try { & $bunExe install --frozen-lockfile; Assert-Exit 'bun install' } finally { Pop-Location }
 $csc = Join-Path ([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) 'csc.exe'
-& $csc /nologo /optimize "/out:$app\tools\runas\agentry-runas.exe" "$app\tools\runas\runas.cs"; Check-Exit 'Compiling agentry-runas'
+& $csc /nologo /optimize "/out:$app\tools\runas\agentry-runas.exe" "$app\tools\runas\runas.cs"; Assert-Exit 'Compiling agentry-runas'
 
 # 6. The push key. Git's own ssh, a pinned GitHub host key, and only this key.
 Step 'SSH key for pushes'
 $ssh = Join-Path $home_ 'ssh'
-New-Item -ItemType Directory -Force $ssh | Out-Null
 $key = Join-Path $ssh 'id_ed25519'
 $gitUsr = Join-Path $env:ProgramFiles 'Git\usr\bin'
-if (-not (Test-Path $key)) { & (Join-Path $gitUsr 'ssh-keygen.exe') -q -t ed25519 -N '""' -C "agentry@$env:COMPUTERNAME" -f $key; Check-Exit 'ssh-keygen' }
+# The folder ends up AgentryRunner's with an access list of its own; take it back (and drop any deny entries a key
+# tool left) before writing to it again.
+if (Test-Path $ssh) {
+  takeown /F $ssh /R /D Y | Out-Null; Assert-Exit "takeown $ssh"
+  icacls $ssh /reset /T /C /Q | Out-Null; Assert-Exit "icacls $ssh /reset"
+} else { New-Item -ItemType Directory $ssh | Out-Null }
+if (-not (Test-Path $key)) {
+  $keygen = Get-Command ssh-keygen.exe -ErrorAction SilentlyContinue
+  $keygen = if ($keygen) { $keygen.Source } else { Join-Path $gitUsr 'ssh-keygen.exe' }
+  & $keygen -q -t ed25519 -N '""' -C "agentry@$env:COMPUTERNAME" -f $key; Assert-Exit 'ssh-keygen'
+  icacls $ssh /reset /T /C /Q | Out-Null; Assert-Exit "icacls $ssh /reset"
+}
 Set-Content (Join-Path $ssh 'known_hosts') 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' -Encoding ASCII
-icacls $ssh /inheritance:r /grant:r "${runner}:(OI)(CI)F" 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' /T /Q | Out-Null; Check-Exit "icacls $ssh"
+$publicKey = Get-Content "$key.pub"
+icacls $ssh /inheritance:r /grant:r "${runner}:(OI)(CI)F" 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' /T /Q | Out-Null; Assert-Exit "icacls $ssh"
 icacls $ssh /setowner $runner /T /Q | Out-Null
 $gitSsh = "'$(($gitUsr -replace '\\', '/'))/ssh.exe' -i '$(($key -replace '\\', '/'))' -o IdentitiesOnly=yes -o UserKnownHostsFile='$((Join-Path $ssh 'known_hosts') -replace '\\', '/')' -o StrictHostKeyChecking=yes"
 
@@ -200,8 +210,8 @@ foreach ($url in $Clone) {
   $dest = Join-Path $Root "repos\$([IO.Path]::GetFileNameWithoutExtension(($url -split '[/:]')[-1]))"
   if (Test-Path $dest) { "already cloned: $dest"; continue }
   $env:GIT_SSH_COMMAND = $gitSsh
-  git clone --quiet $url $dest; Check-Exit "git clone $url (is the deploy key on the repository?)"
-  icacls $dest /setowner $runner /T /C /Q | Out-Null; Check-Exit "icacls $dest"
+  git clone --quiet $url $dest; Assert-Exit "git clone $url (is the deploy key on the repository?)"
+  icacls $dest /setowner $runner /T /C /Q | Out-Null; Assert-Exit "icacls $dest"
   "cloned: $dest"
 }
 
@@ -209,15 +219,15 @@ foreach ($url in $Clone) {
 Step 'Deploy rights'
 foreach ($d in $DeployFolders) {
   New-Item -ItemType Directory -Force $d | Out-Null
-  icacls $d /grant "${runner}:(OI)(CI)M" /Q | Out-Null; Check-Exit "icacls $d"
+  icacls $d /grant "${runner}:(OI)(CI)M" /Q | Out-Null; Assert-Exit "icacls $d"
 }
 foreach ($s in $DeployServices) {
   $sddl = (sc.exe sdshow $s | Where-Object { $_ }) -join ''
-  Check-Exit "reading the access list of service $s"
+  Assert-Exit "reading the access list of service $s"
   if ($sddl -notmatch [regex]::Escape(";;;$runnerSid)")) {
     $ace = "(A;;CCLCSWRPWPDTLOCRRC;;;$runnerSid)"  # query, start, stop, pause, read; no reconfiguring
     $new = if ($sddl -match 'S:') { $sddl -replace 'S:', "${ace}S:" } else { $sddl + $ace }
-    sc.exe sdset $s $new | Out-Null; Check-Exit "granting $runner start and stop on service $s"
+    sc.exe sdset $s $new | Out-Null; Assert-Exit "granting $runner start and stop on service $s"
   }
 }
 
@@ -230,11 +240,11 @@ $denied = @()
 foreach ($d in Get-ChildItem C:\ -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $system -notcontains $_.Name }) {
   $acl = Get-Acl $d.FullName -ErrorAction SilentlyContinue
   if ($acl -and ($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference -match 'Users$|Authenticated Users|Everyone' -and $_.FileSystemRights -match $writable })) {
-    icacls $d.FullName /deny "${sandbox}:(OI)(CI)(W,D,DC)" /Q | Out-Null; Check-Exit "icacls $($d.FullName)"
+    icacls $d.FullName /deny "${sandbox}:(OI)(CI)(W,D,DC)" /Q | Out-Null; Assert-Exit "icacls $($d.FullName)"
     $denied += $d.FullName
   }
 }
-icacls 'C:\' /deny "${sandbox}:(AD)" /Q | Out-Null; Check-Exit 'icacls C:\'
+icacls 'C:\' /deny "${sandbox}:(AD)" /Q | Out-Null; Assert-Exit 'icacls C:\'
 icacls 'C:\Users\Public' /deny "${sandbox}:(OI)(CI)(W,D,DC)" /Q | Out-Null
 "write denied: C:\ (new folders), C:\Users\Public$(if ($denied) { ', ' + ($denied -join ', ') })"
 foreach ($i in $SqlInstances) {
@@ -292,7 +302,7 @@ Done. Agentry is in $Root; the web UI listens on 127.0.0.1:$Port (task '$($tasks
 Next:
   1. Check the platform layer:      powershell -ExecutionPolicy Bypass -File "$PSCommandPath" -SelfTest
   2. Add this key to each repository Agentry pushes to, as a deploy key with write access:
-       $(Get-Content "$key.pub")
+       $publicKey
   3. Clone each repository (run setup again with -Clone <ssh url>), point its recipe's "repo" at $Root\repos\<name>,
      and register it:                 $Root\agentry.cmd project add <name> <recipe.json>
 $(if (-not $hasToken) { "  4. Save a claude token (from ``claude setup-token``):  $Root\agentry.cmd token

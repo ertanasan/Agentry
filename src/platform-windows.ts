@@ -16,10 +16,10 @@ export const STEP_CPU_PERCENT = 50;
 export const windows: Platform = {
   // A failing native command is the step's exit code, as with zsh -c. $ErrorActionPreference stays at Continue:
   // with Stop, Windows PowerShell 5.1 turns a native command's stderr into a terminating error once redirected.
+  // -Command, not -EncodedCommand: with the latter it writes errors and progress to the log as CLIXML.
   shell(command) {
-    const script = `${command}\nif (Test-Path -LiteralPath variable:\\LASTEXITCODE) { exit $LASTEXITCODE }`;
     return ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-      "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")];
+      "-Command", `${command}\nif (Test-Path -LiteralPath variable:\\LASTEXITCODE) { exit $LASTEXITCODE }`];
   },
   // argv either starts with the helper already (a sandbox wrap) or gets it in front.
   spawnTree(argv, o) {

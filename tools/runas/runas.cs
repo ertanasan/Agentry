@@ -7,8 +7,9 @@
 //
 // The command gets this helper's environment, working directory and standard handles. With --sandbox it runs as that
 // user (CreateProcessWithLogonW, proven by the isolation spike). That API takes at most 1024 characters of command
-// line, so the helper starts a copy of itself as the user (`--inner <file>`, the full command line in a file in
-// scratch-dir) and the copy starts the command. Both are in the job. A process started as another user from a
+// line, so the helper starts a copy of itself as the user (`--inner <file>`, the working directory and the full command
+// line in a file in scratch-dir) and the copy starts the command. Both are in the job. The copy sets the working
+// directory itself: the one given to CreateProcessWithLogonW does not reach the command. A process started as another user from a
 // non-interactive logon dies with 0xC0000142 unless that user may use the runner's window station and desktop, so
 // the helper grants that first.
 //
@@ -102,10 +103,10 @@ static class RunAs {
     PROCESS_INFORMATION pi;
     string cmdFile = null;
     if (user == null) {
-      pi = Start(commandLine, CREATE_SUSPENDED);
+      pi = Start(commandLine, null, CREATE_SUSPENDED);
     } else {
       cmdFile = Path.Combine(scratch, "runas-" + System.Diagnostics.Process.GetCurrentProcess().Id + ".cmd.txt");
-      File.WriteAllText(cmdFile, commandLine, new UTF8Encoding(false));
+      File.WriteAllText(cmdFile, Environment.CurrentDirectory + "\n" + commandLine, new UTF8Encoding(false));
       string self = System.Reflection.Assembly.GetExecutingAssembly().Location;
       var si = StdHandles();
       si.lpDesktop = ShareDesktop(user);
@@ -136,7 +137,9 @@ static class RunAs {
 
   // Started as the sandbox user, already in the job: starts the command (which inherits the job) and waits.
   static int Inner(string cmdFile) {
-    var pi = Start(File.ReadAllText(cmdFile, Encoding.UTF8), 0);
+    string text = File.ReadAllText(cmdFile, Encoding.UTF8);
+    int nl = text.IndexOf('\n');
+    var pi = Start(text.Substring(nl + 1), text.Substring(0, nl), 0);
     CloseHandle(pi.hThread);
     WaitForSingleObject(pi.hProcess, INFINITE);
     uint code;
@@ -144,12 +147,12 @@ static class RunAs {
     return (int)code;
   }
 
-  // The command with this process's environment, directory and standard handles.
-  static PROCESS_INFORMATION Start(string commandLine, int flags) {
+  // The command with this process's environment and standard handles, in cwd (null: this process's directory).
+  static PROCESS_INFORMATION Start(string commandLine, string cwd, int flags) {
     var si = StdHandles();
     PROCESS_INFORMATION pi;
     if (!CreateProcess(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true,
-        flags | CREATE_NO_WINDOW | CREATE_DEFAULT_ERROR_MODE, IntPtr.Zero, null, ref si, out pi))
+        flags | CREATE_NO_WINDOW | CREATE_DEFAULT_ERROR_MODE, IntPtr.Zero, cwd, ref si, out pi))
       throw new Win32Exception(Marshal.GetLastWin32Error(), "starting " + commandLine.Split(' ')[0] + " failed");
     return pi;
   }
