@@ -23,8 +23,13 @@
 //
 //  * A recipe with build_unsandboxed builds outside the sandbox on a cleaned worktree, as deploy does (D6).
 //
+// The runner may work on several requests at once (the settings page's worker count). Agent, build, tests and
+// verifier of different requests run side by side; the drift guard, and everything from the last fetch before
+// the push to the end of the deploy, hold the request's deploy groups, so one group never sees two pushes or
+// deploys at once. A request whose group was blocked while it ran stops before its push.
+//
 // Every stop removes the worktree and keeps the branch (D12). Every state write is fenced by the lease
-// token (D17); the caller holds the lease and runs the heartbeat, which reads `ctx.currentRun`. Every git call
+// token (D17); the caller holds the lease and runs the heartbeat, which reads `ctx.running`. Every git call
 // is async and bounded, and its process group is recorded on the run while it runs (git.ts).
 import type { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -48,10 +53,11 @@ export type RunnerCtx = {
   claudeBin?: string;
   keyHelper?: string;       // API key helper the sandbox lets claude read; default ~/.agentry/api-key-helper
   pushBackoffMs?: number[]; // ls-remote retries after a push (D19)
-  currentRun: number | null;
+  running: Set<number>;     // the runs in progress, whose leases the heartbeat renews
 };
 
 export type RunOutcome = { kind: "paused" | "idle" } | { kind: "ran"; requestId: number; status: RequestStatus };
+export type Started = { kind: "paused" | "idle" } | { kind: "started"; requestId: number; done: Promise<RunOutcome> };
 
 type ReqRow = {
   id: number; project_id: number; title: string; body: string; done_when: string | null; done_when_test: string | null;
@@ -115,19 +121,29 @@ function distinct<T>(items: T[], key: (item: T) => unknown): T[] {
 }
 
 export async function runNext(ctx: RunnerCtx): Promise<RunOutcome> {
+  const s = startNext(ctx);
+  return s.kind === "started" ? s.done : s;
+}
+
+// Starts the next request and returns at once, with `done` settling when its run ends. The request is marked
+// running before this returns, so the next call starts a different one.
+export function startNext(ctx: RunnerCtx): Started {
   if (runnerRow(ctx.db).paused) return { kind: "paused" };
   // A queued Re-run deploy goes first: its group stays blocked until it is handled (slice 2 review D7).
   const queued = ctx.db.query(`SELECT id FROM requests WHERE redeploy_requested = 1 AND status = 'blocked_post_push'
     ORDER BY updated_at, id LIMIT 1`).get() as { id: number } | null;
   if (queued) {
     w(ctx, () => ctx.db.query("UPDATE requests SET redeploy_requested = 0 WHERE id = ?").run(queued.id));
-    try {
-      return { kind: "ran", requestId: queued.id, status: await redeploy(ctx, queued.id) };
-    } catch (e) {
-      if (e instanceof LeaseLost) throw e;
-      w(ctx, () => setRequestStatus(ctx.db, queued.id, "blocked_post_push", `re-run deploy failed: ${e instanceof Error ? e.message : String(e)}`));
-      return { kind: "ran", requestId: queued.id, status: "blocked_post_push" };
-    }
+    const done = (async (): Promise<RunOutcome> => {
+      try {
+        return { kind: "ran", requestId: queued.id, status: await redeploy(ctx, queued.id) };
+      } catch (e) {
+        if (e instanceof LeaseLost) throw e;
+        w(ctx, () => setRequestStatus(ctx.db, queued.id, "blocked_post_push", `re-run deploy failed: ${e instanceof Error ? e.message : String(e)}`));
+        return { kind: "ran", requestId: queued.id, status: "blocked_post_push" };
+      }
+    })();
+    return { kind: "started", requestId: queued.id, done };
   }
   const req = pick(ctx.db);
   if (!req) return { kind: "idle" };
@@ -136,7 +152,31 @@ export async function runNext(ctx: RunnerCtx): Promise<RunOutcome> {
   const j = startRun(ctx, req, {
     attempt, branch: resume?.branch ?? `agentry/${req.id}-${attempt}`, base: resume?.base_sha ?? null, candidate: resume?.candidate_sha ?? null,
   });
-  return { kind: "ran", requestId: req.id, status: await execute(j, () => pipeline(j, resume !== null)) };
+  const done = execute(j, () => pipeline(j, resume !== null)).then((status): RunOutcome => ({ kind: "ran", requestId: req.id, status }));
+  return { kind: "started", requestId: req.id, done };
+}
+
+// The deploy groups this runner is pushing or deploying to, each with the promise its next holder waits on.
+const held = new Map<number, Promise<void>>();
+
+// Runs `body` while holding `groups`, after every earlier holder of any of them has finished. Groups are taken
+// in id order, so two requests that share several groups can't wait on each other.
+async function holdGroups<T>(groups: number[], body: () => Promise<T>): Promise<T> {
+  const releases: (() => void)[] = [];
+  try {
+    for (const id of [...groups].sort((a, b) => a - b)) {
+      const before = held.get(id) ?? Promise.resolve();
+      let release!: () => void;
+      const mine = new Promise<void>((r) => { release = r; });
+      const tail = before.then(() => mine);
+      held.set(id, tail);
+      releases.push(() => { release(); if (held.get(id) === tail) held.delete(id); });
+      await before;
+    }
+    return await body();
+  } finally {
+    for (const release of releases) release();
+  }
 }
 
 // "Re-run deploy" for a blocked_post_push request: steps 9-10 for its recorded commit, from a fresh worktree.
@@ -149,7 +189,7 @@ export async function redeploy(ctx: RunnerCtx, requestId: number): Promise<Reque
   const j = startRun(ctx, req, {
     attempt: last.attempt, branch: last.branch, base: last.base_sha, candidate: last.candidate_sha, commit: sha, pushState: last.push_state,
   });
-  return execute(j, async () => {
+  return execute(j, () => holdGroups(groupsOf(j.parts), async () => {
     const f = await g.fetch(j.repo, j.remote);
     if (f.code !== 0) throw new Error(fetchFailed(f));
     if (!await g.isAncestor(j.repo, sha, `${j.remote}/${j.branch}`)) throw new Error(`${sha.slice(0, 7)} is not on ${j.remote}/${j.branch}`);
@@ -157,7 +197,7 @@ export async function redeploy(ctx: RunnerCtx, requestId: number): Promise<Reque
     w(ctx, () => ctx.db.query("UPDATE runs SET push_state = 'pushed' WHERE request_id = ? AND commit_sha = ? AND push_state IN ('push_unknown', 'push_started')")
       .run(requestId, sha));
     return deploy(j, sha, true);
-  });
+  }));
 }
 
 function startRun(ctx: RunnerCtx, req: ReqRow, o: {
@@ -174,10 +214,7 @@ function startRun(ctx: RunnerCtx, req: ReqRow, o: {
       .run(req.id, o.attempt, ctx.token, now + LEASE_TTL_MS, o.branch, o.base, o.candidate, o.commit ?? null, o.pushState ?? "none", now)
       .lastInsertRowid);
   });
-  ctx.currentRun = runId;
-  // Each git process's group is recorded on the run while it runs, like a step's (slice 2 review D13).
-  g.observer.onStart = (pgid) => w(ctx, () => ctx.db.query("UPDATE runs SET pgid = ? WHERE id = ?").run(pgid, runId));
-  g.observer.onEnd = () => w(ctx, () => ctx.db.query("UPDATE runs SET pgid = NULL WHERE id = ?").run(runId));
+  ctx.running.add(runId);
   const dir = join(ctx.home, "runs", String(runId));
   mkdirSync(dir, { recursive: true });
   return {
@@ -188,23 +225,30 @@ function startRun(ctx: RunnerCtx, req: ReqRow, o: {
 }
 
 async function execute(j: Job, body: () => Promise<Stop>): Promise<RequestStatus> {
-  let s: Stop;
-  try {
-    s = await body();
-  } catch (e) {
-    if (e instanceof LeaseLost) throw e;
-    const msg = e instanceof Error ? e.message : String(e);
-    const run = j.ctx.db.query("SELECT push_state, commit_sha FROM runs WHERE id = ?").get(j.runId) as RunRow;
-    // Once a push has started, origin may have the commit: never requeue (D19).
-    s = run.push_state === "none" ? infra(`runner error: ${msg}`) : post(`runner error after push started: ${msg}`, run.commit_sha);
-  } finally {
-    if (existsSync(j.wt)) await g.removeWorktree(j.repo, j.wt);
-    rmSync(join(j.dir, "tmp"), { recursive: true, force: true });
-    j.ctx.currentRun = null;
-    g.observer.onStart = g.observer.onEnd = undefined;
-  }
-  finish(j, s);
-  return s.status;
+  const { ctx, runId } = j;
+  // Each git process's group is recorded on the run while it runs, like a step's (slice 2 review D13).
+  const observer: g.Observer = {
+    onStart: (pgid) => w(ctx, () => ctx.db.query("UPDATE runs SET pgid = ? WHERE id = ?").run(pgid, runId)),
+    onEnd: () => w(ctx, () => ctx.db.query("UPDATE runs SET pgid = NULL WHERE id = ?").run(runId)),
+  };
+  return g.observer.run(observer, async () => {
+    let s: Stop;
+    try {
+      s = await body();
+    } catch (e) {
+      if (e instanceof LeaseLost) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      const run = ctx.db.query("SELECT push_state, commit_sha FROM runs WHERE id = ?").get(runId) as RunRow;
+      // Once a push has started, origin may have the commit: never requeue (D19).
+      s = run.push_state === "none" ? infra(`runner error: ${msg}`) : post(`runner error after push started: ${msg}`, run.commit_sha);
+    } finally {
+      if (existsSync(j.wt)) await g.removeWorktree(j.repo, j.wt);
+      rmSync(join(j.dir, "tmp"), { recursive: true, force: true });
+      ctx.running.delete(runId);
+    }
+    finish(j, s);
+    return s.status;
+  });
 }
 
 function finish(j: Job, s: Stop): void {
@@ -235,7 +279,7 @@ async function pipeline(j: Job, resumed: boolean): Promise<Stop> {
   if (odd) return pre(`${odd.name} is not in the same repository and branch as ${j.parts[0].name}`);
   const f = await g.fetch(j.repo, j.remote);
   if (f.code !== 0) return infra(fetchFailed(f));
-  const drift = await driftGuard(j);
+  const drift = await holdGroups(groupsOf(j.parts), () => driftGuard(j));
   if (drift) return { status: "queued", reason: drift.reason, requeue: true, lock: { reason: drift.reason, sha: null, groups: [drift.group] } };
 
   if (resumed) {
@@ -266,24 +310,37 @@ async function deliver(j: Job, approved: boolean): Promise<Stop> {
   let stopped = await gates(j, approved);
   if (stopped) return stopped;
   let sha = await g.amendMessage(j.wt, commitMessage(j.req));
-  for (let round = 0; ; round++) {
-    const f = await g.fetch(j.repo, j.remote);
-  if (f.code !== 0) return infra(fetchFailed(f));
-    const head = await g.remoteHead(j.repo, j.remote, j.branch);
-    if (!await g.isAncestor(j.repo, head, sha)) {
-      if (!await g.rebaseOnto(j.wt, `${j.remote}/${j.branch}`)) return pre(`rebase onto ${j.remote}/${j.branch} had conflicts`);
-      j.base = head;
-      sha = await g.headSha(j.wt);
-      w(j.ctx, () => j.ctx.db.query("UPDATE runs SET base_sha = ? WHERE id = ?").run(head, j.runId));
-      stopped = await gates(j, approved);
-      if (stopped) return stopped;
+  return holdGroups(groupsOf(j.parts), async () => {
+    const blocked = blockedGroup(j);
+    if (blocked) return pre(`deploy group ${blocked} was blocked while this request ran; retry once it is free`);
+    for (let round = 0; ; round++) {
+      const f = await g.fetch(j.repo, j.remote);
+      if (f.code !== 0) return infra(fetchFailed(f));
+      const head = await g.remoteHead(j.repo, j.remote, j.branch);
+      if (!await g.isAncestor(j.repo, head, sha)) {
+        if (!await g.rebaseOnto(j.wt, `${j.remote}/${j.branch}`)) return pre(`rebase onto ${j.remote}/${j.branch} had conflicts`);
+        j.base = head;
+        sha = await g.headSha(j.wt);
+        w(j.ctx, () => j.ctx.db.query("UPDATE runs SET base_sha = ? WHERE id = ?").run(head, j.runId));
+        stopped = await gates(j, approved);
+        if (stopped) return stopped;
+      }
+      const pushed = await push(j, sha);
+      if (pushed === "pushed") break;
+      if (pushed === "unknown") return post(`push outcome unknown for ${sha.slice(0, 7)}: ${j.remote} unreachable`, sha);
+      if (round >= 1) return pre("push rejected twice");
     }
-    const pushed = await push(j, sha);
-    if (pushed === "pushed") break;
-    if (pushed === "unknown") return post(`push outcome unknown for ${sha.slice(0, 7)}: ${j.remote} unreachable`, sha);
-    if (round >= 1) return pre("push rejected twice");
-  }
-  return deploy(j, sha);
+    return deploy(j, sha);
+  });
+}
+
+// One of the request's deploy groups that another request (a failed deploy) or the drift guard blocked after
+// this one was picked, by name and holder.
+function blockedGroup(j: Job): string | null {
+  const ids = groupsOf(j.parts);
+  const row = j.ctx.db.query(`SELECT name, locked_by_request FROM deploy_groups WHERE lock != 'free' AND id IN (${ids.map(() => "?").join(",")})
+    ORDER BY id LIMIT 1`).get(...ids) as { name: string; locked_by_request: number | null } | null;
+  return row ? `${row.name}${row.locked_by_request ? ` (by #${row.locked_by_request})` : ""}` : null;
 }
 
 function commitMessage(r: ReqRow): string {
@@ -444,7 +501,7 @@ function prompt(j: Job, images: string[]): string {
 async function push(j: Job, sha: string): Promise<"pushed" | "rejected" | "unknown"> {
   const setState = (state: PushState) => w(j.ctx, () => j.ctx.db.query("UPDATE runs SET push_state = ?, commit_sha = ? WHERE id = ?").run(state, sha, j.runId));
   setState("push_started");
-  await g.push(j.wt, j.remote, sha, j.branch);
+  await g.push(j.repo, j.wt, j.remote, sha, j.branch);
   for (const wait of [0, ...(j.ctx.pushBackoffMs ?? DEFAULT_BACKOFF_MS)]) {
     if (wait) await Bun.sleep(wait);
     const live = await g.lsRemote(j.repo, j.remote, j.branch);

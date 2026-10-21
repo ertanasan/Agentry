@@ -5,8 +5,10 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { addUser } from "../src/accounts.ts";
-import { openDb } from "../src/db.ts";
+import { openDb, runnerRow } from "../src/db.ts";
+import { suggestedWorkers } from "../src/platform.ts";
 import { startServer } from "../src/server.ts";
+import { settingsPage } from "../src/views.ts";
 import { makeFixture } from "./fixture.ts";
 import { SoftPasskey } from "./helpers/passkey.ts";
 
@@ -39,8 +41,8 @@ async function setup() {
   const sessionOf = (r: Response) => r.headers.get("set-cookie")!.split(";")[0];
 
   // Registers `name` over HTTP with a fresh software passkey; returns the session cookie and the passkey.
-  async function signUp(name = "ertan") {
-    const code = addUser(db, name, "owner");
+  async function signUp(name = "ertan", role: "owner" | "admin" = "owner") {
+    const code = addUser(db, name, role);
     expect((await call(`/register/${code}`)).status).toBe(200);
     const options = await (await call(`/register/${code}/options`, { method: "POST", json: {} })).json();
     const key = await SoftPasskey.create();
@@ -305,6 +307,142 @@ describe("attached images", () => {
     f.append("images", new File([], ""));
     expect((await h.call("/requests", { method: "POST", cookie, multipart: f })).status).toBe(303);
     expect(h.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("settings", () => {
+  test("an owner sets the worker count; the change is audited with the owner as actor", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    const page = await h.call("/settings", { cookie });
+    expect(page.status).toBe(200);
+    const body = await page.text();
+    expect(body).toContain(`value="1"`);
+    expect(body).toContain(`Suggested for this machine: ${suggestedWorkers()}`);
+    const r = await h.call("/settings", { method: "POST", cookie, form: { workers: "3" } });
+    expect(r.status).toBe(303);
+    expect(r.headers.get("location")).toBe("/settings");
+    expect(runnerRow(h.db).workers).toBe(3);
+    expect(h.db.query("SELECT payload, actor FROM events WHERE type = 'settings'").get()).toEqual({ payload: `{"workers":3}`, actor: "user:ertan" });
+  });
+
+  test("an admin sees the settings but can't change them", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp("helper", "admin");
+    const body = await (await h.call("/settings", { cookie })).text();
+    expect(body).toContain("Only an owner can change settings.");
+    expect(body).toContain(" disabled");
+    expect((await h.call("/settings", { method: "POST", cookie, form: { workers: "4" } })).status).toBe(403);
+    expect(runnerRow(h.db).workers).toBe(1);
+  });
+
+  test("a count outside 1 to 8, or not a whole number, is refused", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    for (const workers of ["0", "9", "2.5", "", "two"]) {
+      expect((await h.call("/settings", { method: "POST", cookie, form: { workers } })).status).toBe(400);
+    }
+    expect(runnerRow(h.db).workers).toBe(1);
+  });
+
+  // The session's passkey check, made old: settings changes then need a step-up.
+  const stale = (h: Awaited<ReturnType<typeof setup>>) => h.db.query("UPDATE sessions SET verified_at = 0").run();
+  async function stepUp(h: Awaited<ReturnType<typeof setup>>, cookie: string, key: SoftPasskey) {
+    const o = await h.call("/step-up/options", { method: "POST", json: {}, cookie });
+    const challenge = o.headers.get("set-cookie")!.split(";")[0];
+    return h.call("/step-up/verify", { method: "POST", json: await key.login(await o.json(), h.url), cookie: `${cookie}; ${challenge}` });
+  }
+
+  test("changes need a recent passkey check; a step-up with your own passkey opens them, a pause needs none", async () => {
+    const h = await setup();
+    const { cookie, key } = await h.signUp();
+    stale(h);
+    expect(await (await h.call("/settings", { cookie })).text()).toContain(`id="step-up"`);
+    const refused = await h.call("/settings", { method: "POST", cookie, form: { workers: "2" } });
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toContain("Confirm with your passkey first");
+    expect((await h.call("/settings/pause", { method: "POST", cookie })).status).toBe(303);
+    expect(runnerRow(h.db)).toMatchObject({ paused: 1, pause_reason: "paused by ertan" });
+
+    expect((await stepUp(h, cookie, key)).status).toBe(200);
+    expect(await (await h.call("/settings", { cookie })).text()).not.toContain(`id="step-up"`);
+    expect((await h.call("/settings", { method: "POST", cookie, form: { workers: "2" } })).status).toBe(303);
+    expect(runnerRow(h.db).workers).toBe(2);
+    expect(h.db.query("SELECT payload FROM events WHERE type = 'step_up'").get()).toEqual({ payload: `{"user":"ertan"}` });
+  });
+
+  test("a step-up with another user's passkey is refused", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    const other = await h.signUp("helper", "admin");
+    stale(h);
+    const r = await stepUp(h, cookie, other.key);
+    expect(r.status).toBe(401);
+    expect(await r.text()).toContain("belongs to helper, not ertan");
+    expect((await h.call("/settings", { method: "POST", cookie, form: { workers: "2" } })).status).toBe(403);
+  });
+
+  test("an owner disables and enables a project; its requests wait meanwhile", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    expect((await h.call("/settings/projects/vt-web/disable", { method: "POST", cookie })).status).toBe(303);
+    expect(h.db.query("SELECT enabled FROM projects WHERE name = 'vt-web'").get()).toEqual({ enabled: 0 });
+    expect(await (await h.call("/", { cookie })).text()).not.toContain(`value="vt-web"`);
+    expect((await h.call("/settings/projects/vt-web/enable", { method: "POST", cookie })).status).toBe(303);
+    expect(h.db.query("SELECT enabled FROM projects WHERE name = 'vt-web'").get()).toEqual({ enabled: 1 });
+    expect((await h.call("/settings/projects/nope/enable", { method: "POST", cookie })).status).toBe(404);
+  });
+
+  test("an owner adds, resets and removes users, but not their own account", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    const added = await h.call("/settings/users", { method: "POST", cookie, form: { name: "alice", role: "admin" } });
+    expect(added.status).toBe(200);
+    expect(added.headers.get("cache-control")).toBe("no-store");
+    const link = (await added.text()).match(/http:\/\/[^<\s]+\/register\/[A-Za-z0-9_-]+/)![0];
+    expect((await fetch(link)).status).toBe(200);
+    expect(h.db.query("SELECT role FROM users WHERE name = 'alice'").get()).toEqual({ role: "admin" });
+    expect((await h.call("/settings/users", { method: "POST", cookie, form: { name: "alice" } })).status).toBe(400);
+
+    const reset = await h.call("/settings/users/alice/reset", { method: "POST", cookie });
+    expect(await reset.text()).toContain("alice's passkey");
+    expect((await fetch(link)).status).toBe(404); // the old link is used up
+    expect((await h.call("/settings/users/ertan/remove", { method: "POST", cookie })).status).toBe(400);
+    expect((await h.call("/settings/users/ertan/reset", { method: "POST", cookie })).status).toBe(400);
+    expect((await h.call("/settings/users/alice/remove", { method: "POST", cookie })).status).toBe(303);
+    expect(h.db.query("SELECT name FROM users").all()).toEqual([{ name: "ertan" }]);
+    expect((h.db.query("SELECT type, actor FROM events WHERE type LIKE 'user_%' ORDER BY id").all())).toEqual([
+      { type: "user_add", actor: null }, { type: "user_add", actor: "user:ertan" }, { type: "user_reset", actor: "user:ertan" },
+      { type: "user_remove", actor: "user:ertan" },
+    ]);
+  });
+
+  test("an admin can't pause, toggle projects or manage users", async () => {
+    const h = await setup();
+    await h.signUp();
+    const { cookie } = await h.signUp("helper", "admin");
+    for (const path of ["/settings/pause", "/settings/projects/vt-web/disable", "/settings/users", "/settings/users/ertan/remove"]) {
+      expect((await h.call(path, { method: "POST", cookie, form: { name: "mallory", role: "owner" } })).status).toBe(403);
+    }
+    expect(runnerRow(h.db).paused).toBe(0);
+    expect(h.db.query("SELECT COUNT(*) AS n FROM users").get()).toEqual({ n: 2 });
+  });
+
+  test("the suggestion: one worker per 4 cores and per 8 GB, whichever is fewer, at least one", () => {
+    const gb = 2 ** 30;
+    expect(suggestedWorkers(10, 16 * gb)).toBe(2);
+    expect(suggestedWorkers(32, 16 * gb)).toBe(2);
+    expect(suggestedWorkers(16, 64 * gb)).toBe(4);
+    expect(suggestedWorkers(2, 4 * gb)).toBe(1);
+  });
+
+  test("the page warns above the suggestion, and on Windows about the shared sandbox user", () => {
+    const user = { id: 1, name: "ertan", role: "owner" as const };
+    const d = { workers: 2, maxWorkers: 8, suggested: 2, cores: 10, memoryGb: 16, windows: false, paused: null, verified: true, projects: [], users: [] };
+    expect(settingsPage(d, user)).not.toContain("more than this machine suits");
+    expect(settingsPage({ ...d, workers: 3 }, user)).toContain("3 workers is more than this machine suits");
+    expect(settingsPage({ ...d, windows: true }, user)).toContain("AgentrySandbox");
+    expect(settingsPage({ ...d, workers: 1, windows: true }, user)).not.toContain("AgentrySandbox");
   });
 });
 

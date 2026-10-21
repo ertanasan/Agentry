@@ -19,6 +19,6 @@ const base = await g.remoteHead(repo, "origin", "main");
 const runId = fenced(db, token, () => Number(db.query(`INSERT INTO runs (request_id, attempt, lease_token, lease_expires_at, branch,
   base_sha, commit_sha, current_step, push_state, started_at) VALUES (?, 1, ?, ?, 'agentry/1-1', ?, ?, 'push', 'push_started', ?)`)
   .run(requestId, token, now + LEASE_TTL_MS, base, sha, now).lastInsertRowid));
-g.observer.onStart = (pgid) => fenced(db, token, () => db.query("UPDATE runs SET pgid = ? WHERE id = ?").run(pgid, runId));
-startHeartbeat(db, token, () => runId, () => process.exit(4));
-await g.push(wt, "origin", sha, "main");
+startHeartbeat(db, token, () => [runId], () => process.exit(4));
+await g.observer.run({ onStart: (pgid) => fenced(db, token, () => db.query("UPDATE runs SET pgid = ? WHERE id = ?").run(pgid, runId)) },
+  () => g.push(repo, wt, "origin", sha, "main"));

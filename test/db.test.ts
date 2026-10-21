@@ -24,8 +24,22 @@ describe("runner lease", () => {
   test("renewing keeps a lease alive past its first TTL", () => {
     const db = mem();
     acquireLease(db, "a", 1, 0);
-    renewLease(db, "a", null, LEASE_TTL_MS - 1);
+    renewLease(db, "a", [], LEASE_TTL_MS - 1);
     expect(acquireLease(db, "b", 2, LEASE_TTL_MS + 1)).toBe(false);
+  });
+
+  test("renewing extends the lease of every run in progress", () => {
+    const db = mem();
+    acquireLease(db, "a", 1, 0);
+    db.exec("INSERT INTO repos (name, path) VALUES ('r', '/r'); INSERT INTO deploy_groups (name) VALUES ('g');");
+    db.exec("INSERT INTO projects (name, repo_id, deploy_group_id, recipe) VALUES ('p', 1, 1, '{}')");
+    for (let i = 0; i < 3; i++) {
+      db.query("INSERT INTO requests (project_id, title, created_at, updated_at) VALUES (1, 't', 0, 0)").run();
+      db.query("INSERT INTO runs (request_id, attempt, lease_token, lease_expires_at, started_at) VALUES (?, 1, 'a', 0, 0)").run(i + 1);
+    }
+    renewLease(db, "a", [1, 3], 1000);
+    expect((db.query("SELECT lease_expires_at AS t FROM runs ORDER BY id").all() as { t: number }[]).map((r) => r.t)).toEqual([1000 + LEASE_TTL_MS, 0, 1000 + LEASE_TTL_MS]);
+    expect(runnerRow(db).workers).toBe(1);
   });
 
   test("a stale runner's write is rejected after takeover (D17)", () => {
@@ -34,7 +48,7 @@ describe("runner lease", () => {
     acquireLease(db, "b", 2, LEASE_TTL_MS + 1);
     expect(() => fenced(db, "a", () => db.exec("UPDATE runner SET paused = 1"))).toThrow(LeaseLost);
     expect(runnerRow(db).paused).toBe(0);
-    expect(() => renewLease(db, "a", null)).toThrow(LeaseLost);
+    expect(() => renewLease(db, "a", [])).toThrow(LeaseLost);
   });
 
   test("release frees the lease only for its owner", () => {

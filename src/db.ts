@@ -1,4 +1,5 @@
-// SQLite store: schema, the runner lease (one worker at a time) and fenced writes.
+// SQLite store: schema, the runner lease (one runner process at a time, which may run several requests) and
+// fenced writes.
 // A runner owns the lease through a random token. Every state change it makes goes through `fenced`, which
 // refuses the write if another runner has taken the lease since (eng review D7, D17).
 import { Database } from "bun:sqlite";
@@ -113,11 +114,17 @@ export const MIGRATIONS: string[] = [
    INSERT INTO run_tests (run_id, project_id, total, skipped)
      SELECT ru.id, r.project_id, ru.tests_total, ru.tests_skipped FROM runs ru JOIN requests r ON r.id = ru.request_id
      WHERE ru.tests_total IS NOT NULL;`,
+  // 5: how many requests the runner works on at once, set on the settings page.
+  "ALTER TABLE runner ADD COLUMN workers INTEGER NOT NULL DEFAULT 1",
+  // 6: when a session's passkey was last checked (sign-in, registration, or a step-up before a settings change).
+  "ALTER TABLE sessions ADD COLUMN verified_at INTEGER",
 ];
 
 export function openDb(path: string): Database {
   const db = new Database(path, { create: true });
-  db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+  // The busy timeout first: the server and the runner start together (login, startup tasks), and the second to open
+  // the database must wait for the first's journal setup, not fail with "database is locked".
+  db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
   db.exec(BASE_SCHEMA);
   migrate(db);
   return db;
@@ -134,10 +141,12 @@ function migrate(db: Database): void {
   }
 }
 
-type RunnerRow = { owner_token: string | null; owner_pid: number | null; lease_expires_at: number; paused: number; pause_reason: string | null };
+type RunnerRow = {
+  owner_token: string | null; owner_pid: number | null; lease_expires_at: number; paused: number; pause_reason: string | null; workers: number;
+};
 
 export function runnerRow(db: Database): RunnerRow {
-  return db.query("SELECT owner_token, owner_pid, lease_expires_at, paused, pause_reason FROM runner WHERE id = 1").get() as RunnerRow;
+  return db.query("SELECT owner_token, owner_pid, lease_expires_at, paused, pause_reason, workers FROM runner WHERE id = 1").get() as RunnerRow;
 }
 
 // Takes the runner lease if it is free or expired. Returns false while another runner's lease is live.
@@ -148,11 +157,11 @@ export function acquireLease(db: Database, token: string, pid: number, now = Dat
   return res.changes === 1;
 }
 
-// Extends the runner lease and the lease of the run it is working on. Throws LeaseLost if it no longer owns it.
-export function renewLease(db: Database, token: string, runId: number | null, now = Date.now()): void {
+// Extends the runner lease and the leases of the runs it is working on. Throws LeaseLost if it no longer owns it.
+export function renewLease(db: Database, token: string, runIds: number[], now = Date.now()): void {
   fenced(db, token, () => {
     db.query("UPDATE runner SET lease_expires_at = ? WHERE id = 1").run(now + LEASE_TTL_MS);
-    if (runId !== null) db.query("UPDATE runs SET lease_expires_at = ? WHERE id = ?").run(now + LEASE_TTL_MS, runId);
+    for (const id of runIds) db.query("UPDATE runs SET lease_expires_at = ? WHERE id = ?").run(now + LEASE_TTL_MS, id);
   });
 }
 
@@ -191,9 +200,9 @@ export function setRequestStatus(db: Database, id: number, status: RequestStatus
 
 // Starts a heartbeat that keeps the leases alive for as long as the runner process is alive (D7).
 // `onLost` fires once if a renewal finds that another runner has taken over.
-export function startHeartbeat(db: Database, token: string, currentRun: () => number | null, onLost: () => void): () => void {
+export function startHeartbeat(db: Database, token: string, currentRuns: () => number[], onLost: () => void): () => void {
   const timer = setInterval(() => {
-    try { renewLease(db, token, currentRun()); }
+    try { renewLease(db, token, currentRuns()); }
     catch (e) {
       if (e instanceof LeaseLost) { clearInterval(timer); onLost(); }
       else throw e;

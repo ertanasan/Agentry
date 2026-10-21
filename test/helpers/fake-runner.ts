@@ -15,7 +15,7 @@ const runId = fenced(db, token, () => {
   return Number(db.query(`INSERT INTO runs (request_id, attempt, lease_token, lease_expires_at, branch, current_step, started_at)
     VALUES (?, 1, ?, ?, 'agentry/x-1', 'deploy', ?)`).run(requestId, token, now + LEASE_TTL_MS, now).lastInsertRowid);
 });
-startHeartbeat(db, token, () => runId, () => process.exit(4));
+startHeartbeat(db, token, () => [runId], () => process.exit(4));
 await runStep("sleep 300 & sleep 300", {
   cwd: logDir, logPath: join(logDir, "step.log"), timeoutMs: 600_000,
   onStart: (pgid) => fenced(db, token, () => db.query("UPDATE runs SET pgid = ? WHERE id = ?").run(pgid, runId)),

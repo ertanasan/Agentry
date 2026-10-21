@@ -3,7 +3,10 @@
 #   powershell -ExecutionPolicy Bypass -File windows-setup.ps1 -GitName 'Agentry' -GitEmail 'agentry@example.com' `
 #     -PublicUrl 'https://myhost.tailnet.ts.net' -DeployFolders 'C:\Sites\MyApp' -DeployServices 'MyApp' -SqlInstances '.\SQLEXPRESS'
 #   ... -Clone 'git@github.com:me/MyApp.git'        once the printed deploy key is on the repository
+#   ... -Owner 'alice'                               also create the first owner and print their passkey link
 #   powershell -ExecutionPolicy Bypass -File windows-setup.ps1 -SelfTest      only run test/windows.test.ts as AgentryRunner
+#   powershell -ExecutionPolicy Bypass -File windows-setup.ps1 -Uninstall     stop and remove the tasks and the command
+#                                                                              from PATH; the accounts and <root> stay
 #
 # What it makes:
 #   AgentryRunner   standard user that runs Agentry (startup tasks "Agentry runner" and "Agentry server"). Owns
@@ -16,6 +19,7 @@
 #   <root>\bin      bun.exe (pinned, checksum checked) and claude.exe.
 #   <root>\home\ssh an SSH key for pushing; add its public key (printed at the end) to each repository as a deploy key
 #                   with write access.
+#   <root>\agentry.cmd  the admin command, with <root> on the machine's PATH so new shells can type `agentry`.
 # The sandbox can still read whatever Windows lets every user read, and reach every network service, loopback included
 # (the isolation spike found per-user firewall rules do not cover loopback): keep local services authenticated.
 param(
@@ -31,7 +35,9 @@ param(
   [string[]]$DeployServices = @(),# services deploy commands may stop and start
   [string[]]$SqlInstances = @(),  # SQL Server instances that must refuse AgentrySandbox
   [string[]]$Clone = @(),         # repositories to clone into <root>\repos (ssh URLs; needs the deploy key added first)
-  [switch]$SelfTest
+  [string]$Owner = '',            # create this first owner account and print its one-time passkey link
+  [switch]$SelfTest,
+  [switch]$Uninstall
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -70,6 +76,30 @@ if ($SelfTest) {
   if (Test-Path $log) { Get-Content $log }
   "selftest task result: $result"
   exit $(if ($result -eq 0) { 0 } else { 1 })
+}
+
+# <root> on the machine's PATH, or off it.
+function Set-OnPath([bool]$on) {
+  $parts = @([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ne $Root.TrimEnd('\') })
+  if ($on) { $parts += $Root }
+  [Environment]::SetEnvironmentVariable('Path', ($parts -join ';'), 'Machine')
+}
+
+if ($Uninstall) {
+  Step 'Removing the startup tasks'
+  foreach ($name in $tasks.Values) {
+    if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) { Stop-ScheduledTask -TaskName $name; Unregister-ScheduledTask -TaskName $name -Confirm:$false }
+  }
+  Get-CimInstance Win32_Process -Filter "Name = 'bun.exe'" | Where-Object { $_.CommandLine -like "*$app\src\cli.ts*" } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  Step "Removing $Root from PATH"
+  Set-OnPath $false
+  Write-Host @"
+
+Done. The accounts and $Root stay. To remove them too:
+  Remove-LocalUser $runner, $sandbox; Remove-Item -Recurse -Force '$Root'
+"@
+  exit 0
 }
 
 if (-not $GitName -or -not $GitEmail) { throw 'Give -GitName and -GitEmail: the author of the commits Agentry pushes.' }
@@ -290,6 +320,7 @@ if ($PublicUrl) { $envLines += "`$env:AGENTRY_PUBLIC_URL = $(& $q $PublicUrl)" }
 foreach ($who in 'AUTHOR', 'COMMITTER') { $envLines += "`$env:GIT_${who}_NAME = $(& $q $GitName)", "`$env:GIT_${who}_EMAIL = $(& $q $GitEmail)" }
 Set-Content (Join-Path $Root 'agentry-env.ps1') $envLines -Encoding UTF8
 Set-Content (Join-Path $Root 'agentry.cmd') "@powershell -NoProfile -ExecutionPolicy Bypass -File `"$launcher`" %*" -Encoding ASCII
+Set-OnPath $true
 
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
   -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
@@ -318,6 +349,27 @@ Start-ScheduledTask -TaskName $tasks.serve
 $hasToken = Test-Path (Join-Path $home_ 'claude-oauth-token')
 if ($hasToken) { Start-ScheduledTask -TaskName $tasks.run }
 
+# 10. Does the web UI answer? Then the database exists, and the first owner can be made.
+function Test-Answers([string]$url) {
+  foreach ($i in 1..60) {
+    try { if ((Invoke-WebRequest -Uri "$url/login" -UseBasicParsing -TimeoutSec 3).StatusCode -eq 200) { return $true } } catch { }
+    Start-Sleep -Seconds 1
+  }
+  $false
+}
+Step 'Checking the web UI'
+$local = Test-Answers "http://127.0.0.1:$Port"
+if ($local) { Write-Host "    answers on 127.0.0.1:$Port" } else { Write-Host "    nothing answers on 127.0.0.1:$Port yet: see $logs\serve.log" }
+if ($PublicUrl) {
+  if (Test-Answers $PublicUrl.TrimEnd('/')) { Write-Host "    answers at $PublicUrl" }
+  else { Write-Host "    nothing answers at $PublicUrl`: for Tailscale, run ``tailscale serve --bg $Port`` (or set up your proxy)" }
+}
+if ($Owner -and $local) {
+  Step "Owner $Owner"
+  & (Join-Path $Root 'agentry.cmd') user add $Owner --owner
+  if ($LASTEXITCODE) { Write-Host "    if $Owner exists already, ``agentry user reset $Owner`` prints a new link" }
+}
+
 Write-Host @"
 
 Done. Agentry is in $Root; the web UI listens on 127.0.0.1:$Port (task '$($tasks.serve)').
@@ -326,8 +378,9 @@ Next:
   2. Add this key to each repository Agentry pushes to, as a deploy key with write access:
        $publicKey
   3. Clone each repository (run setup again with -Clone <ssh url>), point its recipe's "repo" at $Root\repos\<name>,
-     and register it:                 $Root\agentry.cmd project add <name> <recipe.json>
-$(if (-not $hasToken) { "  4. Save a claude token (from ``claude setup-token``):  $Root\agentry.cmd token
+     and register it:                 agentry project add <name> <recipe.json>
+$(if (-not $hasToken) { "  4. Save a claude token (from ``claude setup-token``):  agentry token
      then start the runner:            Start-ScheduledTask '$($tasks.run)'" })
-  5. Create your account:              $Root\agentry.cmd user add <name> --owner
+$(if (-not $Owner) { "  5. Create your account:              agentry user add <name> --owner   (or run setup again with -Owner <name>)" })
+In a new shell, ``agentry`` runs $Root\agentry.cmd. Open the web UI at $(if ($PublicUrl) { $PublicUrl } else { "http://localhost:$Port" }).
 "@

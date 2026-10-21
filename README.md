@@ -7,7 +7,8 @@
 <p align="center">
   <strong>An AI software-delivery queue with guardrails.</strong><br>
   Describe a change. Agentry has an AI agent build it in a sandbox, puts it through tests and an independent
-  review, then pushes and deploys it, and confirms that production is running the new commit.
+  review, then pushes and deploys it, and confirms that production is running the new commit.<br>
+  Runs on macOS and Windows.
 </p>
 
 <p align="center">
@@ -69,8 +70,9 @@ next action. Nothing reaches production on a guess.
 | **Multi-project requests** | One request can span several projects in one repository: one change, one commit, deploys in a set order. |
 | **Multi-repository queue** | Register any number of projects across any number of repositories. They all share one prioritized queue. |
 | **Deploy-group locks** | Projects that deploy to the same target never deploy at the same time. After a failed deploy, the group stays locked until a person resolves it. |
+| **Parallel workers** | Up to 8 requests run at once, each in its own worktree and sandbox. Pushes and deploys still take turns within each deploy group. |
 | **Crash-safe runner** | A lease, fenced writes and startup recovery mean a killed runner never double-deploys, never loses track of a push and never leaves processes behind. |
-| **Phone-friendly web UI** | Sign in with a passkey (Face ID / Touch ID), queue requests, attach screenshots, answer the agent's questions, approve, retry and re-deploy from anywhere. |
+| **Phone-friendly web UI** | Sign in with a passkey (Face ID, Touch ID or Windows Hello), queue requests, attach screenshots, answer the agent's questions, approve, retry and re-deploy from anywhere. Owners manage workers, projects and users there, after a fresh passkey check. |
 | **Human in the loop where it matters** | The agent can ask a question instead of guessing. You review only the changes that carry risk. |
 | **Audit trail and backups** | Every state change is logged with who made it. Nightly backups cover the database, every in-flight branch and all attachments. |
 
@@ -97,8 +99,8 @@ flowchart LR
   LV -- no --> BPP([blocked_post_push<br/>group locked])
 ```
 
-1. **Pick.** The runner takes the highest-priority, oldest queued request whose projects are enabled and whose
-   deploy groups are all free.
+1. **Pick.** Whenever a worker is free, the runner takes the highest-priority, oldest queued request whose
+   projects are enabled and whose deploy groups are all free.
 2. **Drift guard.** Before it touches a deploying group, Agentry reads every target's live version. A target that
    runs a commit missing from `origin`, or one with uncommitted changes, blocks its group. Agentry never builds on
    top of a production state it can't explain.
@@ -184,13 +186,16 @@ Agentry is built so that two processes can never act on the same request or the 
 
 ### The runner lease
 
-- **One executor at a time.** `agentry run` takes a database lease: a random token with a 60-second TTL, renewed
+- **One runner at a time.** `agentry run` takes a database lease: a random token with a 60-second TTL, renewed
   every 15 seconds by a heartbeat. A second runner refuses to start while the lease is live and names the pid
   that holds it.
+- **Several requests at once.** The runner works on up to **Workers** requests at a time, set on the
+  [settings page](#the-web-ui) (default 1). The agent, build, tests and verifier of different requests run side
+  by side, each in its own worktree. A change to the count applies before the next request starts.
 - **Fenced writes.** Every state change the runner makes runs in a transaction that first checks it still owns
   the lease. If another runner has taken over, for example after a long system sleep, the old one's writes are
   refused and it exits with code 3. A stale runner can never overwrite a newer runner's decisions.
-- **Graceful stop.** `Ctrl-C` lets the current request finish. Pressing it again quits at once, and startup
+- **Graceful stop.** `Ctrl-C` lets the requests in progress finish. Pressing it again quits at once, and startup
   recovery cleans up on the next run.
 
 ### Deploy groups
@@ -198,8 +203,12 @@ Agentry is built so that two processes can never act on the same request or the 
 Projects that deploy to the same place share a **deploy group**. For example, an API and a web app might be
 published by one script to one server.
 
-- The queue skips any request whose groups aren't all free, so **two deploys to one target never overlap**, even
-  across different requests and projects.
+- **Two pushes or deploys to one target never overlap**, even across different requests and projects. The queue
+  skips any request whose groups aren't all free, and requests of one group that run at once take turns from the
+  last fetch before the push to the end of the deploy. The later one rebases onto the earlier one's commit and
+  runs every gate again.
+- A request whose group gets blocked while it runs stops before its push, as `blocked_pre_push`. Retry it once
+  the group is free.
 - A failure after push (deploy failed, timed out, live version wrong, push outcome unknown) **locks the group**,
   with the reason and the commit that didn't deploy. Nothing else deploys there until a person acts: re-run the
   deploy, mark it resolved, or unblock it.
@@ -317,6 +326,10 @@ executes code at build time needs a person's approval**: `*.csproj`, `*.props`, 
   There are no passwords to phish or reuse.
 - **Invite-only accounts.** `agentry user add` runs on the server host and prints a one-time registration link
   (single use, 30 minutes). `agentry user reset` revokes a user's passkeys and sessions in one step.
+- **Owners change settings, after a fresh passkey check.** Admins see the settings page but can't change it. An
+  owner's change needs a passkey check of their own within the last 5 minutes (signing in counts), so a stolen
+  session cookie alone can't add users or change the runner. Pausing the runner needs no check. An owner can't
+  reset or remove their own account from the page; `agentry user` on the server's machine still can.
 - **Only hashes at rest.** Session tokens, registration codes and login challenges are stored as SHA-256 hashes.
 - **Brute-force throttle.** After 10 failed sign-ins in 15 minutes, a client address is blocked.
 - **Browser hardening.** The server listens on `127.0.0.1` only. It has a Host allowlist against DNS rebinding,
@@ -341,6 +354,9 @@ We'd rather you know where the boundaries are:
 - On Windows, the sandbox user **can read whatever Windows lets every user read**, and it can **list the names**
   (not read the contents) of the files in Agentry's own folder, because PowerShell needs to look its starting
   folder up in each parent. Firewall rules per user don't cover loopback, so it can reach local services too.
+- On Windows, **parallel workers share the one sandbox user**, so a request's agent can reach the worktrees of the
+  other requests running at the same time. Keep one worker there if requests come from people you trust
+  differently.
 
 ## Fail-safe controls
 
@@ -420,6 +436,19 @@ system's light or dark mode.
 - **Queue:** what's running and what's next.
 - **Recently finished:** the last ten requests, with **Reopen** on each done request.
 
+**Settings** (owners change them; admins see them)
+
+- **Confirm with passkey:** shown when your passkey wasn't checked in the last 5 minutes. Every change below but
+  **Pause** needs it.
+- **Runner:** **Pause** stops the runner from starting new requests; those already running finish. **Resume**
+  starts it again.
+- **Workers:** how many requests the runner works on at once, from 1 to 8. The page suggests a count for the
+  machine (one worker for every 4 CPU cores and every 8 GB of memory) and warns when the setting is higher:
+  builds slow each other down, and every worker uses the same Claude account and its rate limits.
+- **Projects:** **Disable** or **Enable** each project. A disabled project's requests wait in the queue.
+- **Users:** add a user as admin or owner, **Reset passkeys**, or **Remove**. Adding or resetting shows the
+  one-time registration link on the page, as `agentry user add` does in the terminal.
+
 **Run page**
 
 - Request summary, attempt, branch, commit and push state.
@@ -451,50 +480,57 @@ A screenshot often explains a bug faster than a paragraph does.
 
 ### Requirements
 
-- **macOS**, or **Windows** with the setup script below
-- [**Bun**](https://bun.sh) and **git**
-- The [**Claude Code**](https://docs.anthropic.com/en/docs/claude-code) CLI on `PATH` (or set `AGENTRY_CLAUDE_BIN`)
+- **macOS:** [**Bun**](https://bun.sh), **git**, and the [**Claude Code**](https://docs.anthropic.com/en/docs/claude-code)
+  CLI on `PATH`
+- **Windows:** **git** and an elevated Windows PowerShell. The setup script installs Bun and Claude Code, so skip
+  to [On Windows](#on-windows).
 - Either an Anthropic **API key** or a **Claude subscription** token from `claude setup-token`
 
-### Install
+### On macOS
 
 ```sh
 git clone https://github.com/ertanasan/Agentry.git
 cd Agentry
-bun install
-alias agentry="bun $PWD/src/cli.ts"
+setup/mac-setup.sh --public-url https://myhost.tailnet.ts.net --owner alice
 ```
 
-### Authenticate the agent
+[`setup/mac-setup.sh`](setup/mac-setup.sh) sets Agentry up for the user who runs it:
 
-Pick one of these:
+- It installs the **`agentry` command** in `~/.local/bin`, with your public URL and port saved in it.
+- It adds **launchd agents** that run `agentry serve` and `agentry run` from login, start them again if they stop,
+  and log to `~/.agentry/serve.log` and `runner.log`. A stopped runner finishes the requests it's running first.
+- It asks for a **Claude token** if none is saved (paste the output of `claude setup-token`).
+- With `--owner`, it creates the **first owner** and prints their one-time passkey link (30 minutes). Open it on
+  the device that will hold the passkey.
+- It checks that the web UI **answers**, locally and at the public URL.
+
+Leave out `--public-url` to use the UI only on this Mac, at `http://localhost:4747`. To use it from your phone or
+another machine, give the HTTPS address you'll open there, for example your Tailscale Serve name (`tailscale serve
+--bg 4747`). The server accepts only that address and `localhost`, and a passkey works only at the address it was
+created for.
+
+Run the script again at any time, for example after `git pull`: it keeps the URL and port of the last run unless
+you give new ones. `--self-test` runs the sandbox canary against your Mac and checks the UI and the runner, and
+`--uninstall` removes the agents and the command (your data in `~/.agentry` stays).
+
+To use an API key instead of a subscription, write an executable script that prints the key (use a dedicated,
+revocable key):
 
 ```sh
-# Subscription: paste the output of `claude setup-token`, then Ctrl-D
-agentry token
-
-# API key: an executable script that prints the key (use a dedicated, revocable key)
 printf '#!/bin/sh\necho sk-ant-api03-...\n' > ~/.agentry/api-key-helper && chmod 700 ~/.agentry/api-key-helper
 ```
 
-### Register a project, queue a request, run
+### Register a project and queue a request
 
 ```sh
 agentry project add api recipes/my-api.json
 agentry add api "Return 404 for unknown word ids" \
   --done-when "GET /words/{id} with an unknown id returns 404 with a problem+json body"
-agentry run                 # works the queue; Ctrl-C finishes the current request and stops
+agentry list
 ```
 
-### Open the web UI
-
-```sh
-agentry user add alice --owner      # prints a one-time passkey link (30 minutes)
-agentry serve                       # http://127.0.0.1:4747, with nightly backups
-```
-
-Open the link on the device that will hold the passkey, create the passkey, and you're signed in. Run
-`agentry run` and `agentry serve` side by side, as login items or services, so the queue keeps working.
+Or queue it from the web UI. The runner picks it up within seconds. Raise **Workers** on the settings page if the
+machine has room for more than one request at a time.
 
 ### On Windows
 
@@ -503,20 +539,24 @@ runner) in `C:\Agentry`. Run it in an elevated Windows PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File windows-setup.ps1 -GitName "Your Name" -GitEmail you@example.com `
-  -PublicUrl https://myhost.example.ts.net -DeployFolders C:\Sites\MyApp -DeployServices MyApp
+  -PublicUrl https://myhost.example.ts.net -Owner alice -DeployFolders C:\Sites\MyApp -DeployServices MyApp
 ```
 
 It creates the `AgentryRunner` and `AgentrySandbox` accounts, installs Bun and Claude Code, compiles the run-as
-helper, and registers two startup tasks that run `agentry serve` and `agentry run` as `AgentryRunner`. It prints
-an SSH key to add to each repository as a write-access deploy key. Then:
+helper, and registers two startup tasks that run `agentry serve` and `agentry run` as `AgentryRunner`. It puts
+`agentry` on the machine's `PATH`, checks that the web UI answers, and with `-Owner` creates the first owner and
+prints their passkey link. It also prints an SSH key to add to each repository as a write-access deploy key. Then,
+in a new shell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File windows-setup.ps1 -SelfTest   # the Windows checks, as AgentryRunner
 # run setup again with -Clone git@github.com:you/MyApp.git, then:
-C:\Agentry\agentry.cmd project add api recipe.json   # "repo": "C:\\Agentry\\repos\\MyApp"
-C:\Agentry\agentry.cmd token                          # then: Start-ScheduledTask 'Agentry runner'
-C:\Agentry\agentry.cmd user add alice --owner
+agentry project add api recipe.json   # "repo": "C:\\Agentry\\repos\\MyApp"
+agentry token                          # then: Start-ScheduledTask 'Agentry runner'
 ```
+
+Run setup again to update Agentry or change its options. `-Uninstall` removes the startup tasks and takes
+`agentry` off `PATH`; the accounts and `C:\Agentry` stay.
 
 Recipe commands run in Windows PowerShell 5.1, which has no `&&`: use `;` and
 `if ($LASTEXITCODE) { exit $LASTEXITCODE }`.
@@ -579,7 +619,7 @@ Your deploy should write a `VERSION` file next to what it installs, in this form
 agentry project add <name> <recipe.json>
 agentry add <project>[,<project>...] <title> [--body B] [--done-when D] [--done-when-test T] [--priority N]
 agentry list [--all]                  open requests, locked groups, paused runner, false-done count
-agentry run [--once]                  work the queue (--once: stop when idle or paused)
+agentry run [--once]                  work the queue (--once: stop when idle or paused and nothing runs)
 agentry answer <id> <text>            needs_info → queued
 agentry approve <id> | reject <id>    needs_review → queued (resumes at build) | canceled
 agentry retry <id> [--body B] [--done-when D] [--done-when-test T]   blocked_pre_push → queued
@@ -607,6 +647,9 @@ agentry backup                        back up now
 | `AGENTRY_CLAUDE_BIN` | `claude` on `PATH` | The Claude Code binary |
 | `AGENTRY_MODEL` | Claude Code's default | Model for the agent and the verifier |
 
+Runner settings (workers, pause, enabled projects) live in the database and are changed on the
+[settings page](#the-web-ui), so they apply without a restart.
+
 State lives in one SQLite database (WAL mode) with numbered, transactional schema migrations, so upgrades never
 need a manual step.
 
@@ -627,26 +670,26 @@ stay. Every backup, and every failure, is an audit event, and the UI warns when 
 
 ```
 src/
-  cli.ts            command line, runner loop, lease + heartbeat
-  runner.ts         the pipeline: worktree → agent → gates → push → deploy → confirm
+  cli.ts            command line, runner worker pool, lease + heartbeat
+  runner.ts         the pipeline: worktree → agent → gates → push → deploy → confirm; deploy groups take turns
   inspect.ts        diff gates (scope, build files, gate paths, deleted/skipped tests)
   verifier.ts       the done-when verifier
   sandbox.ts        sandbox parameters and the scrubbed environment   (sandbox/run.sb: the profile)
   recovery.ts       startup recovery and push-outcome resolution
   actions.ts        every state action, shared by the CLI and the web UI
   db.ts             schema, migrations, lease, fenced writes, audit log
-  git.ts            pinned worktrees, bounded async git
+  git.ts            pinned worktrees, bounded async git, one shared-git-dir write at a time per repo
   proc.ts           process trees, timeouts, capped logs
   platform.ts       shell and process trees per system (platform-windows.ts: PowerShell, job objects, sandbox user)
-  server.ts         HTTP routes, auth checks, security headers
+  server.ts         HTTP routes, auth and role checks, security headers
   views.ts          server-rendered pages (escape-by-default templates)
-  accounts.ts       passkeys, sessions, invites, sign-in throttle
+  accounts.ts       passkeys, sessions, step-up checks, invites, sign-in throttle
   attachments.ts    image upload, type detection, per-run delivery
   backup.ts         nightly backups and log retention
   adapters/         the Claude Code adapter and the agent/verifier contracts
   results/trx.ts    TRX test-result parser
 tools/runas/        agentry-runas.exe (C#): runs a step in a job object, as the sandbox user if asked
-setup/              windows-setup.ps1 and its launcher; spike/: the isolation spike behind the Windows design
+setup/              mac-setup.sh; windows-setup.ps1 and its launcher; spike/: the isolation spike behind the Windows design
 ```
 
 The agent and the verifier sit behind small adapter interfaces ([`src/adapters/types.ts`](src/adapters/types.ts)),
@@ -655,7 +698,7 @@ so the pipeline doesn't depend on one model or CLI.
 ## Quality
 
 ```sh
-bun test              # 183 tests: runner, gates, recovery, git, server, accounts, backups, end-to-end loop
+bun test              # 251 tests: runner, parallel workers, gates, recovery, git, server, accounts, backups, Windows, end-to-end loop
 bun run typecheck
 bun run eval:verifier # the done-when verifier against 10 labeled cases, with the real model
 ```
@@ -676,7 +719,8 @@ bun run eval:verifier # the done-when verifier against 10 labeled cases, with th
 | .NET (TRX results) | ✅ Full support: counts, regression checks, named done-when tests |
 | Other test frameworks | ✅ Pass/fail through the exit code. Count checks need a TRX file. |
 | iOS / Swift | ✅ Build-only projects (`built`), sandboxed `swift test` |
-| Web UI with passkeys | ✅ Available |
+| Web UI with passkeys | ✅ Available, with owner-only settings behind a passkey step-up |
+| Parallel workers | ✅ Available: up to 8 requests at once per instance. On Windows they share one sandbox user (see [Known limits](#known-limits)). |
 | Windows runner | ✅ Available: a standalone instance set up by [`setup/windows-setup.ps1`](setup/windows-setup.ps1). Steps run as a low-privilege user in job objects. |
 | One queue across machines | Planned: a runner on another machine claiming work from one server. Today each machine runs its own instance. |
 

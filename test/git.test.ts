@@ -52,7 +52,7 @@ describe("git ops", () => {
     await g.addWorktree(fx.repo, wt, "agentry/1-1", "main");
     writeFileSync(join(wt, "a.txt"), "a\n");
     const sha = (await g.candidateCommit(wt, "c"))!;
-    expect((await g.push(wt, "origin", sha, "main")).code).toBe(0);
+    expect((await g.push(fx.repo, wt, "origin", sha, "main")).code).toBe(0);
     expect(await g.lsRemote(fx.repo, "origin", "main")).toBe(sha);
     g.git(fx.repo, ["remote", "set-url", "origin", join(fx.root, "missing.git")]);
     expect(await g.lsRemote(fx.repo, "origin", "main")).toBeNull();
@@ -66,10 +66,10 @@ describe("git ops", () => {
     const sha = (await g.candidateCommit(wt, "c"))!;
     fx.write("b.txt", "b\n"); fx.commit("someone else");
     g.git(fx.repo, ["push", "--quiet", "origin", "main"]);
-    expect((await g.push(wt, "origin", sha, "main")).code).not.toBe(0);
+    expect((await g.push(fx.repo, wt, "origin", sha, "main")).code).not.toBe(0);
     await g.fetch(fx.repo, "origin");
     expect(await g.rebaseOnto(wt, "origin/main")).toBe(true);
-    expect((await g.push(wt, "origin", head(wt), "main")).code).toBe(0);
+    expect((await g.push(fx.repo, wt, "origin", head(wt), "main")).code).toBe(0);
   });
 
   test("rebase conflict is aborted and reported", async () => {
@@ -147,7 +147,7 @@ describe("pinned worktrees (D12)", () => {
 
 describe("bounded git (slice 2 review D12, D13)", () => {
   const saved = { ...g.timeouts };
-  afterEach(() => { Object.assign(g.timeouts, saved); g.observer.onStart = g.observer.onEnd = undefined; });
+  afterEach(() => { Object.assign(g.timeouts, saved); });
 
   // A server that accepts connections and never answers: what a stalled network looks like to git.
   function silentServer() {
@@ -158,9 +158,8 @@ describe("bounded git (slice 2 review D12, D13)", () => {
   test("a git command that overruns its timeout is killed with its whole process group", async () => {
     const fx = makeFixture();
     let pgid = 0;
-    g.observer.onStart = (p) => { pgid = p; };
     const t0 = Date.now();
-    const r = await g.run(fx.repo, ["-c", "alias.hang=!sleep 30 & sleep 30", "hang"], 500);
+    const r = await g.observer.run({ onStart: (p) => { pgid = p; } }, () => g.run(fx.repo, ["-c", "alias.hang=!sleep 30 & sleep 30", "hang"], 500));
     expect(r.code).toBe(124);
     expect(r.err).toContain("timed out after 1 s");
     expect(Date.now() - t0).toBeLessThan(5_000);

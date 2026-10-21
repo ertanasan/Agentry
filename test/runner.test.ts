@@ -7,7 +7,7 @@ import { acquireLease, openDb, runnerRow } from "../src/db.ts";
 import * as g from "../src/git.ts";
 import type { Recipe } from "../src/recipe.ts";
 import type { AgentResult, Verdict } from "../src/adapters/types.ts";
-import { checkDeployable, parseVersion, redeploy, runNext, type RunnerCtx } from "../src/runner.ts";
+import { checkDeployable, parseVersion, redeploy, runNext, startNext, type RunnerCtx, type RunOutcome, type Started } from "../src/runner.ts";
 import { requestRedeploy, resolve } from "../src/actions.ts";
 import { saveUploads } from "../src/attachments.ts";
 import { recover, unresolvedPushes } from "../src/recovery.ts";
@@ -37,7 +37,7 @@ function setup(o: { recipe?: Partial<Recipe>; files?: Record<string, string>; ag
   let verdict: Verdict = o.verdict ?? { verdict: "PASS", evidence: "looks done" };
   const prompts: string[] = [];
   const ctx: RunnerCtx = {
-    db, token: "tok", home, pushBackoffMs: [10, 10], currentRun: null,
+    db, token: "tok", home, pushBackoffMs: [10, 10], running: new Set(),
     agent: { async run(io) { prompts.push(io.prompt); return agentFn(io.worktree) ?? { outcome: "finished" }; } },
     verifier: { async verify() { return verdict; } },
   };
@@ -656,6 +656,86 @@ describe("runner: a request with several projects", () => {
     expect(h.req(id)).toMatchObject({ status: "blocked_pre_push", status_reason: "p2 is not in the same repository and branch as p1" });
     expect(h.prompts).toEqual([]);
   });
+});
+
+describe("runner: several requests at once", () => {
+  const done = (s: Started): Promise<RunOutcome> => {
+    if (s.kind !== "started") throw new Error(`nothing started: ${s.kind}`);
+    return s.done;
+  };
+  const requestOf = (prompt: string) => Number(prompt.match(/request #(\d+)/)![1]);
+  // An agent that writes app/r<request>.txt, then waits for `wait(request)` before it finishes.
+  function agentWaiting(h: ReturnType<typeof setup>, wait: (id: number) => Promise<unknown>) {
+    h.ctx.agent = { async run(io) {
+      const id = requestOf(io.prompt);
+      writeFileSync(join(io.worktree, `app/r${id}.txt`), `${id}\n`);
+      await wait(id);
+      return { outcome: "finished" };
+    } };
+  }
+  // Resolves once `n` agents are waiting on it: each agent finishes only when they all run at the same time.
+  function barrier(n: number) {
+    const all = Promise.withResolvers<void>();
+    let arrived = 0;
+    return () => { if (++arrived === n) all.resolve(); return all.promise; };
+  }
+  const subjects = (h: ReturnType<typeof setup>) => g.git(h.fx.origin, ["log", "--format=%B", "main"]).out;
+
+  test("requests of different groups run side by side", async () => {
+    const h = setup();
+    const p2 = h.project("p2", { ...h.recipe, deploy_group: "g2", deploy_cmd: undefined, targets: undefined });
+    agentWaiting(h, barrier(2));
+    const a = h.add();
+    const b = h.add({ project: p2 });
+    const runs = [done(startNext(h.ctx)), done(startNext(h.ctx))];
+    expect(h.ctx.running.size).toBe(2);
+    expect(startNext(h.ctx)).toEqual({ kind: "idle" });
+    expect(await Promise.all(runs)).toEqual([{ kind: "ran", requestId: a, status: "done" }, { kind: "ran", requestId: b, status: "done" }]);
+    expect(subjects(h)).toContain(`Agentry-Request: #${a}`);
+    expect(subjects(h)).toContain(`Agentry-Request: #${b}`);
+    expect(h.ctx.running.size).toBe(0);
+    expect(h.worktrees()).toEqual([]);
+  }, 30_000);
+
+  test("requests of one group work at once, but push and deploy one at a time; the later one rebases", async () => {
+    const h = setup();
+    const log = join(h.fx.root, "deploys");
+    h.recipe.deploy_cmd = `echo start >> '${log}' && sleep 1.5 && echo end >> '${log}' && ${h.recipe.deploy_cmd}`;
+    h.db.query("UPDATE projects SET recipe = ?").run(JSON.stringify(h.recipe));
+    agentWaiting(h, barrier(2));
+    const a = h.add();
+    const b = h.add();
+    const outs = await Promise.all([done(startNext(h.ctx)), done(startNext(h.ctx))]);
+    expect(outs.map((o) => o.kind === "ran" && o.status)).toEqual(["done", "done"]);
+    expect(readFileSync(log, "utf8")).toBe("start\nend\nstart\nend\n");
+    expect(subjects(h)).toContain(`Agentry-Request: #${a}`);
+    expect(subjects(h)).toContain(`Agentry-Request: #${b}`);
+    const live = h.originHead();
+    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith(live.slice(0, 7));
+    expect([h.lastRun(a).base_sha, h.lastRun(b).base_sha]).toContain(h.lastRun(live === h.lastRun(a).commit_sha ? b : a).commit_sha);
+  }, 30_000);
+
+  test("a request whose group was blocked while it ran stops before its push", async () => {
+    const h = setup();
+    h.recipe.deploy_cmd = `test ! -e app/fail.txt && ${h.recipe.deploy_cmd}`;
+    h.db.query("UPDATE projects SET recipe = ?").run(JSON.stringify(h.recipe));
+    const a = h.add();
+    const b = h.add();
+    let first: Promise<RunOutcome> | undefined;
+    h.ctx.agent = { async run(io) {
+      if (requestOf(io.prompt) === a) writeFileSync(join(io.worktree, "app/fail.txt"), "x\n");
+      else { writeFileSync(join(io.worktree, "app/b.txt"), "b\n"); await first; }
+      return { outcome: "finished" };
+    } };
+    first = done(startNext(h.ctx));
+    const second = done(startNext(h.ctx));
+    expect(await first).toEqual({ kind: "ran", requestId: a, status: "blocked_post_push" });
+    expect(await second).toEqual({ kind: "ran", requestId: b, status: "blocked_pre_push" });
+    expect(h.req(b).status_reason).toBe(`deploy group g1 (by #${a}) was blocked while this request ran; retry once it is free`);
+    expect(h.lastRun(b).push_state).toBe("none");
+    expect(h.originHead()).toBe(h.lastRun(a).commit_sha);
+    expect(h.group()).toMatchObject({ lock: "blocked", locked_by_request: a });
+  }, 30_000);
 });
 
 describe("parseVersion", () => {
