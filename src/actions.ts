@@ -4,10 +4,10 @@
 import type { Database } from "bun:sqlite";
 import { logEvent, setRequestStatus, type RequestStatus } from "./db.ts";
 
-// A refused action: wrong state, unknown request or project. The CLI exits 1 with the message; the server
-// answers 409 (wrong state) or 404 (not found).
+// A refused action: wrong state, unknown request or project, or a user whose role may not take it. The CLI exits
+// 1 with the message; the server answers 409 (wrong state), 404 (not found), 400 (invalid) or 403 (forbidden).
 export class ActionError extends Error {
-  constructor(message: string, readonly kind: "not_found" | "wrong_state" | "invalid" = "wrong_state") { super(message); }
+  constructor(message: string, readonly kind: "not_found" | "wrong_state" | "invalid" | "forbidden" = "wrong_state") { super(message); }
 }
 
 type Req = {
@@ -132,7 +132,30 @@ export function unblock(db: Database, group: string): void {
   logEvent(db, null, "unblock", { group });
 }
 
+// Stops the runner from starting new requests; the ones running finish. Resume undoes it.
+export function pause(db: Database, reason: string): void {
+  db.query("UPDATE runner SET paused = 1, pause_reason = ? WHERE id = 1").run(reason);
+  logEvent(db, null, "pause", { reason });
+}
+
+// A disabled project's requests stay queued until it is enabled again.
+export function setProjectEnabled(db: Database, name: string, enabled: boolean): void {
+  const res = db.query("UPDATE projects SET enabled = ? WHERE name = ?").run(enabled ? 1 : 0, name);
+  if (res.changes !== 1) throw new ActionError(`no project "${name}"`, "not_found");
+  logEvent(db, null, enabled ? "project_enable" : "project_disable", { project: name });
+}
+
 export function resume(db: Database): void {
   db.query("UPDATE runner SET paused = 0, pause_reason = NULL WHERE id = 1").run();
   logEvent(db, null, "resume");
+}
+
+export const MAX_WORKERS = 8;
+
+// How many requests the runner works on at once. A running runner picks the change up before it starts the next
+// request; lowering it lets the requests already running finish.
+export function setWorkers(db: Database, workers: number): void {
+  if (!Number.isInteger(workers) || workers < 1 || workers > MAX_WORKERS) throw new ActionError(`workers must be a whole number from 1 to ${MAX_WORKERS}`, "invalid");
+  db.query("UPDATE runner SET workers = ? WHERE id = 1").run(workers);
+  logEvent(db, null, "settings", { workers });
 }

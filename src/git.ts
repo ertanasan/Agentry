@@ -13,6 +13,11 @@
 // commands network-bound too) and is killed with its group when it overruns. While it runs, its process group
 // is reported to `observer`, so the runner records it and a restarted runner kills a leftover push before
 // asking the remote what happened (slice 2 review D12, D13). The synchronous `git` is for tests and tooling.
+//
+// The runner may work on several requests of one repository at once. Fetches, pushes and worktree changes write
+// the repository's shared git dir, so they run one at a time per repository: two at once can fail on a ref lock,
+// and a failed fetch pauses the runner.
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -23,8 +28,22 @@ export type GitResult = { code: number; out: string; err: string };
 
 export const timeouts = { network: 120_000, lsRemote: 30_000, local: 120_000 };
 
-// Set by the runner around a run: told the process group of each git process while it runs.
-export const observer: { onStart?: (pgid: number) => void; onEnd?: () => void } = {};
+// Set by the runner around a run (`observer.run(o, body)`): told the process group of each git process the run
+// starts, while it runs.
+export type Observer = { onStart?: (pgid: number) => void; onEnd?: () => void };
+export const observer = new AsyncLocalStorage<Observer>();
+
+// The tail of each repository's queue of shared-git-dir writes.
+const writes = new Map<string, Promise<unknown>>();
+
+// Runs `op` after every earlier write to `repo`'s shared git dir has finished.
+function serial<T>(repo: string, op: () => Promise<T>): Promise<T> {
+  const result = (writes.get(repo) ?? Promise.resolve()).then(op, op);
+  const tail = result.catch(() => {});
+  writes.set(repo, tail);
+  tail.then(() => { if (writes.get(repo) === tail) writes.delete(repo); });
+  return result;
+}
 
 type Pin = { gitDir: string; pointer: string };
 const pinned = new Map<string, Pin>();
@@ -51,7 +70,8 @@ export async function run(cwd: string, args: string[], timeoutMs = timeouts.loca
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } as Record<string, string>, // never wait for a credential prompt
   });
   const pgid = child.pid!;
-  observer.onStart?.(pgid);
+  const obs = observer.getStore();
+  obs?.onStart?.(pgid);
   const out: Buffer[] = [];
   const err: Buffer[] = [];
   child.stdout!.on("data", (c: Buffer) => out.push(c));
@@ -66,7 +86,7 @@ export async function run(cwd: string, args: string[], timeoutMs = timeouts.loca
   clearTimeout(timer);
   await killGroup(pgid, first === "timeout" ? 2_000 : 0);
   const code = await exited;
-  observer.onEnd?.();
+  obs?.onEnd?.();
   const stderr = Buffer.concat(err).toString().trim();
   if (first === "timeout") return { code: 124, out: "", err: `git ${args[0]} timed out after ${Math.round(timeoutMs / 1000)} s${stderr ? `: ${stderr}` : ""}` };
   return { code, out: Buffer.concat(out).toString().trim(), err: stderr };
@@ -97,7 +117,7 @@ async function must(cwd: string, args: string[], timeoutMs?: number): Promise<st
 }
 
 export function fetch(repo: string, remote: string): Promise<GitResult> {
-  return run(repo, ["fetch", "--quiet", remote], timeouts.network);
+  return serial(repo, () => run(repo, ["fetch", "--quiet", remote], timeouts.network));
 }
 
 export function remoteHead(repo: string, remote: string, branch: string): Promise<string> {
@@ -110,19 +130,19 @@ export function headSha(cwd: string): Promise<string> {
 
 // New worktree on a new branch starting at `start`.
 export async function addWorktree(repo: string, path: string, branch: string, start: string): Promise<void> {
-  await must(repo, ["worktree", "add", "--quiet", "-B", branch, path, start]);
+  await serial(repo, () => must(repo, ["worktree", "add", "--quiet", "-B", branch, path, start]));
   pin(path);
 }
 
 // Worktree for an existing branch (resume after needs_review, retry from a kept branch, redeploy).
 export async function checkoutWorktree(repo: string, path: string, branch: string): Promise<void> {
-  await must(repo, ["worktree", "add", "--quiet", path, branch]);
+  await serial(repo, () => must(repo, ["worktree", "add", "--quiet", path, branch]));
   pin(path);
 }
 
 // Worktree at an exact commit, for re-running a deploy.
 export async function detachedWorktree(repo: string, path: string, sha: string): Promise<void> {
-  await must(repo, ["worktree", "add", "--quiet", "--detach", path, sha]);
+  await serial(repo, () => must(repo, ["worktree", "add", "--quiet", "--detach", path, sha]));
   pin(path);
 }
 
@@ -143,14 +163,16 @@ export function diff(cwd: string, base: string, head: string): Promise<string> {
 
 export async function removeWorktree(repo: string, path: string): Promise<void> {
   pinned.delete(path);
-  await run(repo, ["worktree", "remove", "--force", path]);
-  // git refuses to remove a worktree whose `.git` no longer points back (a tampered pointer): delete it anyway.
-  if (existsSync(path)) rmSync(path, { recursive: true, force: true });
-  await run(repo, ["worktree", "prune"]);
+  await serial(repo, async () => {
+    await run(repo, ["worktree", "remove", "--force", path]);
+    // git refuses to remove a worktree whose `.git` no longer points back (a tampered pointer): delete it anyway.
+    if (existsSync(path)) rmSync(path, { recursive: true, force: true });
+    await run(repo, ["worktree", "prune"]);
+  });
 }
 
 export async function pruneWorktrees(repo: string): Promise<void> {
-  await run(repo, ["worktree", "prune"]);
+  await serial(repo, () => run(repo, ["worktree", "prune"]));
 }
 
 // Stages everything that is not ignored and commits it as the candidate (D15). Returns null when there is
@@ -204,9 +226,10 @@ export async function amendMessage(wt: string, message: string): Promise<string>
   return headSha(wt);
 }
 
-// Fast-forward push of `sha` to the remote branch. The exit code alone never decides pushed vs not (D19).
-export function push(wt: string, remote: string, sha: string, branch: string): Promise<GitResult> {
-  return run(wt, ["push", "--quiet", "--porcelain", remote, `${sha}:refs/heads/${branch}`], timeouts.network);
+// Fast-forward push of `sha` from worktree `wt` of `repo` to the remote branch. The exit code alone never decides
+// pushed vs not (D19).
+export function push(repo: string, wt: string, remote: string, sha: string, branch: string): Promise<GitResult> {
+  return serial(repo, () => run(wt, ["push", "--quiet", "--porcelain", remote, `${sha}:refs/heads/${branch}`], timeouts.network));
 }
 
 // The remote branch's current SHA, or null if the remote could not be reached (or did not answer in time).

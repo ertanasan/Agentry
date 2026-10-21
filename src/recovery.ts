@@ -112,7 +112,9 @@ export async function resolvePushUnknown(ctx: RecoveryCtx, runId: number): Promi
   if (!unresolvedPushes(db).includes(runId)) throw new Error(`run ${runId} no longer decides its request's state`);
   const sha = await onRemote(run);
   if (sha === undefined) return "unknown";
-  fenced(db, ctx.token, () => {
+  // The runner works on other requests meanwhile: a re-run deploy may have taken this one since the check above.
+  const applied = fenced(db, ctx.token, () => {
+    if (!unresolvedPushes(db).includes(runId)) return false;
     if (sha) {
       db.query("UPDATE runs SET push_state = 'pushed', commit_sha = ? WHERE id = ?").run(sha, run.id);
       setRequestStatus(db, run.request_id, "blocked_post_push", `${sha.slice(0, 7)} is on origin; deploy not run`);
@@ -123,7 +125,9 @@ export async function resolvePushUnknown(ctx: RecoveryCtx, runId: number): Promi
       db.query("UPDATE deploy_groups SET lock = 'free', lock_reason = NULL, locked_by_request = NULL, undeployed_sha = NULL WHERE locked_by_request = ?")
         .run(run.request_id);
     }
+    return true;
   });
+  if (!applied) return "unknown";
   return sha ? "pushed" : "not_pushed";
 }
 

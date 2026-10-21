@@ -2,7 +2,9 @@
 // no password (winhost design "Accounts and login"). Accounts are created on the server's machine with
 // `agentry user add`, which prints a one-time registration link (30 minutes, single use) to open on the device
 // that will hold the passkey. `agentry user reset` revokes a user's passkeys and sessions and prints a new link.
-// `agentry user remove` deletes the account.
+// `agentry user remove` deletes the account. Owners can do the same on the settings page.
+// Settings changes need a passkey check within the last STEP_UP_TTL_MS on the session that makes them (step-up):
+// sign-in and registration count as one, and `finishStepUp` makes one with a passkey of the signed-in user.
 // Verification is @simplewebauthn/server's; user verification (biometric or device PIN) is required.
 // Only hashes of registration codes, login challenge ids and session tokens are stored.
 import type { Database } from "bun:sqlite";
@@ -16,6 +18,7 @@ import { logEvent } from "./db.ts";
 export const REGISTRATION_TTL_MS = 30 * 60_000;
 export const SESSION_TTL_MS = 30 * 24 * 3600_000;
 const CHALLENGE_TTL_MS = 5 * 60_000;
+export const STEP_UP_TTL_MS = 5 * 60_000;
 
 export type Role = "owner" | "admin";
 export type User = { id: number; name: string; role: Role };
@@ -124,36 +127,72 @@ export async function finishRegistration(db: Database, rp: RelyingParty, code: s
 
 // Options for a discoverable-credential sign-in, plus the id the browser returns with its answer.
 export async function loginOptions(db: Database, rp: RelyingParty, now = Date.now()) {
-  const options = await generateAuthenticationOptions({ rpID: rp.rpID, userVerification: "required" });
+  return challenge(db, await generateAuthenticationOptions({ rpID: rp.rpID, userVerification: "required" }), now);
+}
+
+// Options for a step-up: only the signed-in user's own passkeys are offered.
+export async function stepUpOptions(db: Database, rp: RelyingParty, userId: number, now = Date.now()) {
+  const creds = db.query("SELECT id, transports FROM credentials WHERE user_id = ?").all(userId) as { id: string; transports: string | null }[];
+  return challenge(db, await generateAuthenticationOptions({
+    rpID: rp.rpID, userVerification: "required",
+    allowCredentials: creds.map((c) => ({ id: c.id, transports: c.transports ? JSON.parse(c.transports) : undefined })),
+  }), now);
+}
+
+function challenge<T extends { challenge: string }>(db: Database, options: T, now: number): { options: T; challengeId: string } {
   const challengeId = token();
   db.query("DELETE FROM challenges WHERE expires_at <= ?").run(now);
   db.query("INSERT INTO challenges (id_hash, challenge, expires_at) VALUES (?, ?, ?)").run(hash(challengeId), options.challenge, now + CHALLENGE_TTL_MS);
   return { options, challengeId };
 }
 
-export async function finishLogin(db: Database, rp: RelyingParty, challengeId: string, response: AuthenticationResponseJSON, device: string, now = Date.now()): Promise<{ token: string; user: User }> {
+type Cred = { id: string; public_key: Uint8Array; counter: number; transports: string | null; user_id: number; name: string; role: Role };
+
+// Checks a passkey's answer to the challenge `challengeId` and records its use. Returns the passkey with its user.
+async function verifyAssertion(db: Database, rp: RelyingParty, challengeId: string, response: AuthenticationResponseJSON, now: number): Promise<Cred> {
   const ch = db.query("DELETE FROM challenges WHERE id_hash = ? AND expires_at > ? RETURNING challenge").get(hash(challengeId), now) as { challenge: string } | null;
   if (!ch) throw new AuthError("sign-in expired; try again");
   const cred = db.query(`SELECT c.id, c.public_key, c.counter, c.transports, u.id AS user_id, u.name, u.role FROM credentials c
-    JOIN users u ON u.id = c.user_id WHERE c.id = ? AND u.disabled = 0`).get(response.id) as
-    { id: string; public_key: Uint8Array; counter: number; transports: string | null; user_id: number; name: string; role: Role } | null;
+    JOIN users u ON u.id = c.user_id WHERE c.id = ? AND u.disabled = 0`).get(response.id) as Cred | null;
   if (!cred) throw new AuthError("unknown passkey");
   const result = await verifyAuthenticationResponse({
     response, expectedChallenge: ch.challenge, expectedOrigin: rp.origin, expectedRPID: rp.rpID, requireUserVerification: true,
     credential: { id: cred.id, publicKey: new Uint8Array(cred.public_key), counter: cred.counter, transports: cred.transports ? JSON.parse(cred.transports) : undefined },
   }).catch((e) => { throw new AuthError(`sign-in not accepted: ${e instanceof Error ? e.message : e}`); });
   if (!result.verified) throw new AuthError("sign-in not accepted");
+  db.query("UPDATE credentials SET counter = ?, last_used_at = ? WHERE id = ?").run(result.authenticationInfo.newCounter, now, cred.id);
+  return cred;
+}
+
+export async function finishLogin(db: Database, rp: RelyingParty, challengeId: string, response: AuthenticationResponseJSON, device: string, now = Date.now()): Promise<{ token: string; user: User }> {
+  const cred = await verifyAssertion(db, rp, challengeId, response, now);
   return db.transaction(() => {
-    db.query("UPDATE credentials SET counter = ?, last_used_at = ? WHERE id = ?").run(result.authenticationInfo.newCounter, now, cred.id);
     logEvent(db, null, "login", { user: cred.name, device }, now);
     return { token: startSession(db, cred.user_id, device, now), user: { id: cred.user_id, name: cred.name, role: cred.role } };
   })();
 }
 
+// A step-up on the session `sessionToken`: the answer must come from a passkey of the session's own user.
+export async function finishStepUp(db: Database, rp: RelyingParty, sessionToken: string, challengeId: string, response: AuthenticationResponseJSON, now = Date.now()): Promise<void> {
+  const user = sessionUser(db, sessionToken, now);
+  if (!user) throw new AuthError("sign in first");
+  const cred = await verifyAssertion(db, rp, challengeId, response, now);
+  if (cred.user_id !== user.id) throw new AuthError(`that passkey belongs to ${cred.name}, not ${user.name}`);
+  db.query("UPDATE sessions SET verified_at = ? WHERE token_hash = ?").run(now, hash(sessionToken));
+  logEvent(db, null, "step_up", { user: user.name }, now);
+}
+
+// True when the session's passkey was checked within STEP_UP_TTL_MS.
+export function recentlyVerified(db: Database, sessionToken: string | undefined, now = Date.now()): boolean {
+  if (!sessionToken) return false;
+  const row = db.query("SELECT verified_at FROM sessions WHERE token_hash = ? AND revoked = 0").get(hash(sessionToken)) as { verified_at: number | null } | null;
+  return !!row?.verified_at && row.verified_at > now - STEP_UP_TTL_MS;
+}
+
 function startSession(db: Database, userId: number, device: string, now: number): string {
   const t = token();
-  db.query("INSERT INTO sessions (token_hash, user_id, device, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
-    .run(hash(t), userId, device.slice(0, 200), now, now + SESSION_TTL_MS);
+  db.query("INSERT INTO sessions (token_hash, user_id, device, created_at, expires_at, verified_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(hash(t), userId, device.slice(0, 200), now, now + SESSION_TTL_MS, now);
   return t;
 }
 

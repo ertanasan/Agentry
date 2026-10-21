@@ -2,7 +2,8 @@
 // agentry: the slice-1 command line (eng review D3). It reads and writes SQLite (WAL) directly; there is no API.
 // State actions follow the design's table and refuse a request that is not in the state they act on.
 // `run` is the only executor: it takes the lease (a second runner refuses), runs startup recovery, then works
-// the queue, retrying unknown pushes now and then (D19). A runner that loses its lease exits with code 3 (D17).
+// the queue with up to the settings page's worker count of requests at once, retrying unknown pushes now and
+// then (D19). A runner that loses its lease exits with code 3 (D17).
 //
 // AGENTRY_HOME (default ~/.agentry) holds agentry.db, worktrees/, runs/, cache/, claude-oauth-token and
 // api-key-helper. AGENTRY_CLAUDE_BIN overrides the claude on PATH; AGENTRY_MODEL picks its model.
@@ -19,7 +20,7 @@ import { backupIfDue, runBackup } from "./backup.ts";
 import { DEFAULT_PORT, startServer } from "./server.ts";
 import { parseRecipe } from "./recipe.ts";
 import { recover, resolvePushUnknown, unresolvedPushes } from "./recovery.ts";
-import { runNext, type RunnerCtx } from "./runner.ts";
+import { startNext, type RunnerCtx, type RunOutcome } from "./runner.ts";
 import { AGENTRY_HOME } from "./sandbox.ts";
 import { claudeVerifier } from "./verifier.ts";
 
@@ -30,7 +31,7 @@ const USAGE = `usage: agentry <command>
   project add <name> <recipe.json>
   add <project>[,<project>...] <title> [--body B] [--done-when D] [--done-when-test T] [--priority N]
   list [--all]
-  run [--once]                       work the queue (--once: stop when idle or paused)
+  run [--once]                       work the queue (--once: stop when idle or paused and nothing runs)
   answer <id> <text>                 needs_info → queued
   approve <id> | reject <id>         needs_review → queued (resumes at build) | canceled
   retry <id> [--body B] [--done-when D] [--done-when-test T]   blocked_pre_push → queued
@@ -184,7 +185,7 @@ function makeCtx(db: Database, token: string): RunnerCtx {
   const auth = resolveAuth(join(home, "claude-oauth-token"), keyHelper);
   const model = process.env.AGENTRY_MODEL;
   return {
-    db, token, home, claudeBin: bin, keyHelper, currentRun: null,
+    db, token, home, claudeBin: bin, keyHelper, running: new Set(),
     agent: claudeAgent({ bin, auth, model }), verifier: claudeVerifier({ bin, auth, model }),
   };
 }
@@ -192,7 +193,7 @@ function makeCtx(db: Database, token: string): RunnerCtx {
 // Holds the lease and heartbeat around `body`; a runner that loses its lease exits at once (D17).
 async function withLease(db: Database, body: (ctx: RunnerCtx) => Promise<void>): Promise<number> {
   const ctx = lease(db, (t) => makeCtx(db, t));
-  const stop = startHeartbeat(db, ctx.token, () => ctx.currentRun, () => { console.error("lease lost: another runner took over"); process.exit(3); });
+  const stop = startHeartbeat(db, ctx.token, () => [...ctx.running], () => { console.error("lease lost: another runner took over"); process.exit(3); });
   try {
     await body(ctx);
     return 0;
@@ -216,12 +217,20 @@ function run(db: Database, once: boolean): Promise<number> {
     const onSignal = () => {
       if (stopping) process.exit(130);
       stopping = true;
-      console.log("stopping after the current request (again to quit now)");
+      console.log("stopping after the current requests (again to quit now)");
     };
     process.on("SIGINT", onSignal);
     process.on("SIGTERM", onSignal);
     let lastResolve = Date.now();
     let saidPaused = false;
+    let failure: unknown = null;
+    // The requests in progress; each removes itself when its run ends.
+    const active = new Set<Promise<void>>();
+    const report = (out: RunOutcome) => {
+      if (out.kind !== "ran") return;
+      const reason = (db.query("SELECT status_reason FROM requests WHERE id = ?").get(out.requestId) as { status_reason: string | null }).status_reason;
+      console.log(`#${out.requestId} → ${out.status}${reason ? `  (${reason})` : ""}`);
+    };
     while (!stopping) {
       if (Date.now() - lastResolve >= RESOLVE_EVERY_MS) {
         lastResolve = Date.now();
@@ -230,17 +239,23 @@ function run(db: Database, once: boolean): Promise<number> {
           if (res !== "unknown") console.log(`run ${runId}: push ${res}`);
         }
       }
-      const out = await runNext(ctx);
-      if (out.kind === "ran") {
+      // Start requests until every worker is busy; read each time, so a change on the settings page applies at once.
+      let next: ReturnType<typeof startNext> = { kind: "idle" };
+      while (active.size < runnerRow(db).workers) {
+        next = startNext(ctx);
+        if (next.kind !== "started") break;
         saidPaused = false;
-        const reason = (db.query("SELECT status_reason FROM requests WHERE id = ?").get(out.requestId) as { status_reason: string | null }).status_reason;
-        console.log(`#${out.requestId} → ${out.status}${reason ? `  (${reason})` : ""}`);
-        continue;
+        console.log(`#${next.requestId} started`);
+        const job: Promise<void> = next.done.then(report, (e) => { failure ??= e; stopping = true; })
+          .finally(() => active.delete(job));
+        active.add(job);
       }
-      if (out.kind === "paused" && !saidPaused) { console.log(`runner paused: ${runnerRow(db).pause_reason}  (agentry resume)`); saidPaused = true; }
-      if (once) break;
-      await Bun.sleep(POLL_MS);
+      if (next.kind === "paused" && !saidPaused) { console.log(`runner paused: ${runnerRow(db).pause_reason}  (agentry resume)`); saidPaused = true; }
+      if (once && next.kind !== "started" && !active.size) break;
+      await Promise.race([Bun.sleep(POLL_MS), ...active]);
     }
+    await Promise.all(active);
+    if (failure) throw failure;
   });
 }
 

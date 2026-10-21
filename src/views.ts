@@ -29,12 +29,13 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: v
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 8px 0; }
 .muted { color: var(--muted); } .warn { color: var(--warn); } .bad { color: var(--bad); } .ok { color: var(--ok); }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
-input[type=text], textarea, select { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
+input[type=text], input[type=number], textarea, select { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
 textarea { min-height: 84px; resize: vertical; }
 .thumbs img { height: 56px; max-width: 120px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); margin: 6px 6px 0 0; }
 button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; min-height: 40px; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.danger { color: var(--bad); }
+button:disabled { opacity: .5; cursor: default; }
 form.inline { display: inline; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; } .chips label { border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; }
 .chips input { margin-right: 4px; }
@@ -53,7 +54,7 @@ export function page(title: string, body: Html, user?: User | null, extraHead: H
 <title>${title} · Agentry</title><link rel="icon" href="/static/icon.png" type="image/png">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png"><meta name="apple-mobile-web-app-title" content="Agentry"><style>${new Html(CSS)}</style>${extraHead}</head>
 <body><main>
-<header><h1><a href="/">Agentry</a></h1>${user ? html`<span class="muted">${user.name} · <form class="inline" method="post" action="/logout"><button>Sign out</button></form></span>` : ""}</header>
+<header><h1><a href="/">Agentry</a></h1>${user ? html`<span class="muted"><a href="/settings">Settings</a> · ${user.name} · <form class="inline" method="post" action="/logout"><button>Sign out</button></form></span>` : ""}</header>
 ${body}
 </main></body></html>`.s;
 }
@@ -193,6 +194,70 @@ ${d.diffStat ? html`<pre>${d.diffStat}</pre><details><summary>Full diff${d.diffC
 `, user, live ? html`<script src="/static/htmx.js"></script>` : html``);
 }
 
+export type SettingsData = {
+  workers: number; maxWorkers: number; suggested: number; cores: number; memoryGb: number; windows: boolean;
+  paused: string | null;
+  verified: boolean; // the session's passkey was checked recently: owners may change settings
+  projects: { name: string; deploy_group: string; enabled: number }[];
+  users: { name: string; role: string; passkeys: number; last_used: number | null }[];
+};
+// A one-time registration link just made for a user, shown once.
+export type NewLink = { name: string; url: string };
+
+// Owners change settings after a recent passkey check (pausing needs none); everyone else sees them read-only.
+export function settingsPage(d: SettingsData, user: User, link?: NewLink): string {
+  const owner = user.role === "owner";
+  const off = owner && d.verified ? html`` : html` disabled`;
+  const post = (action: string, label: string, cls = "") =>
+    html`<form class="inline" method="post" action="${action}"><button class="${cls}"${off}>${label}</button></form>`;
+  const userPath = (name: string, verb: string) => `/settings/users/${encodeURIComponent(name)}/${verb}`;
+  return page("Settings", html`
+${!owner ? html`<div class="card muted">Only an owner can change settings.</div>`
+  : d.verified ? html`<div class="muted">Passkey confirmed: you can change settings for a few minutes.</div>`
+  : html`<div class="card"><div>Changing settings needs a fresh check of your passkey.</div>
+    <div class="row"><button class="primary" id="step-up">Confirm with passkey</button></div><p id="msg" class="bad"></p></div>`}
+${link ? html`<div class="card"><div class="ok">Open this link on the device that will hold ${link.name}'s passkey. It works once, for 30 minutes:</div>
+  <pre>${link.url}</pre></div>` : ""}
+
+<h2>Runner</h2>
+<div class="card">${d.paused
+  ? html`<span class="warn">Paused: ${d.paused}</span><div class="row"><form method="post" action="/runner/resume"><button class="primary">Resume</button></form></div>`
+  : html`Running new requests.${owner ? html`<div class="row"><form method="post" action="/settings/pause"><button>Pause</button></form>
+    <span class="muted">Requests already running finish.</span></div>` : ""}`}</div>
+<form method="post" action="/settings" class="card">
+  <label for="workers"><strong>Workers</strong></label>
+  <div class="muted">How many requests the runner works on at once. Pushes and deploys still go one at a time for each deploy group.</div>
+  <div class="row"><input type="number" id="workers" name="workers" min="1" max="${d.maxWorkers}" step="1" value="${d.workers}" required${off}></div>
+  <div class="row muted">Suggested for this machine: ${d.suggested} (${d.cores} CPU cores, ${d.memoryGb} GB of memory: one worker for every 4 cores and every 8 GB).</div>
+  ${d.workers > d.suggested ? html`<div class="row warn">${d.workers} workers is more than this machine suits. Builds and tests will slow each other down,
+    and every worker uses the same Claude account, so runs may hit its rate limits.</div>` : ""}
+  ${d.windows && d.workers > 1 ? html`<div class="row warn">On Windows every worker runs as the one AgentrySandbox user, so one request's agent can
+    reach the files of the others running at the same time.</div>` : ""}
+  ${owner ? html`<div class="row"><button class="primary"${off}>Save</button></div>` : ""}
+</form>
+
+<h2>Projects</h2>
+<div class="card"><div class="muted">A disabled project's requests wait in the queue until it is enabled again.</div>
+<table><tr><th>Project</th><th>Deploy group</th><th></th></tr>
+${d.projects.map((p) => html`<tr><td>${p.name}${p.enabled ? "" : html` <span class="warn">(disabled)</span>`}</td><td>${p.deploy_group}</td>
+  <td>${owner ? post(`/settings/projects/${encodeURIComponent(p.name)}/${p.enabled ? "disable" : "enable"}`, p.enabled ? "Disable" : "Enable") : ""}</td></tr>`)}
+</table></div>
+
+<h2>Users</h2>
+<div class="card"><table><tr><th>User</th><th>Role</th><th>Passkeys</th><th>Last sign-in</th></tr>
+${d.users.map((u) => html`<tr><td>${u.name}${u.name === user.name ? html` <span class="muted">(you)</span>` : ""}</td><td>${u.role}</td><td>${u.passkeys}</td>
+  <td>${u.last_used ? ago(Date.now() - u.last_used) : "never"}</td></tr>
+  ${owner && u.name !== user.name ? html`<tr><td colspan="4"><details><summary>Change ${u.name}</summary><div class="row">
+    ${post(userPath(u.name, "reset"), "Reset passkeys")} ${post(userPath(u.name, "remove"), `Remove ${u.name}`, "danger")}</div>
+    <div class="muted">Reset signs ${u.name} out everywhere and makes a new one-time link.</div></details></td></tr>` : ""}`)}
+</table>
+${owner ? html`<form method="post" action="/settings/users"><div class="row"><input type="text" name="name" required maxlength="32" placeholder="New user's name"${off}></div>
+  <div class="row"><select name="role"${off}><option value="admin">admin</option><option value="owner">owner</option></select></div>
+  <div class="row"><button${off}>Add user</button></div></form>` : ""}
+</div>
+`, user, html`<script src="/static/webauthn.js"></script><script src="/static/app.js"></script>`);
+}
+
 export function loginPage(message?: string): string {
   return page("Sign in", html`
 <div class="card"><p>Sign in with your passkey.</p>
@@ -242,6 +307,15 @@ async function agentryLogin() {
     location.href = "/";
   } catch (e) { agentryShow(e); }
 }
+// Step-up before a settings change: a fresh check of the signed-in user's own passkey.
+async function agentryStepUp() {
+  try {
+    const options = await agentryPost("/step-up/options");
+    const answer = await SimpleWebAuthnBrowser.startAuthentication({ optionsJSON: options });
+    await agentryPost("/step-up/verify", answer);
+    location.reload();
+  } catch (e) { agentryShow(e); }
+}
 async function agentryRegister(code) {
   try {
     const options = await agentryPost("/register/" + code + "/options");
@@ -253,6 +327,7 @@ async function agentryRegister(code) {
 // No inline handlers: the page's Content-Security-Policy allows scripts from this origin only.
 document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("login")?.addEventListener("click", agentryLogin);
+  document.getElementById("step-up")?.addEventListener("click", agentryStepUp);
   const reg = document.getElementById("register");
   reg?.addEventListener("click", () => agentryRegister(reg.dataset.code));
 });

@@ -9,21 +9,23 @@
 // recorded as the actor on every audit event.
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
+import { availableParallelism, totalmem } from "node:os";
 import { join } from "node:path";
 import * as A from "./actions.ts";
 import { attachment, attachmentFile, checkUploads, MAX_IMAGE_BYTES, MAX_IMAGES_PER_REQUEST, saveUploads, type Upload } from "./attachments.ts";
 import {
-  AuthError, endSession, finishLogin, finishRegistration, LoginThrottle, loginOptions, registrationOptions, registrationUser,
-  relyingParty, SESSION_TTL_MS, sessionUser, type User,
+  addUser, AuthError, endSession, finishLogin, finishRegistration, finishStepUp, LoginThrottle, loginOptions, recentlyVerified,
+  registrationOptions, registrationUser, relyingParty, removeUser, resetUser, SESSION_TTL_MS, sessionUser, stepUpOptions, type User,
 } from "./accounts.ts";
 import { lastBackupAt, STALE_AFTER_MS } from "./backup.ts";
 import { asActor, runnerRow } from "./db.ts";
 import * as g from "./git.ts";
+import { suggestedWorkers } from "./platform.ts";
 import { readTail } from "./proc.ts";
 import { parseRecipe } from "./recipe.ts";
 import { MAX_DIFF_CHARS } from "./verifier.ts";
 import {
-  APP_JS, HOME_JS, homePage, loginPage, logBlock, messagePage, registerPage, runPage, type GroupLock, type ReqRow, type StepRow,
+  APP_JS, HOME_JS, homePage, loginPage, logBlock, messagePage, registerPage, runPage, settingsPage, type GroupLock, type ReqRow, type StepRow,
 } from "./views.ts";
 
 export const DEFAULT_PORT = 4747;
@@ -32,6 +34,7 @@ const LOG_TAIL_BYTES = 64 * 1024;
 const PROJECT_NAMES = `(SELECT group_concat(p.name, ', ') FROM request_projects rp JOIN projects p ON p.id = rp.project_id WHERE rp.request_id = r.id)`;
 const SESSION_COOKIE = "agentry_session";
 const LOGIN_COOKIE = "agentry_login";
+const STEP_UP_COOKIE = "agentry_step_up";
 
 export type ServerOptions = { db: Database; home: string; port?: number; publicUrl?: string };
 
@@ -136,6 +139,25 @@ export function startServer(o: ServerOptions) {
       return redirect("/login", { "set-cookie": cookie(SESSION_COOKIE, "", 0) });
     }
     if (url.pathname === "/" && req.method === "GET") return htmlRes(200, homePage(homeData(), user));
+    const verified = recentlyVerified(db, cookies[SESSION_COOKIE]);
+    if (url.pathname === "/settings" && req.method === "GET") return htmlRes(200, settingsPage(settingsData(verified), user));
+
+    // Step-up: a fresh passkey check of the signed-in user, which settings changes need (accounts.ts).
+    if (url.pathname === "/step-up/options" && req.method === "POST") {
+      const { options, challengeId } = await stepUpOptions(db, rp, user.id);
+      return json(options, { "set-cookie": cookie(STEP_UP_COOKIE, challengeId, 300, "/step-up") });
+    }
+    if (url.pathname === "/step-up/verify" && req.method === "POST") {
+      if (throttle.blocked(client)) return text(429, "too many failed sign-ins; wait a few minutes");
+      try {
+        await finishStepUp(db, rp, cookies[SESSION_COOKIE]!, cookies[STEP_UP_COOKIE] ?? "", await req.json());
+        return json({});
+      } catch (e) {
+        if (!(e instanceof AuthError)) throw e;
+        throttle.failed(client);
+        return text(401, e.message);
+      }
+    }
 
     const run = url.pathname.match(/^\/runs\/(\d+)(\/log)?$/);
     if (run && req.method === "GET") {
@@ -161,16 +183,17 @@ export function startServer(o: ServerOptions) {
     if (req.method === "POST") {
       const isForm = /^(application\/x-www-form-urlencoded|multipart\/form-data)/.test(req.headers.get("content-type") ?? "");
       const form = isForm ? await req.formData() : new FormData();
-      return act(url.pathname, form, await uploadsOf(form), user);
+      return act(url.pathname, form, await uploadsOf(form), user, verified);
     }
     return text(404, "not found");
   }
 
-  function act(path: string, form: FormData, uploads: Upload[], user: User): Response {
+  // `verified`: the session's passkey was checked recently, which every settings change but a pause needs.
+  function act(path: string, form: FormData, uploads: Upload[], user: User, verified: boolean): Response {
     const field = (k: string) => { const v = form.get(k); return typeof v === "string" ? v : undefined; };
     const optional = (k: string) => { const v = field(k)?.trim(); return v ? v : null; };
     try {
-      asActor(`user:${user.name}`, () => {
+      const shown = asActor(`user:${user.name}`, (): Response | void => {
         if (path === "/requests") {
           const types = checkUploads(db, null, uploads);
           db.transaction(() => {
@@ -183,6 +206,7 @@ export function startServer(o: ServerOptions) {
           return;
         }
         if (path === "/runner/resume") return A.resume(db);
+        if (path === "/settings" || path.startsWith("/settings/")) return changeSettings(path, field, user, verified);
         const grp = path.match(/^\/groups\/([^/]+)\/unblock$/);
         if (grp) return A.unblock(db, decodeURIComponent(grp[1]));
         const m = path.match(/^\/requests\/(\d+)\/(answer|approve|reject|retry|cancel|redeploy|resolve|reopen)$/);
@@ -203,11 +227,53 @@ export function startServer(o: ServerOptions) {
           case "reopen": { A.reopen(db, id, field("text") ?? ""); return; }
         }
       });
+      if (shown) return shown;
     } catch (e) {
+      if (e instanceof AuthError) return htmlRes(400, messagePage("Not done", e.message, user));
       if (!(e instanceof A.ActionError)) throw e;
-      return htmlRes(e.kind === "not_found" ? 404 : e.kind === "invalid" ? 400 : 409, messagePage("Not done", e.message, user));
+      const status = { not_found: 404, invalid: 400, forbidden: 403, wrong_state: 409 }[e.kind];
+      return htmlRes(status, messagePage("Not done", e.message, user));
     }
-    return redirect("/");
+    return redirect(path.startsWith("/settings") ? "/settings" : "/");
+  }
+
+  // The settings page's changes: owners only, and all but a pause after a recent passkey check. Adding a user or
+  // resetting one shows the new one-time registration link; everything else goes back to the page.
+  function changeSettings(path: string, field: (k: string) => string | undefined, user: User, verified: boolean): Response | void {
+    if (user.role !== "owner") throw new A.ActionError("Only an owner can change settings.", "forbidden");
+    if (path === "/settings/pause") return A.pause(db, `paused by ${user.name}`);
+    if (!verified) throw new A.ActionError("Confirm with your passkey first: the button at the top of the settings page.", "forbidden");
+    if (path === "/settings") return A.setWorkers(db, Number(field("workers")));
+    const project = path.match(/^\/settings\/projects\/([^/]+)\/(enable|disable)$/);
+    if (project) return A.setProjectEnabled(db, decodeURIComponent(project[1]), project[2] === "enable");
+    const linkFor = (name: string, code: string): Response =>
+      htmlRes(200, settingsPage(settingsData(verified), user, { name, url: `${publicUrl}/register/${code}` }), { "cache-control": "no-store" });
+    if (path === "/settings/users") {
+      const name = field("name")?.trim() ?? "";
+      return linkFor(name, addUser(db, name, field("role") === "owner" ? "owner" : "admin"));
+    }
+    const account = path.match(/^\/settings\/users\/([^/]+)\/(reset|remove)$/);
+    if (!account) throw new A.ActionError("no such setting", "not_found");
+    const name = decodeURIComponent(account[1]);
+    if (name === user.name) throw new A.ActionError(`Your own account can't be changed here: use \`agentry user ${account[2]} ${name}\` on the server's machine.`, "invalid");
+    if (account[2] === "reset") return linkFor(name, resetUser(db, name));
+    removeUser(db, name);
+  }
+
+  function settingsData(verified: boolean) {
+    const cores = availableParallelism();
+    const memory = totalmem();
+    const runner = runnerRow(db);
+    return {
+      workers: runner.workers, maxWorkers: A.MAX_WORKERS, suggested: suggestedWorkers(cores, memory), cores,
+      memoryGb: Math.round(memory / 2 ** 30), windows: process.platform === "win32",
+      paused: runner.paused ? runner.pause_reason ?? "paused" : null, verified,
+      projects: db.query(`SELECT p.name, g.name AS deploy_group, p.enabled FROM projects p JOIN deploy_groups g ON g.id = p.deploy_group_id
+        ORDER BY p.name`).all() as { name: string; deploy_group: string; enabled: number }[],
+      users: db.query(`SELECT u.name, u.role, COUNT(c.id) AS passkeys, MAX(c.last_used_at) AS last_used FROM users u
+        LEFT JOIN credentials c ON c.user_id = u.id GROUP BY u.id ORDER BY u.name`).all() as
+        { name: string; role: string; passkeys: number; last_used: number | null }[],
+    };
   }
 
   function homeData() {
@@ -277,7 +343,8 @@ function parseCookies(header: string | null): Record<string, string> {
 }
 
 const text = (status: number, body: string) => new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8", ...SECURITY_HEADERS } });
-const htmlRes = (status: number, body: string) => new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", ...SECURITY_HEADERS } });
+const htmlRes = (status: number, body: string, extra: Record<string, string> = {}) =>
+  new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", ...SECURITY_HEADERS, ...extra } });
 const json = (body: unknown, extra: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { headers: { "content-type": "application/json", ...SECURITY_HEADERS, ...extra } });
 const redirect = (location: string, extra: Record<string, string> = {}) => new Response(null, { status: 303, headers: { location, ...SECURITY_HEADERS, ...extra } });

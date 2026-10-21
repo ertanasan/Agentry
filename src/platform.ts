@@ -1,6 +1,7 @@
 // What differs between the systems a runner can run on: the shell recipe commands run in, and how a step's whole
 // process tree is started, checked and killed (eng review D8, D17). macOS here; Windows in platform-windows.ts.
 import { spawn, type ChildProcess } from "node:child_process";
+import { availableParallelism, totalmem } from "node:os";
 import { windows } from "./platform-windows.ts";
 
 export type TreeOptions = { cwd: string; env?: Record<string, string>; stdin: "ignore" | number };
@@ -44,3 +45,9 @@ function signalGroup(pgid: number, signal: NodeJS.Signals): void {
 }
 
 export const platform: Platform = process.platform === "win32" ? windows : mac;
+
+// The worker count this machine suits: one per 4 CPU cores and per 8 GB of memory (a Windows step may use 8 GB),
+// whichever allows fewer, and at least one.
+export function suggestedWorkers(cores = availableParallelism(), memoryBytes = totalmem()): number {
+  return Math.max(1, Math.min(Math.floor(cores / 4), Math.floor(memoryBytes / 2 ** 33)));
+}

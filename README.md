@@ -185,13 +185,16 @@ Agentry is built so that two processes can never act on the same request or the 
 
 ### The runner lease
 
-- **One executor at a time.** `agentry run` takes a database lease: a random token with a 60-second TTL, renewed
+- **One runner at a time.** `agentry run` takes a database lease: a random token with a 60-second TTL, renewed
   every 15 seconds by a heartbeat. A second runner refuses to start while the lease is live and names the pid
   that holds it.
+- **Several requests at once.** The runner works on up to **Workers** requests at a time, set on the
+  [settings page](#the-web-ui) (default 1). The agent, build, tests and verifier of different requests run side
+  by side, each in its own worktree. A change to the count applies before the next request starts.
 - **Fenced writes.** Every state change the runner makes runs in a transaction that first checks it still owns
   the lease. If another runner has taken over, for example after a long system sleep, the old one's writes are
   refused and it exits with code 3. A stale runner can never overwrite a newer runner's decisions.
-- **Graceful stop.** `Ctrl-C` lets the current request finish. Pressing it again quits at once, and startup
+- **Graceful stop.** `Ctrl-C` lets the requests in progress finish. Pressing it again quits at once, and startup
   recovery cleans up on the next run.
 
 ### Deploy groups
@@ -199,8 +202,12 @@ Agentry is built so that two processes can never act on the same request or the 
 Projects that deploy to the same place share a **deploy group**. For example, an API and a web app might be
 published by one script to one server.
 
-- The queue skips any request whose groups aren't all free, so **two deploys to one target never overlap**, even
-  across different requests and projects.
+- **Two pushes or deploys to one target never overlap**, even across different requests and projects. The queue
+  skips any request whose groups aren't all free, and requests of one group that run at once take turns from the
+  last fetch before the push to the end of the deploy. The later one rebases onto the earlier one's commit and
+  runs every gate again.
+- A request whose group gets blocked while it runs stops before its push, as `blocked_pre_push`. Retry it once
+  the group is free.
 - A failure after push (deploy failed, timed out, live version wrong, push outcome unknown) **locks the group**,
   with the reason and the commit that didn't deploy. Nothing else deploys there until a person acts: re-run the
   deploy, mark it resolved, or unblock it.
@@ -318,6 +325,10 @@ executes code at build time needs a person's approval**: `*.csproj`, `*.props`, 
   There are no passwords to phish or reuse.
 - **Invite-only accounts.** `agentry user add` runs on the server host and prints a one-time registration link
   (single use, 30 minutes). `agentry user reset` revokes a user's passkeys and sessions in one step.
+- **Owners change settings, after a fresh passkey check.** Admins see the settings page but can't change it. An
+  owner's change needs a passkey check of their own within the last 5 minutes (signing in counts), so a stolen
+  session cookie alone can't add users or change the runner. Pausing the runner needs no check. An owner can't
+  reset or remove their own account from the page; `agentry user` on the server's machine still can.
 - **Only hashes at rest.** Session tokens, registration codes and login challenges are stored as SHA-256 hashes.
 - **Brute-force throttle.** After 10 failed sign-ins in 15 minutes, a client address is blocked.
 - **Browser hardening.** The server listens on `127.0.0.1` only. It has a Host allowlist against DNS rebinding,
@@ -342,6 +353,9 @@ We'd rather you know where the boundaries are:
 - On Windows, the sandbox user **can read whatever Windows lets every user read**, and it can **list the names**
   (not read the contents) of the files in Agentry's own folder, because PowerShell needs to look its starting
   folder up in each parent. Firewall rules per user don't cover loopback, so it can reach local services too.
+- On Windows, **parallel workers share the one sandbox user**, so a request's agent can reach the worktrees of the
+  other requests running at the same time. Keep one worker there if requests come from people you trust
+  differently.
 
 ## Fail-safe controls
 
@@ -421,6 +435,19 @@ system's light or dark mode.
 - **Queue:** what's running and what's next.
 - **Recently finished:** the last ten requests, with **Reopen** on each done request.
 
+**Settings** (owners change them; admins see them)
+
+- **Confirm with passkey:** shown when your passkey wasn't checked in the last 5 minutes. Every change below but
+  **Pause** needs it.
+- **Runner:** **Pause** stops the runner from starting new requests; those already running finish. **Resume**
+  starts it again.
+- **Workers:** how many requests the runner works on at once, from 1 to 8. The page suggests a count for the
+  machine (one worker for every 4 CPU cores and every 8 GB of memory) and warns when the setting is higher:
+  builds slow each other down, and every worker uses the same Claude account and its rate limits.
+- **Projects:** **Disable** or **Enable** each project. A disabled project's requests wait in the queue.
+- **Users:** add a user as admin or owner, **Reset passkeys**, or **Remove**. Adding or resetting shows the
+  one-time registration link on the page, as `agentry user add` does in the terminal.
+
 **Run page**
 
 - Request summary, attempt, branch, commit and push state.
@@ -485,7 +512,7 @@ printf '#!/bin/sh\necho sk-ant-api03-...\n' > ~/.agentry/api-key-helper && chmod
 agentry project add api recipes/my-api.json
 agentry add api "Return 404 for unknown word ids" \
   --done-when "GET /words/{id} with an unknown id returns 404 with a problem+json body"
-agentry run                 # works the queue; Ctrl-C finishes the current request and stops
+agentry run                 # works the queue; Ctrl-C finishes the requests in progress and stops
 ```
 
 ### Open the web UI
@@ -582,7 +609,7 @@ Your deploy should write a `VERSION` file next to what it installs, in this form
 agentry project add <name> <recipe.json>
 agentry add <project>[,<project>...] <title> [--body B] [--done-when D] [--done-when-test T] [--priority N]
 agentry list [--all]                  open requests, locked groups, paused runner, false-done count
-agentry run [--once]                  work the queue (--once: stop when idle or paused)
+agentry run [--once]                  work the queue (--once: stop when idle or paused and nothing runs)
 agentry answer <id> <text>            needs_info → queued
 agentry approve <id> | reject <id>    needs_review → queued (resumes at build) | canceled
 agentry retry <id> [--body B] [--done-when D] [--done-when-test T]   blocked_pre_push → queued
@@ -658,7 +685,7 @@ so the pipeline doesn't depend on one model or CLI.
 ## Quality
 
 ```sh
-bun test              # 237 tests: runner, gates, recovery, git, server, accounts, backups, Windows, end-to-end loop
+bun test              # 251 tests: runner, gates, recovery, git, server, accounts, backups, Windows, end-to-end loop
 bun run typecheck
 bun run eval:verifier # the done-when verifier against 10 labeled cases, with the real model
 ```
