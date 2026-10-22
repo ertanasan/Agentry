@@ -7,6 +7,8 @@
 #   powershell -ExecutionPolicy Bypass -File windows-setup.ps1 -SelfTest      only run test/windows.test.ts as AgentryRunner
 #   powershell -ExecutionPolicy Bypass -File windows-setup.ps1 -Uninstall     stop and remove the tasks and the command
 #                                                                              from PATH; the accounts and <root> stay
+#   ... -Uninstall -Purge -SqlInstances '.\SQLEXPRESS'   also remove the accounts, their profiles and SQL Server logins,
+#                                                         and <root>, keeping a copy of the database in <root>-backup-<date>
 #
 # What it makes:
 #   AgentryRunner   standard user that runs Agentry (startup tasks "Agentry runner" and "Agentry server"). Owns
@@ -37,7 +39,8 @@ param(
   [string[]]$Clone = @(),         # repositories to clone into <root>\repos (ssh URLs; needs the deploy key added first)
   [string]$Owner = '',            # create this first owner account and print its one-time passkey link
   [switch]$SelfTest,
-  [switch]$Uninstall
+  [switch]$Uninstall,
+  [switch]$Purge                  # with -Uninstall: start from scratch (see above)
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -92,12 +95,51 @@ if ($Uninstall) {
   }
   Get-CimInstance Win32_Process -Filter "Name = 'bun.exe'" | Where-Object { $_.CommandLine -like "*$app\src\cli.ts*" } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  # The launcher's loop, git, ssh and claude can outlive the task, and they keep the accounts' profiles loaded.
+  Get-Process -IncludeUserName -ErrorAction SilentlyContinue |
+    Where-Object { $_.UserName -and @($runner, $sandbox) -contains ($_.UserName -split '\\')[-1] } |
+    ForEach-Object { Write-Host "    stopping $($_.ProcessName) ($($_.Id)) of $($_.UserName)"; Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
   Step "Removing $Root from PATH"
   Set-OnPath $false
+  if (-not $Purge) {
+    Write-Host "`nDone. The accounts and $Root stay; -Uninstall -Purge -SqlInstances <instance> removes them too."
+    exit 0
+  }
+
+  $keep = "$Root-backup-$(Get-Date -Format yyyyMMdd-HHmm)"
+  if (Test-Path (Join-Path $home_ 'agentry.db')) {
+    Step "Keeping the database in $keep"
+    New-Item -ItemType Directory -Force $keep | Out-Null
+    Copy-Item (Join-Path $home_ 'agentry.db*') $keep
+    if (Test-Path (Join-Path $home_ 'backups')) { Copy-Item -Recurse (Join-Path $home_ 'backups') (Join-Path $keep 'backups') }
+  }
+  foreach ($i in $SqlInstances) {
+    $login = "$env:COMPUTERNAME\$sandbox"
+    $c = New-Object System.Data.SqlClient.SqlConnection "Server=$i;Integrated Security=true;Connect Timeout=10"
+    $c.Open()
+    try { $q = $c.CreateCommand(); $q.CommandText = "IF SUSER_ID(N'$login') IS NOT NULL DROP LOGIN [$login];"; $q.ExecuteNonQuery() | Out-Null }
+    finally { $c.Close() }
+    "SQL Server ${i}: login $login dropped"
+  }
+  Step 'Removing the accounts'
+  foreach ($u in $runner, $sandbox) {
+    $acct = Get-LocalUser -Name $u -ErrorAction SilentlyContinue
+    if (-not $acct) { continue }
+    $prof = Get-CimInstance Win32_UserProfile | Where-Object SID -eq $acct.SID.Value
+    if ($prof) {
+      $gone = $false
+      foreach ($try in 1..10) { try { $prof | Remove-CimInstance -ErrorAction Stop; $gone = $true; break } catch { Start-Sleep -Seconds 3 } }
+      if (-not $gone) { throw "The profile of $u is still in use: sign out its sessions (Task Manager > Users) or reboot, then run this again." }
+    }
+    Remove-LocalUser -Name $u
+    "removed $u"
+  }
+  Step "Deleting $Root"
+  if (Test-Path $Root) { Remove-Item -Recurse -Force $Root }
   Write-Host @"
 
-Done. The accounts and $Root stay. To remove them too:
-  Remove-LocalUser $runner, $sandbox; Remove-Item -Recurse -Force '$Root'
+Done. $(if (Test-Path $keep) { "The old database and its backups are in $keep. " })The access entries setup gave the old accounts
+(deploy folders, services, C:\) stay as unresolved SIDs; a new setup grants its new accounts again.
 "@
   exit 0
 }
@@ -293,13 +335,17 @@ foreach ($d in Get-ChildItem C:\ -Directory -Force -ErrorAction SilentlyContinue
 icacls 'C:\' /deny "${sandbox}:(AD)" /Q | Out-Null; Assert-Exit 'icacls C:\'
 icacls 'C:\Users\Public' /deny "${sandbox}:(OI)(CI)(W,D,DC)" /Q | Out-Null
 "write denied: C:\ (new folders), C:\Users\Public$(if ($denied) { ', ' + ($denied -join ', ') })"
+$sandboxSid = (Get-LocalUser -Name $sandbox).SID.Value
 foreach ($i in $SqlInstances) {
   $login = "$env:COMPUTERNAME\$sandbox"
   $c = New-Object System.Data.SqlClient.SqlConnection "Server=$i;Integrated Security=true;Connect Timeout=10"
   $c.Open()
   try {
     $q = $c.CreateCommand()
-    $q.CommandText = "IF SUSER_ID(N'$login') IS NULL CREATE LOGIN [$login] FROM WINDOWS; DENY CONNECT SQL TO [$login];"
+    # A login of that name left from an earlier AgentrySandbox (deleted and made again) holds the old SID, so its deny
+    # would not cover this account: replace it.
+    $q.CommandText = "IF SUSER_SID(N'$login') IS NOT NULL AND SUSER_SID(N'$login') <> SID_BINARY(N'$sandboxSid') DROP LOGIN [$login];
+      IF SUSER_ID(N'$login') IS NULL CREATE LOGIN [$login] FROM WINDOWS; DENY CONNECT SQL TO [$login];"
     $q.ExecuteNonQuery() | Out-Null
   } finally { $c.Close() }
   "SQL Server ${i}: $login may not connect"

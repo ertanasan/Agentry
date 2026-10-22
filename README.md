@@ -616,7 +616,9 @@ agentry token                          # then: Start-ScheduledTask 'Agentry runn
 ```
 
 Run setup again to update Agentry or change its options. `-Uninstall` removes the startup tasks and takes
-`agentry` off `PATH`; the accounts and `C:\Agentry` stay.
+`agentry` off `PATH`; the accounts and `C:\Agentry` stay. To start from scratch, `-Uninstall -Purge -SqlInstances
+'.\SQLEXPRESS'` also removes the two accounts with their profiles, the sandbox's SQL Server logins and `C:\Agentry`,
+keeping a copy of the database and its backups in `C:\Agentry-backup-<date>`.
 
 Recipe commands run in Windows PowerShell 5.1, which has no `&&`: use `;` and
 `if ($LASTEXITCODE) { exit $LASTEXITCODE }`.
