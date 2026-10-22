@@ -28,25 +28,24 @@
 // the push to the end of the deploy, hold the request's deploy groups, so one group never sees two pushes or
 // deploys at once. A request whose group was blocked while it ran stops before its push.
 //
-// Every stop removes the worktree and keeps the branch (D12). Every state write is fenced by the lease
-// token (D17); the caller holds the lease and runs the heartbeat, which reads `ctx.running`. Every git call
+// Every stop removes the worktree and keeps the branch (D12). Every state write goes through the queue (queue.ts),
+// fenced by the lease token (D17); the caller holds the lease and runs the heartbeat, which reads `ctx.running`. Every git call
 // is async and bounded, and its process group is recorded on the run while it runs (git.ts).
-import type { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { copyForRun, DOCX, PPTX, XLSX, type RunFile } from "./attachments.ts";
-import { fenced, LeaseLost, LEASE_TTL_MS, runnerRow, setRequestStatus, type PushState, type RequestStatus } from "./db.ts";
+import { DOCX, PPTX, XLSX, type RunFile } from "./attachments.ts";
+import { LeaseLost, type PushState, type RequestStatus } from "./db.ts";
 import * as g from "./git.ts";
 import { countRegression, inspect, type Flag, type Owner } from "./inspect.ts";
 import { readTail, runStep, type StepResult } from "./proc.ts";
+import type { PartRow, Queue, ReqRow } from "./queue.ts";
 import { parseRecipe, timeoutMs, type Recipe, type StepName, type Target } from "./recipe.ts";
 import { namedTestPassed, parseTrx, type TestRun } from "./results/trx.ts";
 import { sandbox } from "./sandbox.ts";
 import type { Agent, Sandbox, Verifier } from "./adapters/types.ts";
 
 export type RunnerCtx = {
-  db: Database;
-  token: string;            // this runner's lease token
+  q: Queue;                 // the queue, through this runner's lease
   home: string;             // ~/.agentry: worktrees/, runs/<id>/ (logs, temp), cache/
   agent: Agent;
   verifier: Verifier;
@@ -59,16 +58,8 @@ export type RunnerCtx = {
 export type RunOutcome = { kind: "paused" | "idle" } | { kind: "ran"; requestId: number; status: RequestStatus };
 export type Started = { kind: "paused" | "idle" } | { kind: "started"; requestId: number; done: Promise<RunOutcome> };
 
-type ReqRow = {
-  id: number; project_id: number; title: string; body: string; done_when: string | null; done_when_test: string | null;
-  attempts: number; resume_run: number | null; status: RequestStatus;
-};
 // One of the request's projects.
 type Part = { projectId: number; name: string; recipe: Recipe; groupId: number };
-type RunRow = {
-  id: number; attempt: number; branch: string; base_sha: string | null; candidate_sha: string | null;
-  commit_sha: string | null; push_state: PushState;
-};
 
 type Stop = {
   status: RequestStatus;
@@ -90,24 +81,8 @@ const pre = (reason: string): Stop => ({ status: "blocked_pre_push", reason });
 const post = (reason: string, sha: string | null, groups?: number[]): Stop => ({ status: "blocked_post_push", reason, lock: { reason, sha, groups } });
 const infra = (reason: string): Stop => ({ status: "queued", reason, requeue: true, pause: true });
 
-function w<T>(ctx: RunnerCtx, write: () => T): T {
-  return fenced(ctx.db, ctx.token, write);
-}
-
-const REQ_COLUMNS = "r.id, r.project_id, r.title, r.body, r.done_when, r.done_when_test, r.attempts, r.resume_run, r.status";
-
-// Highest priority, then oldest, among queued requests whose projects are all enabled and deploy groups all free.
-function pick(db: Database): ReqRow | null {
-  return db.query(`SELECT ${REQ_COLUMNS} FROM requests r WHERE r.status = 'queued' AND NOT EXISTS (
-      SELECT 1 FROM request_projects rp JOIN projects p ON p.id = rp.project_id JOIN deploy_groups dg ON dg.id = p.deploy_group_id
-      WHERE rp.request_id = r.id AND (p.enabled = 0 OR dg.lock != 'free'))
-    ORDER BY r.priority DESC, r.created_at, r.id LIMIT 1`).get() as ReqRow | null;
-}
-
 // The request's projects, lowest deploy_order first, then by project.
-function partsOf(db: Database, requestId: number): Part[] {
-  const rows = db.query(`SELECT p.id, p.name, p.recipe, p.deploy_group_id FROM request_projects rp JOIN projects p ON p.id = rp.project_id
-    WHERE rp.request_id = ? ORDER BY p.id`).all(requestId) as { id: number; name: string; recipe: string; deploy_group_id: number }[];
+function partsOf(rows: PartRow[]): Part[] {
   return rows.map((r) => ({ projectId: r.id, name: r.name, recipe: parseRecipe(r.recipe), groupId: r.deploy_group_id }))
     .sort((a, b) => (a.recipe.deploy_order ?? 0) - (b.recipe.deploy_order ?? 0));
 }
@@ -121,35 +96,34 @@ function distinct<T>(items: T[], key: (item: T) => unknown): T[] {
 }
 
 export async function runNext(ctx: RunnerCtx): Promise<RunOutcome> {
-  const s = startNext(ctx);
+  const s = await startNext(ctx);
   return s.kind === "started" ? s.done : s;
 }
 
-// Starts the next request and returns at once, with `done` settling when its run ends. The request is marked
-// running before this returns, so the next call starts a different one.
-export function startNext(ctx: RunnerCtx): Started {
-  if (runnerRow(ctx.db).paused) return { kind: "paused" };
+// Starts the next request, with `done` settling when its run ends. The request is marked running before this
+// settles, so the next call starts a different one.
+export async function startNext(ctx: RunnerCtx): Promise<Started> {
+  const { q } = ctx;
+  if ((await q.settings()).paused) return { kind: "paused" };
   // A queued Re-run deploy goes first: its group stays blocked until it is handled (slice 2 review D7).
-  const queued = ctx.db.query(`SELECT id FROM requests WHERE redeploy_requested = 1 AND status = 'blocked_post_push'
-    ORDER BY updated_at, id LIMIT 1`).get() as { id: number } | null;
+  const queued = await q.takeRedeploy();
   if (queued) {
-    w(ctx, () => ctx.db.query("UPDATE requests SET redeploy_requested = 0 WHERE id = ?").run(queued.id));
     const done = (async (): Promise<RunOutcome> => {
       try {
-        return { kind: "ran", requestId: queued.id, status: await redeploy(ctx, queued.id) };
+        return { kind: "ran", requestId: queued, status: await redeploy(ctx, queued) };
       } catch (e) {
         if (e instanceof LeaseLost) throw e;
-        w(ctx, () => setRequestStatus(ctx.db, queued.id, "blocked_post_push", `re-run deploy failed: ${e instanceof Error ? e.message : String(e)}`));
-        return { kind: "ran", requestId: queued.id, status: "blocked_post_push" };
+        await q.setStatus(queued, "blocked_post_push", `re-run deploy failed: ${e instanceof Error ? e.message : String(e)}`);
+        return { kind: "ran", requestId: queued, status: "blocked_post_push" };
       }
     })();
-    return { kind: "started", requestId: queued.id, done };
+    return { kind: "started", requestId: queued, done };
   }
-  const req = pick(ctx.db);
+  const req = await q.pick();
   if (!req) return { kind: "idle" };
-  const resume = req.resume_run ? ctx.db.query("SELECT * FROM runs WHERE id = ?").get(req.resume_run) as RunRow : null;
+  const resume = req.resume_run ? await q.run(req.resume_run) : null;
   const attempt = resume ? resume.attempt : req.attempts + 1;
-  const j = startRun(ctx, req, {
+  const j = await startRun(ctx, req, {
     attempt, branch: resume?.branch ?? `agentry/${req.id}-${attempt}`, base: resume?.base_sha ?? null, candidate: resume?.candidate_sha ?? null,
   });
   const done = execute(j, () => pipeline(j, resume !== null)).then((status): RunOutcome => ({ kind: "ran", requestId: req.id, status }));
@@ -181,12 +155,12 @@ async function holdGroups<T>(groups: number[], body: () => Promise<T>): Promise<
 
 // "Re-run deploy" for a blocked_post_push request: steps 9-10 for its recorded commit, from a fresh worktree.
 export async function redeploy(ctx: RunnerCtx, requestId: number): Promise<RequestStatus> {
-  const req = ctx.db.query(`SELECT ${REQ_COLUMNS} FROM requests r WHERE r.id = ?`).get(requestId) as ReqRow | null;
+  const req = await ctx.q.request(requestId);
   if (!req || req.status !== "blocked_post_push") throw new Error(`request #${requestId} is not blocked after push`);
-  const last = ctx.db.query("SELECT * FROM runs WHERE request_id = ? AND commit_sha IS NOT NULL ORDER BY id DESC LIMIT 1").get(requestId) as RunRow | null;
+  const last = await ctx.q.lastCommitRun(requestId);
   if (!last?.commit_sha) throw new Error(`request #${requestId} has no pushed commit`);
   const sha = last.commit_sha;
-  const j = startRun(ctx, req, {
+  const j = await startRun(ctx, req, {
     attempt: last.attempt, branch: last.branch, base: last.base_sha, candidate: last.candidate_sha, commit: sha, pushState: last.push_state,
   });
   return execute(j, () => holdGroups(groupsOf(j.parts), async () => {
@@ -194,26 +168,17 @@ export async function redeploy(ctx: RunnerCtx, requestId: number): Promise<Reque
     if (f.code !== 0) throw new Error(fetchFailed(f));
     if (!await g.isAncestor(j.repo, sha, `${j.remote}/${j.branch}`)) throw new Error(`${sha.slice(0, 7)} is not on ${j.remote}/${j.branch}`);
     // Origin has the commit: record that on this run and on earlier unknown pushes of it (slice 2 review D10).
-    w(ctx, () => ctx.db.query("UPDATE runs SET push_state = 'pushed' WHERE request_id = ? AND commit_sha = ? AND push_state IN ('push_unknown', 'push_started')")
-      .run(requestId, sha));
+    await ctx.q.markPushed(requestId, sha);
     return deploy(j, sha, true);
   }));
 }
 
-function startRun(ctx: RunnerCtx, req: ReqRow, o: {
+async function startRun(ctx: RunnerCtx, req: ReqRow, o: {
   attempt: number; branch: string; base: string | null; candidate: string | null; commit?: string; pushState?: PushState;
-}): Job {
-  const parts = partsOf(ctx.db, req.id);
+}): Promise<Job> {
+  const parts = partsOf(await ctx.q.parts(req.id));
   const { recipe } = parts[0];
-  const now = Date.now();
-  const runId = w(ctx, () => {
-    ctx.db.query("UPDATE requests SET attempts = ?, resume_run = NULL WHERE id = ?").run(o.attempt, req.id);
-    setRequestStatus(ctx.db, req.id, "running", null, now);
-    return Number(ctx.db.query(`INSERT INTO runs (request_id, attempt, lease_token, lease_expires_at, branch, base_sha,
-      candidate_sha, commit_sha, push_state, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(req.id, o.attempt, ctx.token, now + LEASE_TTL_MS, o.branch, o.base, o.candidate, o.commit ?? null, o.pushState ?? "none", now)
-      .lastInsertRowid);
-  });
+  const runId = await ctx.q.startRun(req.id, o);
   ctx.running.add(runId);
   const dir = join(ctx.home, "runs", String(runId));
   mkdirSync(dir, { recursive: true });
@@ -228,8 +193,8 @@ async function execute(j: Job, body: () => Promise<Stop>): Promise<RequestStatus
   const { ctx, runId } = j;
   // Each git process's group is recorded on the run while it runs, like a step's (slice 2 review D13).
   const observer: g.Observer = {
-    onStart: (pgid) => w(ctx, () => ctx.db.query("UPDATE runs SET pgid = ? WHERE id = ?").run(pgid, runId)),
-    onEnd: () => w(ctx, () => ctx.db.query("UPDATE runs SET pgid = NULL WHERE id = ?").run(runId)),
+    onStart: (pgid) => ctx.q.setPgid(runId, pgid),
+    onEnd: () => ctx.q.setPgid(runId, null),
   };
   return g.observer.run(observer, async () => {
     let s: Stop;
@@ -238,7 +203,7 @@ async function execute(j: Job, body: () => Promise<Stop>): Promise<RequestStatus
     } catch (e) {
       if (e instanceof LeaseLost) throw e;
       const msg = e instanceof Error ? e.message : String(e);
-      const run = ctx.db.query("SELECT push_state, commit_sha FROM runs WHERE id = ?").get(runId) as RunRow;
+      const run = (await ctx.q.run(runId))!;
       // Once a push has started, origin may have the commit: never requeue (D19).
       s = run.push_state === "none" ? infra(`runner error: ${msg}`) : post(`runner error after push started: ${msg}`, run.commit_sha);
     } finally {
@@ -246,31 +211,19 @@ async function execute(j: Job, body: () => Promise<Stop>): Promise<RequestStatus
       rmSync(join(j.dir, "tmp"), { recursive: true, force: true });
       ctx.running.delete(runId);
     }
-    finish(j, s);
+    await finish(j, s);
     return s.status;
   });
 }
 
-function finish(j: Job, s: Stop): void {
-  const { db } = j.ctx;
-  const id = j.req.id;
-  const now = Date.now();
-  w(j.ctx, () => {
-    const runStatus = s.status === "done" ? "passed" : s.requeue ? "interrupted" : "failed";
-    db.query("UPDATE runs SET status = ?, current_step = NULL, pgid = NULL, flags = ?, ended_at = ? WHERE id = ?")
-      .run(runStatus, JSON.stringify(j.flags), now, j.runId);
-    if (s.requeue) db.query("UPDATE requests SET attempts = ?, resume_run = ? WHERE id = ?").run(j.prevAttempts, j.resumeFrom, id);
-    setRequestStatus(db, id, s.status, s.reason, now);
-    if (s.pause) db.query("UPDATE runner SET paused = 1, pause_reason = ? WHERE id = 1").run(s.reason);
+function finish(j: Job, s: Stop): Promise<void> {
+  return j.ctx.q.finish({
+    runId: j.runId, requestId: j.req.id, runStatus: s.status === "done" ? "passed" : s.requeue ? "interrupted" : "failed",
+    flags: j.flags, status: s.status, reason: s.reason,
+    requeue: s.requeue ? { attempts: j.prevAttempts, resumeRun: j.resumeFrom } : null, pause: !!s.pause,
     // A request holds only the groups of its latest stop: a re-run deploy that got further frees the rest.
-    if (s.lock || s.status === "done") {
-      db.query("UPDATE deploy_groups SET lock = 'free', lock_reason = NULL, locked_by_request = NULL, undeployed_sha = NULL WHERE locked_by_request = ?")
-        .run(id);
-    }
-    for (const group of s.lock ? s.lock.groups ?? groupsOf(j.parts) : []) {
-      db.query("UPDATE deploy_groups SET lock = 'blocked', lock_reason = ?, locked_by_request = ?, undeployed_sha = ? WHERE id = ?")
-        .run(s.lock!.reason, s.lock!.sha ? id : null, s.lock!.sha, group);
-    }
+    free: !!s.lock || s.status === "done",
+    lock: s.lock ? { reason: s.lock.reason, sha: s.lock.sha, groups: s.lock.groups ?? groupsOf(j.parts) } : null,
   });
 }
 
@@ -286,7 +239,7 @@ async function pipeline(j: Job, resumed: boolean): Promise<Stop> {
     await g.checkoutWorktree(j.repo, j.wt, j.runBranch);
   } else {
     j.base = await g.remoteHead(j.repo, j.remote, j.branch);
-    w(j.ctx, () => j.ctx.db.query("UPDATE runs SET base_sha = ? WHERE id = ?").run(j.base, j.runId));
+    await j.ctx.q.setRun(j.runId, { base_sha: j.base });
     await g.addWorktree(j.repo, j.wt, j.runBranch, j.base);
   }
   j.sbx = sandbox({
@@ -300,7 +253,7 @@ async function pipeline(j: Job, resumed: boolean): Promise<Stop> {
     if (stopped) return stopped;
     const candidate = await g.candidateCommit(j.wt, `agentry: candidate for #${j.req.id}`);
     if (!candidate) return pre("the agent made no changes");
-    w(j.ctx, () => j.ctx.db.query("UPDATE runs SET candidate_sha = ? WHERE id = ?").run(candidate, j.runId));
+    await j.ctx.q.setRun(j.runId, { candidate_sha: candidate });
   }
   return deliver(j, resumed);
 }
@@ -311,7 +264,7 @@ async function deliver(j: Job, approved: boolean): Promise<Stop> {
   if (stopped) return stopped;
   let sha = await g.amendMessage(j.wt, commitMessage(j.req));
   return holdGroups(groupsOf(j.parts), async () => {
-    const blocked = blockedGroup(j);
+    const blocked = await j.ctx.q.blockedGroup(groupsOf(j.parts));
     if (blocked) return pre(`deploy group ${blocked} was blocked while this request ran; retry once it is free`);
     for (let round = 0; ; round++) {
       const f = await g.fetch(j.repo, j.remote);
@@ -321,7 +274,7 @@ async function deliver(j: Job, approved: boolean): Promise<Stop> {
         if (!await g.rebaseOnto(j.wt, `${j.remote}/${j.branch}`)) return pre(`rebase onto ${j.remote}/${j.branch} had conflicts`);
         j.base = head;
         sha = await g.headSha(j.wt);
-        w(j.ctx, () => j.ctx.db.query("UPDATE runs SET base_sha = ? WHERE id = ?").run(head, j.runId));
+        await j.ctx.q.setRun(j.runId, { base_sha: head });
         stopped = await gates(j, approved);
         if (stopped) return stopped;
       }
@@ -334,15 +287,6 @@ async function deliver(j: Job, approved: boolean): Promise<Stop> {
   });
 }
 
-// One of the request's deploy groups that another request (a failed deploy) or the drift guard blocked after
-// this one was picked, by name and holder.
-function blockedGroup(j: Job): string | null {
-  const ids = groupsOf(j.parts);
-  const row = j.ctx.db.query(`SELECT name, locked_by_request FROM deploy_groups WHERE lock != 'free' AND id IN (${ids.map(() => "?").join(",")})
-    ORDER BY id LIMIT 1`).get(...ids) as { name: string; locked_by_request: number | null } | null;
-  return row ? `${row.name}${row.locked_by_request ? ` (by #${row.locked_by_request})` : ""}` : null;
-}
-
 function commitMessage(r: ReqRow): string {
   return `${r.title}\n\n${r.body ? r.body + "\n\n" : ""}Agentry-Request: #${r.id}`;
 }
@@ -352,7 +296,8 @@ function commitMessage(r: ReqRow): string {
 async function gates(j: Job, approved: boolean): Promise<Stop | null> {
   const { req } = j;
   const head = await g.headSha(j.wt);
-  const found = inspect(await g.changedFiles(j.wt, j.base, head), await g.addedLines(j.wt, j.base, head), j.parts.map((p) => p.recipe), otherProjects(j));
+  await j.ctx.q.saveDiff?.(j.runId, j.wt, j.base, head);
+  const found = inspect(await g.changedFiles(j.wt, j.base, head), await g.addedLines(j.wt, j.base, head), j.parts.map((p) => p.recipe), await otherProjects(j));
   const outside = found.blocking.filter((f) => f.kind === "out_of_scope");
   if (outside.length || !approved) j.flags = [...found.blocking, ...found.info];
   if (outside.length) {
@@ -386,14 +331,11 @@ async function gates(j: Job, approved: boolean): Promise<Stop | null> {
     const run = parseTrx(readFileSync(resultFile, "utf8"));
     runs.push(run);
     const sum = (k: "total" | "skipped") => runs.reduce((n, r) => n + r[k], 0);
-    w(j.ctx, () => j.ctx.db.query("UPDATE runs SET tests_total = ?, tests_skipped = ? WHERE id = ?").run(sum("total"), sum("skipped"), j.runId));
+    await j.ctx.q.setRun(j.runId, { tests_total: sum("total"), tests_skipped: sum("skipped") });
     // Each project this command tests gets the counts and is checked against its own last passing run.
     for (const p of j.parts.filter((p) => p.recipe.test_cmd === recipe.test_cmd)) {
-      w(j.ctx, () => {
-        j.ctx.db.query("DELETE FROM run_tests WHERE run_id = ? AND project_id = ?").run(j.runId, p.projectId);
-        j.ctx.db.query("INSERT INTO run_tests (run_id, project_id, total, skipped) VALUES (?, ?, ?, ?)").run(j.runId, p.projectId, run.total, run.skipped);
-      });
-      const regression = approved ? null : countRegression(run, baseCounts(j, p.projectId));
+      await j.ctx.q.setRunTests(j.runId, p.projectId, run.total, run.skipped);
+      const regression = approved ? null : countRegression(run, await j.ctx.q.baseCounts(p.projectId));
       if (regression) {
         j.flags.push(regression);
         return { status: "needs_review", reason: describe([regression]) };
@@ -410,12 +352,12 @@ async function gates(j: Job, approved: boolean): Promise<Stop | null> {
     }
   }
   if (req.done_when) {
-    const s = begin(j, "verify");
+    const s = await begin(j, "verify");
     const v = await j.ctx.verifier.verify({
       worktree: j.wt, logPath: s.logPath, timeoutMs: longest(j, "verify"), sandbox: j.sbx!, onStart: s.onStart,
       title: req.title, body: req.body, doneWhen: req.done_when, diff: await g.diff(j.wt, j.base, head), testSummary: summary(run, t!),
     });
-    s.end(v.verdict === "PASS" ? 0 : 1);
+    await s.end(v.verdict === "PASS" ? 0 : 1);
     const changed = tampered(j, "verify");
     if (changed) return changed;
     if (v.verdict === "infra_error") return infra(`verifier: ${v.evidence}`);
@@ -443,29 +385,23 @@ function merged(runs: TestRun[]): TestRun {
   return { total: sum("total"), passed: sum("passed"), failed: sum("failed"), skipped: sum("skipped"), outcomes: new Map(runs.flatMap((r) => [...r.outcomes])) };
 }
 
-// Test counts of the project's last passing run, the baseline for deleted or skipped tests.
-function baseCounts(j: Job, projectId: number): { total: number; skipped: number } | null {
-  return j.ctx.db.query(`SELECT t.total, t.skipped FROM run_tests t JOIN runs ru ON ru.id = t.run_id
-    WHERE t.project_id = ? AND ru.status = 'passed' ORDER BY ru.id DESC LIMIT 1`)
-    .get(projectId) as { total: number; skipped: number } | null;
-}
-
 // The repo's projects this request did not select, to name the owner of an out-of-scope file.
-function otherProjects(j: Job): Owner[] {
+async function otherProjects(j: Job): Promise<Owner[]> {
   const mine = new Set(j.parts.map((p) => p.projectId));
-  return (j.ctx.db.query("SELECT id, name, recipe FROM projects").all() as { id: number; name: string; recipe: string }[])
+  return (await j.ctx.q.projects())
     .filter((p) => !mine.has(p.id)).map((p) => ({ name: p.name, recipe: parseRecipe(p.recipe) }))
     .filter((p) => p.recipe.repo === j.repo).map((p) => ({ name: p.name, scope_path: p.recipe.scope_path }));
 }
 
 async function agentStep(j: Job): Promise<Stop | null> {
-  const s = begin(j, "agent");
+  const s = await begin(j, "agent");
   // The request's files go into the run's temp dir, the one place outside the worktree the sandbox lets it read.
-  const files = copyForRun(j.ctx.db, j.ctx.home, j.req.id, join(j.sbx!.env.TMPDIR, "attachments"));
+  const files = await j.ctx.q.copyAttachments(j.req.id, join(j.sbx!.env.TMPDIR, "attachments"));
   const res = await j.ctx.agent.run({
-    worktree: j.wt, logPath: s.logPath, timeoutMs: longest(j, "agent"), sandbox: j.sbx!, onStart: s.onStart, prompt: prompt(j, files),
+    worktree: j.wt, logPath: s.logPath, timeoutMs: longest(j, "agent"), sandbox: j.sbx!, onStart: s.onStart,
+    prompt: prompt(j, files, await j.ctx.q.answers(j.req.id)),
   });
-  s.end(res.outcome === "infra_error" ? 1 : 0);
+  await s.end(res.outcome === "infra_error" ? 1 : 0);
   if (res.outcome === "infra_error") return infra(`agent: ${res.detail}`);
   if (res.outcome === "needs_info") return { status: "needs_info", reason: res.question };
   return null;
@@ -476,11 +412,10 @@ const OFFICE_XML: Record<string, string> = {
   [DOCX]: "word/document.xml", [XLSX]: "xl/sharedStrings.xml and xl/worksheets/", [PPTX]: "ppt/slides/",
 };
 
-function prompt(j: Job, files: RunFile[]): string {
+function prompt(j: Job, files: RunFile[], answered: string[]): string {
   const { req } = j;
   const scopes = j.parts.map((p) => p.recipe.scope_path);
-  const answers = (j.ctx.db.query("SELECT payload FROM events WHERE request_id = ? AND type = 'answer' ORDER BY id").all(req.id) as { payload: string }[])
-    .map((r) => `- ${(JSON.parse(r.payload) as { text: string }).text}`);
+  const answers = answered.map((text) => `- ${text}`);
   const parts = [
     `You are working on request #${req.id}. Change files only under ${scopes.join(", ")}. If the request needs a change`,
     "anywhere else in the repository (a test in another project, an API the code calls), change nothing and reply with a",
@@ -508,8 +443,8 @@ function prompt(j: Job, files: RunFile[]): string {
 
 // Records push_started before pushing. Only the remote's state decides the outcome, never the exit code (D19).
 async function push(j: Job, sha: string): Promise<"pushed" | "rejected" | "unknown"> {
-  const setState = (state: PushState) => w(j.ctx, () => j.ctx.db.query("UPDATE runs SET push_state = ?, commit_sha = ? WHERE id = ?").run(state, sha, j.runId));
-  setState("push_started");
+  const setState = (state: PushState) => j.ctx.q.setRun(j.runId, { push_state: state, commit_sha: sha });
+  await setState("push_started");
   await g.push(j.repo, j.wt, j.remote, sha, j.branch);
   for (const wait of [0, ...(j.ctx.pushBackoffMs ?? DEFAULT_BACKOFF_MS)]) {
     if (wait) await Bun.sleep(wait);
@@ -517,10 +452,10 @@ async function push(j: Job, sha: string): Promise<"pushed" | "rejected" | "unkno
     if (live === null) continue;
     // Someone may have pushed on top of the commit already; it still counts as pushed.
     const pushed = live === sha || ((await g.fetch(j.repo, j.remote)).code === 0 && await g.isAncestor(j.repo, sha, `${j.remote}/${j.branch}`));
-    setState(pushed ? "pushed" : "not_pushed");
+    await setState(pushed ? "pushed" : "not_pushed");
     return pushed ? "pushed" : "rejected";
   }
-  setState("push_unknown");
+  await setState("push_unknown");
   return "unknown";
 }
 
@@ -641,20 +576,14 @@ export function parseVersion(text: string): { short: string; uncommitted: boolea
 }
 
 // Records a step row and the step's process group while it runs (D17).
-function begin(j: Job, name: string) {
-  const { db } = j.ctx;
+async function begin(j: Job, name: string) {
+  const { q } = j.ctx;
   const logPath = join(j.dir, `${++j.n}-${name}.log`);
-  const stepId = w(j.ctx, () => {
-    db.query("UPDATE runs SET current_step = ? WHERE id = ?").run(name, j.runId);
-    return db.query("INSERT INTO steps (run_id, step, started_at, log_path) VALUES (?, ?, ?, ?)").run(j.runId, name, Date.now(), logPath).lastInsertRowid;
-  });
+  const stepId = await q.beginStep(j.runId, name, logPath);
   return {
     logPath,
-    onStart: (pgid: number) => w(j.ctx, () => db.query("UPDATE runs SET pgid = ? WHERE id = ?").run(pgid, j.runId)),
-    end: (exitCode: number) => w(j.ctx, () => {
-      db.query("UPDATE steps SET ended_at = ?, exit_code = ? WHERE id = ?").run(Date.now(), exitCode, stepId);
-      db.query("UPDATE runs SET pgid = NULL WHERE id = ?").run(j.runId);
-    }),
+    onStart: (pgid: number) => q.setPgid(j.runId, pgid),
+    end: (exitCode: number) => q.endStep(j.runId, stepId, exitCode),
   };
 }
 
@@ -665,12 +594,12 @@ function longest(j: Job, step: StepName): number {
 
 // `recipe`: the project whose command this is, for its timeout; default the longest of the request's.
 async function command(j: Job, name: string, cmd: string, o: { sandboxed?: boolean; cwd?: string; timeout?: StepName; recipe?: Recipe }): Promise<StepResult & { logPath: string }> {
-  const s = begin(j, name);
+  const s = await begin(j, name);
   const step = o.timeout ?? (name as StepName);
   const r = await runStep(cmd, {
     cwd: o.cwd ?? j.wt, logPath: s.logPath, timeoutMs: o.recipe ? timeoutMs(o.recipe, step) : longest(j, step),
     wrap: o.sandboxed ? j.sbx!.wrap : undefined, env: o.sandboxed ? j.sbx!.env : undefined, onStart: s.onStart,
   });
-  s.end(r.exitCode);
+  await s.end(r.exitCode);
   return { ...r, logPath: s.logPath };
 }

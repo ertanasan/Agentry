@@ -180,5 +180,5 @@ Done. Agentry runs from $app; its data is in $home_dir.
 Next:
   1. Check the sandbox and the UI:   $script --self-test
   2. Register each project:          agentry project add <name> <recipe.json>   (see recipes/)"
-(( users > 0 )) || print "  3. Create your account:            agentry user add <name> --owner   (or run this again with --owner <name>)"
+(( users > 0 )) || print "  3. Create your account:            agentry user add <name>   (or run this again with --owner <name>)"
 print "  Open the web UI at ${public_url:-http://localhost:$port}. To update Agentry: git pull here, then run this again."

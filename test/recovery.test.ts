@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { acquireLease, LEASE_TTL_MS, openDb, type PushState } from "../src/db.ts";
 import * as g from "../src/git.ts";
 import { groupAlive, killGroup } from "../src/proc.ts";
+import { localQueue } from "../src/queue.ts";
 import { recover, resolvePushUnknown } from "../src/recovery.ts";
 import type { Recipe } from "../src/recipe.ts";
 import { head, makeFixture } from "./fixture.ts";
@@ -23,7 +24,7 @@ function setup() {
   db.query("INSERT INTO projects (name, repo_id, deploy_group_id, recipe) VALUES ('p', 1, 1, ?)").run(JSON.stringify(recipe));
   const id = Number(db.query("INSERT INTO requests (project_id, title, status, created_at, updated_at) VALUES (1, 'Change main', 'running', 0, 0)").run().lastInsertRowid);
   const initial = head(fx.repo);
-  const ctx = { db, token: "new", home };
+  const ctx = { q: localQueue(db, "new", home), home };
   return {
     fx, db, dbPath, home, ctx, id, initial,
     // A run left behind by runner "old", whose lease has expired.

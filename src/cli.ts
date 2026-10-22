@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // agentry: the slice-1 command line (eng review D3). It reads and writes SQLite (WAL) directly; there is no API.
 // State actions follow the design's table and refuse a request that is not in the state they act on.
-// `run` is the only executor: it takes the lease (a second runner refuses), runs startup recovery, then works
+// `run` is the only executor: it takes the lease (waiting while another runner holds it; with --once it
+// refuses), runs startup recovery, then works
 // the queue with up to the settings page's worker count of requests at once, retrying unknown pushes now and
 // then (D19). A runner that loses its lease exits with code 3 (D17).
 //
@@ -10,16 +11,19 @@
 import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import * as A from "./actions.ts";
 import { claudeAgent, resolveAuth } from "./adapters/claude.ts";
-import { acquireLease, asActor, LeaseLost, openDb, releaseLease, runnerRow, startHeartbeat } from "./db.ts";
+import { asActor, LeaseLost, openDb, runnerRow } from "./db.ts";
 import { addUser, AuthError, removeUser, resetUser } from "./accounts.ts";
 import { backupIfDue, runBackup } from "./backup.ts";
 import { DEFAULT_PORT, startServer } from "./server.ts";
 import { parseRecipe } from "./recipe.ts";
-import { recover, resolvePushUnknown, unresolvedPushes } from "./recovery.ts";
+import { localQueue, startHeartbeat, Unreachable, type Queue } from "./queue.ts";
+import { addRunnerKey, readAttached, remoteQueue, removeRunnerKey, workDir } from "./remote.ts";
+import { recover, resolvePushUnknown } from "./recovery.ts";
 import { startNext, type RunnerCtx, type RunOutcome } from "./runner.ts";
 import { AGENTRY_HOME } from "./sandbox.ts";
 import { claudeVerifier } from "./verifier.ts";
@@ -42,10 +46,14 @@ const USAGE = `usage: agentry <command>
   resume                             unpause the runner
   token                              save a \`claude setup-token\` token for subscription auth (paste, then Ctrl-D)
   serve                              the web UI on 127.0.0.1:$AGENTRY_PORT (default 4747), with nightly backups
-  user add <name> [--owner]          create a web UI account; prints a one-time passkey link (30 min)
+  user add <name> [--admin]          create a web UI account, an owner (--admin: one that can't change settings);
+                                     prints a one-time passkey link (30 min)
   user reset <name>                  revoke a user's passkeys and sessions; prints a new link
   user remove <name>                 delete a web UI account with its passkeys and sessions
   backup                            back up the database and agentry/* branches now
+  runner-key add <name> | remove <name>   a key for a runner on another machine to work this queue (printed once)
+  attach <url>                       this machine's runner works the queue at <url> instead (paste its runner key)
+  detach                             this machine's runner works its own queue again
 
 Environment: AGENTRY_HOME (default ~/.agentry), AGENTRY_PUBLIC_URL (e.g. https://agentry.example.com; default
 http://localhost:<port>), AGENTRY_PORT, AGENTRY_BACKUP_DIR (default $AGENTRY_HOME/backups), AGENTRY_CLAUDE_BIN, AGENTRY_MODEL.`;
@@ -61,7 +69,7 @@ function main(argv: string[]): Promise<number> | number {
     options: {
       body: { type: "string" }, "done-when": { type: "string" }, "done-when-test": { type: "string" },
       priority: { type: "string" }, once: { type: "boolean" }, all: { type: "boolean" }, help: { type: "boolean", short: "h" },
-      owner: { type: "boolean" },
+      owner: { type: "boolean" }, admin: { type: "boolean" },
     },
   });
   if (!cmd || o.help) { console.log(USAGE); return cmd ? 0 : 1; }
@@ -96,8 +104,11 @@ function main(argv: string[]): Promise<number> | number {
     }
     case "unblock": A.unblock(db, args[0] ?? fail("unblock needs a group name")); return 0;
     case "token": return saveToken();
+    case "attach": return attach(db, args[0]);
+    case "detach": return detach();
+    case "runner-key": return runnerKey(db, args);
     case "serve": return serve(db);
-    case "user": return userCmd(db, args, !!o.owner);
+    case "user": return userCmd(db, args, o.owner && o.admin ? fail("give --owner or --admin, not both") : !o.admin);
     case "backup": return backupNow(db);
     case "resume": A.resume(db); return 0;
     default: return fail(`unknown command "${cmd}"\n${USAGE}`);
@@ -142,6 +153,8 @@ function list(db: Database, all: boolean): number {
     console.log(`#${String(r.id).padEnd(4)} ${r.status.padEnd(18)} ${r.project.padEnd(14)} ${r.title}${r.status_reason ? `  (${r.status_reason})` : ""}`);
   }
   if (!rows.length) console.log(all ? "no requests" : "nothing open (--all shows finished ones)");
+  const attached = readAttached(home);
+  if (attached) console.log(`this machine's runner works the queue at ${attached.url}, not this one (agentry detach)`);
   const runner = runnerRow(db);
   if (runner.paused) console.log(`runner paused: ${runner.pause_reason}  (agentry resume)`);
   const groups = db.query("SELECT name, lock_reason, locked_by_request FROM deploy_groups WHERE lock = 'blocked'").all() as
@@ -169,45 +182,81 @@ function claudeBin(): string {
   return realpathSync(bin);
 }
 
-// Takes the lease for this process, or refuses because another runner holds it.
-function lease(db: Database, ctxFor: (token: string) => RunnerCtx): RunnerCtx {
-  const token = randomUUID();
-  if (!acquireLease(db, token, process.pid)) {
-    const r = runnerRow(db);
-    fail(`another runner holds the lease (pid ${r.owner_pid}, until ${new Date(r.lease_expires_at).toLocaleTimeString()})`);
+// Takes the lease for this process. While another runner holds it, `once` refuses and otherwise this waits.
+// An attached queue that can't be reached is waited for the same way. False: `stale` turned true while waiting.
+async function lease(q: Queue, once: boolean, stale: () => boolean): Promise<boolean> {
+  for (let said = ""; ; ) {
+    if (stale()) return false;
+    let why: string;
+    try {
+      const r = await q.acquire(process.pid, hostname());
+      if (!r) return true;
+      why = `another runner holds the lease (pid ${r.pid}${r.host ? ` on ${r.host}` : ""}, until ${new Date(r.until).toLocaleTimeString()})`;
+    } catch (e) {
+      if (!(e instanceof Unreachable)) throw e;
+      why = e.message;
+    }
+    if (once) fail(why);
+    if (why.split(" (")[0] !== said) console.log(`${why}; waiting`);
+    said = why.split(" (")[0];
+    await Bun.sleep(POLL_MS);
   }
-  return ctxFor(token);
 }
 
-function makeCtx(db: Database, token: string): RunnerCtx {
+// `work` holds the worktrees and runs: this machine's home, or an attached queue's folder in it.
+function makeCtx(q: Queue, work: string): RunnerCtx {
   const bin = claudeBin();
   const keyHelper = join(home, "api-key-helper");
   const auth = resolveAuth(join(home, "claude-oauth-token"), keyHelper);
   const model = process.env.AGENTRY_MODEL;
   return {
-    db, token, home, claudeBin: bin, keyHelper, running: new Set(),
+    q, home: work, claudeBin: bin, keyHelper, running: new Set(),
     agent: claudeAgent({ bin, auth, model }), verifier: claudeVerifier({ bin, auth, model }),
   };
 }
 
 // Holds the lease and heartbeat around `body`; a runner that loses its lease exits at once (D17).
-async function withLease(db: Database, body: (ctx: RunnerCtx) => Promise<void>): Promise<number> {
-  const ctx = lease(db, (t) => makeCtx(db, t));
-  const stop = startHeartbeat(db, ctx.token, () => [...ctx.running], () => { console.error("lease lost: another runner took over"); process.exit(3); });
+// "switch": the attach file changed, before the lease was taken or while `body` ran.
+async function withLease(q: Queue, once: boolean, work: string, stale: () => boolean,
+  body: (ctx: RunnerCtx) => Promise<"switch" | void>): Promise<number | "switch"> {
+  const ctx = makeCtx(q, work);
+  if (!(await lease(q, once, stale))) return "switch";
+  const stop = startHeartbeat(q, () => [...ctx.running], () => { console.error("lease lost: another runner took over"); process.exit(3); });
   try {
-    await body(ctx);
-    return 0;
+    return (await body(ctx)) ?? 0;
   } catch (e) {
     if (e instanceof LeaseLost) { console.error(e.message); return 3; }
     throw e;
   } finally {
     stop();
-    releaseLease(db, ctx.token);
+    await q.release();
   }
 }
 
-function run(db: Database, once: boolean): Promise<number> {
-  return withLease(db, async (ctx) => {
+// Works this machine's queue, or the one `agentry attach` named, with this machine's recipes for its projects.
+// An attach or detach while it runs: it finishes the requests in progress, then starts again on the other queue.
+async function run(db: Database, once: boolean): Promise<number> {
+  for (;;) {
+    const code = await runQueue(db, once);
+    if (code !== "switch") return code;
+  }
+}
+
+// The attach file as written, "" when there is none.
+function queueChoice(): string {
+  try { return readFileSync(join(home, "queue.json"), "utf8"); } catch { return ""; }
+}
+
+function runQueue(db: Database, once: boolean): Promise<number | "switch"> {
+  const token = randomUUID();
+  const chosen = queueChoice();
+  const stale = () => queueChoice() !== chosen;
+  const attached = readAttached(home);
+  const work = attached ? workDir(home, attached) : home;
+  mkdirSync(work, { recursive: true });
+  const q = attached ? remoteQueue({ ...attached, token, recipes: localRecipes(db), work }) : localQueue(db, token, home);
+  console.log(attached ? `working the queue at ${attached.url} (agentry detach: this machine's own)` : "working this machine's queue");
+  return withLease(q, once, work, stale, async (ctx) => {
     const rep = await recover(ctx);
     if (rep.killed.length) console.log(`recovery: killed leftover process groups ${rep.killed.join(", ")}`);
     for (const r of rep.interrupted) console.log(`recovery: #${r.requestId} was interrupted → ${r.status}`);
@@ -226,23 +275,48 @@ function run(db: Database, once: boolean): Promise<number> {
     let failure: unknown = null;
     // The requests in progress; each removes itself when its run ends.
     const active = new Set<Promise<void>>();
-    const report = (out: RunOutcome) => {
+    const report = async (out: RunOutcome) => {
       if (out.kind !== "ran") return;
-      const reason = (db.query("SELECT status_reason FROM requests WHERE id = ?").get(out.requestId) as { status_reason: string | null }).status_reason;
+      const reason = (await q.request(out.requestId).catch(() => null))?.status_reason;
       console.log(`#${out.requestId} → ${out.status}${reason ? `  (${reason})` : ""}`);
     };
+    let next: Awaited<ReturnType<typeof startNext>> = { kind: "idle" };
+    let switching = false;
     while (!stopping) {
+      if (stale()) {
+        switching = true;
+        console.log(`the attach file changed: switching queues${active.size ? " after the requests in progress" : ""}`);
+        break;
+      }
+      try {
+        next = await fill();
+      } catch (e) {
+        // An attached queue out of reach: the requests in progress carry on; new ones wait for it.
+        if (!(e instanceof Unreachable)) throw e;
+        console.error(e.message);
+        next = { kind: "idle" };
+      }
+      if (once && next.kind !== "started" && !active.size) break;
+      await Promise.race([Bun.sleep(POLL_MS), ...active]);
+    }
+    await Promise.all(active);
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+    if (failure) throw failure;
+    if (switching && !stopping) return "switch";
+
+    async function fill(): Promise<Awaited<ReturnType<typeof startNext>>> {
       if (Date.now() - lastResolve >= RESOLVE_EVERY_MS) {
         lastResolve = Date.now();
-        for (const runId of unresolvedPushes(db)) {
+        for (const runId of await q.unresolvedPushes()) {
           const res = await resolvePushUnknown(ctx, runId);
           if (res !== "unknown") console.log(`run ${runId}: push ${res}`);
         }
       }
       // Start requests until every worker is busy; read each time, so a change on the settings page applies at once.
-      let next: ReturnType<typeof startNext> = { kind: "idle" };
-      while (active.size < runnerRow(db).workers) {
-        next = startNext(ctx);
+      let next: Awaited<ReturnType<typeof startNext>> = { kind: "idle" };
+      while (active.size < (await q.settings()).workers) {
+        next = await startNext(ctx);
         if (next.kind !== "started") break;
         saidPaused = false;
         console.log(`#${next.requestId} started`);
@@ -250,13 +324,62 @@ function run(db: Database, once: boolean): Promise<number> {
           .finally(() => active.delete(job));
         active.add(job);
       }
-      if (next.kind === "paused" && !saidPaused) { console.log(`runner paused: ${runnerRow(db).pause_reason}  (agentry resume)`); saidPaused = true; }
-      if (once && next.kind !== "started" && !active.size) break;
-      await Promise.race([Bun.sleep(POLL_MS), ...active]);
+      if (next.kind === "paused" && !saidPaused) { console.log(`runner paused: ${(await q.settings()).pause_reason}  (agentry resume)`); saidPaused = true; }
+      return next;
     }
-    await Promise.all(active);
-    if (failure) throw failure;
   });
+}
+
+// This machine's recipes by project name, for the projects of an attached queue.
+function localRecipes(db: Database): Map<string, string> {
+  return new Map((db.query("SELECT name, recipe FROM projects").all() as { name: string; recipe: string }[]).map((p) => [p.name, p.recipe]));
+}
+
+// Saves the queue this machine's runner works instead of its own, with a runner key from that queue's owner
+// (pasted on stdin), once the key works there. A running runner switches once its requests in progress finish.
+async function attach(db: Database, url: string | undefined): Promise<number> {
+  if (!url || !/^https?:\/\//.test(url)) fail("usage: agentry attach <the queue owner's URL, e.g. https://agentry.example.com>");
+  if (process.stdin.isTTY) console.log("Paste the runner key (agentry runner-key add, on the queue's owner), then press Enter and Ctrl-D:");
+  const key = (await Bun.stdin.text()).trim();
+  if (!/^agentry_rk_[A-Za-z0-9_-]+$/.test(key)) fail("that is not a runner key (agentry_rk_…); nothing saved");
+  const attached = { url: url!.replace(/\/+$/, ""), key };
+  const q = remoteQueue({ ...attached, token: randomUUID(), recipes: localRecipes(db), work: workDir(home, attached) });
+  try {
+    await q.settings();
+  } catch (e) {
+    fail(`${attached.url} refused: ${e instanceof Error ? e.message : String(e)}; nothing saved`);
+  }
+  const mine = (await q.projects()).map((p) => p.name);
+  const file = join(home, "queue.json");
+  rmSync(file, { force: true });
+  writeFileSync(file, JSON.stringify(attached) + "\n", { mode: 0o600 });
+  console.log(`This machine's runner now works the queue at ${attached.url}; a running one switches once its requests in progress finish.`);
+  console.log(mine.length ? `It takes requests for ${mine.join(", ")}: the projects of that queue with a recipe here.`
+    : "None of that queue's projects has a recipe here yet (agentry project add, same name), so it takes no requests.");
+  return 0;
+}
+
+function detach(): number {
+  const a = readAttached(home);
+  if (!a) fail("this machine's runner works its own queue already");
+  rmSync(join(home, "queue.json"));
+  console.log(`This machine's runner works its own queue again (was ${a!.url}); a running one switches once its requests in progress finish.`);
+  return 0;
+}
+
+function runnerKey(db: Database, args: string[]): number {
+  const [sub, name] = args;
+  if (!name || !["add", "remove"].includes(sub)) fail("usage: agentry runner-key add <name> | agentry runner-key remove <name>");
+  if (sub === "remove") {
+    if (!removeRunnerKey(db, name)) fail(`no runner key named ${name}`);
+    console.log(`removed runner key ${name}`);
+    return 0;
+  }
+  let key = "";
+  try { key = addRunnerKey(db, name); } catch (e) { fail(e instanceof Error ? e.message : String(e)); }
+  console.log(`Runner key ${name} (shown once). On the machine whose runner should work this queue, run\n` +
+    `  agentry attach ${publicUrl()}\nand paste:\n${key}`);
+  return 0;
 }
 
 const port = Number(process.env.AGENTRY_PORT) || DEFAULT_PORT;
@@ -286,7 +409,7 @@ async function serve(db: Database): Promise<number> {
 function userCmd(db: Database, args: string[], owner: boolean): number {
   const [sub, name] = args;
   if (!name || !["add", "reset", "remove"].includes(sub)) {
-    fail("usage: agentry user add <name> [--owner] | agentry user reset <name> | agentry user remove <name>");
+    fail("usage: agentry user add <name> [--admin] | agentry user reset <name> | agentry user remove <name>");
   }
   try {
     if (sub === "remove") {

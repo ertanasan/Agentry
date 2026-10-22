@@ -42,6 +42,7 @@ next action. Nothing reaches production on a guess.
 - [How a request flows](#how-a-request-flows)
 - [Multi-project and multi-repository delivery](#multi-project-and-multi-repository-delivery)
 - [Queue, leases and deploy-group locks](#queue-leases-and-deploy-group-locks)
+- [One queue across machines](#one-queue-across-machines)
 - [Automated deployment](#automated-deployment)
 - [Security model](#security-model)
 - [Fail-safe controls](#fail-safe-controls)
@@ -187,8 +188,8 @@ Agentry is built so that two processes can never act on the same request or the 
 ### The runner lease
 
 - **One runner at a time.** `agentry run` takes a database lease: a random token with a 60-second TTL, renewed
-  every 15 seconds by a heartbeat. A second runner refuses to start while the lease is live and names the pid
-  that holds it.
+  every 15 seconds by a heartbeat. A second runner waits while the lease is live, and names the pid and machine
+  that hold it (`run --once` refuses instead).
 - **Several requests at once.** The runner works on up to **Workers** requests at a time, set on the
   [settings page](#the-web-ui) (default 1). The agent, build, tests and verifier of different requests run side
   by side, each in its own worktree. A change to the count applies before the next request starts.
@@ -225,6 +226,49 @@ Busy and unknown both stop the deploy. Agentry never starts an install on top of
 
 Requests run by priority (`--priority N`), then oldest first. A queued **Re-run deploy** always goes before new
 work, because its group stays blocked until it's handled.
+
+## One queue across machines
+
+Each machine runs its own Agentry by default: its own database, settings, web UI and runner. You can also point
+one machine's runner at another machine's queue, for example a Mac runner working the queue of an always-on
+Windows server, so one web UI covers both. The attached machine's own database, settings and UI are left as they
+are, and they come back when you detach.
+
+On the queue's owner (say `winhost`):
+
+```sh
+agentry runner-key add machost      # prints the key once
+```
+
+On the machine whose runner should work that queue (say `machost`):
+
+```sh
+agentry project add web recipe.json # this machine's recipe for each project, under the owner's project name
+agentry attach https://winhost.example.ts.net   # paste the key; the runner switches by itself
+agentry detach                                  # later: back to this machine's own queue
+```
+
+How it works:
+
+- **The owner's queue and settings apply.** The attached runner takes the owner's single lease, so the owner's
+  own runner waits while it's attached. Workers, pause and project enable come from the owner's settings page,
+  and the request states, step logs and diffs show up in the owner's web UI ("Runner online on machost").
+- **The runner's own recipes.** A recipe holds a machine's paths and commands, so the attached runner uses its own
+  recipe for each project, matched by name. It only takes requests whose projects all have a recipe on its
+  machine; the rest wait for a runner that has them.
+- **Everything else stays on the runner's machine:** worktrees, full logs (the owner gets each step's last 64 KB,
+  sent on every heartbeat), the sandbox, the Claude token, and the processes it starts. Its files go under
+  `$AGENTRY_HOME/queues/<owner host>/`, apart from its own queue's.
+- **The same safety rules.** Every call carries the lease token and every write is fenced, exactly as for a
+  local runner. Calls that are safe to repeat are retried for about 15 seconds when the owner is out of reach,
+  and the heartbeat tolerates three missed beats. If the runner crashes, its next start kills the processes it
+  left behind and recovers its runs. An attached runner leaves alone the runs the owner's own runner left with
+  processes still recorded, since only that runner can kill them. The owner's runner can't stop processes on the
+  attached machine either.
+- **Turn the owner's runner off while another machine is attached.** Otherwise, whenever the attached runner is
+  away for more than a minute (a sleeping laptop), the owner's runner takes the lease, recovers the attached
+  runner's runs while their processes may still be running over there, and works the queue with the owner's
+  recipes.
 
 ## Automated deployment
 
@@ -338,6 +382,10 @@ executes code at build time needs a person's approval**: `*.csproj`, `*.props`, 
   `X-Frame-Options: DENY` and `nosniff`.
 - **Output escaping by default.** Every value on a page is HTML-escaped unless it's explicitly markup. Request
   text, logs and diffs, all written by people or agents, never become markup.
+- **Runner keys.** A runner on another machine calls `/api/runner/*` with a key from `agentry runner-key add`,
+  stored as a SHA-256 hash. The key reaches only the queue methods a runner uses (no accounts, no settings),
+  and every write it makes is fenced by its lease. It can still change any request's state and read its files:
+  keep it as you would an owner's credentials, and `agentry runner-key remove` it when a machine leaves.
 - **One code path for state.** The web UI and the CLI call the same state actions, so a state rule lives in one
   place, and each action records its actor (`user:<name>` or `cli`) in the audit log.
 
@@ -568,7 +616,9 @@ agentry token                          # then: Start-ScheduledTask 'Agentry runn
 ```
 
 Run setup again to update Agentry or change its options. `-Uninstall` removes the startup tasks and takes
-`agentry` off `PATH`; the accounts and `C:\Agentry` stay.
+`agentry` off `PATH`; the accounts and `C:\Agentry` stay. To start from scratch, `-Uninstall -Purge -SqlInstances
+'.\SQLEXPRESS'` also removes the two accounts with their profiles, the sandbox's SQL Server logins and `C:\Agentry`,
+keeping a copy of the database and its backups in `C:\Agentry-backup-<date>`.
 
 Recipe commands run in Windows PowerShell 5.1, which has no `&&`: use `;` and
 `if ($LASTEXITCODE) { exit $LASTEXITCODE }`.
@@ -642,10 +692,13 @@ agentry unblock <group>               clear a deploy-group lock no request holds
 agentry resume                        unpause the runner
 agentry token                         save a `claude setup-token` token (paste, then Ctrl-D)
 agentry serve                         the web UI, with nightly backups
-agentry user add <name> [--owner]     create a web UI account; prints a one-time passkey link
+agentry user add <name> [--admin]     create a web UI account, an owner unless --admin; prints a one-time passkey link
 agentry user reset <name>             revoke a user's passkeys and sessions; prints a new link
 agentry user remove <name>            delete a web UI account with its passkeys and sessions (not the last owner)
 agentry backup                        back up now
+agentry runner-key add <name> | remove <name>   a key for another machine's runner to work this queue
+agentry attach <url>                  this machine's runner works the queue at <url> (paste its runner key)
+agentry detach                        this machine's runner works its own queue again
 ```
 
 ## Configuration
@@ -683,6 +736,8 @@ stay. Every backup, and every failure, is an audit event, and the UI warns when 
 ```
 src/
   cli.ts            command line, runner worker pool, lease + heartbeat
+  queue.ts          every read and write the runner makes, on this machine's database
+  remote.ts         the same queue over HTTP: the owner's /api/runner/* and the attached runner's client
   runner.ts         the pipeline: worktree → agent → gates → push → deploy → confirm; deploy groups take turns
   inspect.ts        diff gates (scope, build files, gate paths, deleted/skipped tests)
   verifier.ts       the done-when verifier
@@ -734,7 +789,7 @@ bun run eval:verifier # the done-when verifier against 10 labeled cases, with th
 | Web UI with passkeys | ✅ Available, with owner-only settings behind a passkey step-up |
 | Parallel workers | ✅ Available: up to 8 requests at once per instance. On Windows they share one sandbox user (see [Known limits](#known-limits)). |
 | Windows runner | ✅ Available: a standalone instance set up by [`setup/windows-setup.ps1`](setup/windows-setup.ps1). Steps run as a low-privilege user in job objects. |
-| One queue across machines | Planned: a runner on another machine claiming work from one server. Today each machine runs its own instance. |
+| One queue across machines | ✅ Available: `agentry attach` points a machine's runner at another machine's queue (see [One queue across machines](#one-queue-across-machines)). One runner per queue at a time. |
 
 ## License
 

@@ -3,6 +3,7 @@
 // A runner owns the lease through a random token. Every state change it makes goes through `fenced`, which
 // refuses the write if another runner has taken the lease since (eng review D7, D17).
 import { Database } from "bun:sqlite";
+import { hostname } from "node:os";
 
 export const LEASE_TTL_MS = 60_000;
 export const HEARTBEAT_MS = 15_000;
@@ -118,6 +119,10 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE runner ADD COLUMN workers INTEGER NOT NULL DEFAULT 1",
   // 6: when a session's passkey was last checked (sign-in, registration, or a step-up before a settings change).
   "ALTER TABLE sessions ADD COLUMN verified_at INTEGER",
+  // 7: the machine of the runner that holds the lease, and the keys of runners on other machines that work this
+  // queue over HTTP (remote.ts).
+  `ALTER TABLE runner ADD COLUMN owner_host TEXT;
+   CREATE TABLE runner_keys (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, key_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);`,
 ];
 
 export function openDb(path: string): Database {
@@ -142,18 +147,19 @@ function migrate(db: Database): void {
 }
 
 type RunnerRow = {
-  owner_token: string | null; owner_pid: number | null; lease_expires_at: number; paused: number; pause_reason: string | null; workers: number;
+  owner_token: string | null; owner_pid: number | null; owner_host: string | null; lease_expires_at: number; paused: number;
+  pause_reason: string | null; workers: number;
 };
 
 export function runnerRow(db: Database): RunnerRow {
-  return db.query("SELECT owner_token, owner_pid, lease_expires_at, paused, pause_reason, workers FROM runner WHERE id = 1").get() as RunnerRow;
+  return db.query("SELECT owner_token, owner_pid, owner_host, lease_expires_at, paused, pause_reason, workers FROM runner WHERE id = 1").get() as RunnerRow;
 }
 
 // Takes the runner lease if it is free or expired. Returns false while another runner's lease is live.
-export function acquireLease(db: Database, token: string, pid: number, now = Date.now()): boolean {
+export function acquireLease(db: Database, token: string, pid: number, now = Date.now(), host = hostname()): boolean {
   const res = db.query(
-    "UPDATE runner SET owner_token = ?, owner_pid = ?, lease_expires_at = ? WHERE id = 1 AND (owner_token IS NULL OR lease_expires_at < ? OR owner_token = ?)",
-  ).run(token, pid, now + LEASE_TTL_MS, now, token);
+    "UPDATE runner SET owner_token = ?, owner_pid = ?, owner_host = ?, lease_expires_at = ? WHERE id = 1 AND (owner_token IS NULL OR lease_expires_at < ? OR owner_token = ?)",
+  ).run(token, pid, host, now + LEASE_TTL_MS, now, token);
   return res.changes === 1;
 }
 
@@ -166,7 +172,7 @@ export function renewLease(db: Database, token: string, runIds: number[], now = 
 }
 
 export function releaseLease(db: Database, token: string): void {
-  db.query("UPDATE runner SET owner_token = NULL, owner_pid = NULL, lease_expires_at = 0 WHERE id = 1 AND owner_token = ?").run(token);
+  db.query("UPDATE runner SET owner_token = NULL, owner_pid = NULL, owner_host = NULL, lease_expires_at = 0 WHERE id = 1 AND owner_token = ?").run(token);
 }
 
 // Runs `write` in one transaction, only if `token` still owns the runner lease.
@@ -196,17 +202,4 @@ export function logEvent(db: Database, requestId: number | null, type: string, p
 export function setRequestStatus(db: Database, id: number, status: RequestStatus, reason: string | null = null, now = Date.now()): void {
   db.query("UPDATE requests SET status = ?, status_reason = ?, updated_at = ? WHERE id = ?").run(status, reason, now, id);
   logEvent(db, id, "status", { status, reason }, now);
-}
-
-// Starts a heartbeat that keeps the leases alive for as long as the runner process is alive (D7).
-// `onLost` fires once if a renewal finds that another runner has taken over.
-export function startHeartbeat(db: Database, token: string, currentRuns: () => number[], onLost: () => void): () => void {
-  const timer = setInterval(() => {
-    try { renewLease(db, token, currentRuns()); }
-    catch (e) {
-      if (e instanceof LeaseLost) { clearInterval(timer); onLost(); }
-      else throw e;
-    }
-  }, HEARTBEAT_MS);
-  return () => clearInterval(timer);
 }
