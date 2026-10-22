@@ -53,6 +53,36 @@ describe("backup", () => {
     expect(git(h.fx.root, ["bundle", "list-heads", r.bundles[0]]).out).toContain("refs/heads/agentry/7-1");
   });
 
+  test("a bundle holds only what origin lacks, and restores into a fresh clone", async () => {
+    const h = setup();
+    for (let i = 0; i < 20; i++) { h.fx.write(`history/${i}.txt`, "x".repeat(10_000) + i); h.fx.commit(`history ${i}`); }
+    git(h.fx.repo, ["push", "--quiet", "origin", "main"]);
+    git(h.fx.repo, ["checkout", "--quiet", "-b", "agentry/8-1"]);
+    h.fx.write("wip.txt", "candidate\n");
+    const candidate = h.fx.commit("candidate");
+    const r = await runBackup(h.db, h.home, h.dir);
+    if (!r.ok) throw new Error(r.error);
+    const verify = git(h.fx.repo, ["bundle", "verify", r.bundles[0]]);
+    expect(verify.code).toBe(0);
+    expect(verify.out + verify.err).toContain("requires this ref"); // origin's main, not the whole history
+    expect(git(h.fx.repo, ["bundle", "list-heads", r.bundles[0]]).out).toContain(`${candidate} refs/heads/agentry/8-1`);
+
+    const clone = join(h.fx.root, "restore");
+    git(h.fx.root, ["clone", "--quiet", h.fx.origin, clone]);
+    expect(git(clone, ["fetch", "--quiet", r.bundles[0], "refs/heads/agentry/*:refs/heads/agentry/*"]).code).toBe(0);
+    expect(git(clone, ["show", "agentry/8-1:wip.txt"]).out).toBe("candidate");
+  });
+
+  test("agentry branches already on origin need no bundle", async () => {
+    const h = setup();
+    git(h.fx.repo, ["checkout", "--quiet", "-b", "agentry/9-1"]);
+    h.fx.write("done.txt", "pushed\n");
+    h.fx.commit("pushed");
+    git(h.fx.repo, ["push", "--quiet", "origin", "agentry/9-1"]);
+    const r = await runBackup(h.db, h.home, h.dir);
+    expect(r).toMatchObject({ ok: true, bundles: [] });
+  });
+
   test("copies the attached images, adding new ones on later days", async () => {
     const h = setup();
     const png = (n: number) => ({ name: `s${n}.png`, bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, n]) });

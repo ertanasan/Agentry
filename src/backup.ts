@@ -1,6 +1,8 @@
 // Nightly backup (winhost design "Backups", review D11/D17): a consistent copy of the database with SQLite's
 // VACUUM INTO (safe while the runner writes), plus a git bundle of each repository's agentry/* branches, since
-// requests waiting for review or retry live only there, and a copy of the attached files. Keeps the 14 newest days. The same job deletes run
+// requests waiting for review or retry live only there. A bundle holds only the commits origin doesn't have, so
+// it stays small; restoring it needs a clone of the repository (`git fetch <bundle> 'refs/heads/agentry/*:refs/heads/agentry/*'`).
+// And a copy of the attached files. Keeps the 14 newest days. The same job deletes run
 // logs older than 90 days. Every backup, or its failure, is an audit event; the UI warns after 48 hours.
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -44,7 +46,9 @@ export async function runBackup(db: Database, home: string, dir: string, now = D
       const tag = createHash("sha256").update(repo).digest("hex").slice(0, 8);
       const bundle = join(dir, `agentry-${stamp}-${basename(repo)}-${tag}.bundle`);
       rmSync(bundle, { force: true });
-      const r = await g.run(repo, ["bundle", "create", bundle, ...refs.out.split("\n")]);
+      // Only what the remotes lack: the whole history would make each night's bundle the size of the repository.
+      const r = await g.run(repo, ["bundle", "create", bundle, ...refs.out.split("\n"), "--not", "--remotes"]);
+      if (r.code !== 0 && /empty bundle/i.test(r.err)) continue; // every agentry branch is already on a remote
       if (r.code !== 0) throw new Error(`git bundle for ${repo} failed: ${r.err}`);
       bundles.push(bundle);
     }

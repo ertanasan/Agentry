@@ -740,7 +740,9 @@ need a manual step.
 
 - A **consistent copy of the database** made with SQLite `VACUUM INTO`, safe while the runner writes.
 - A **git bundle of every `agentry/*` branch** in each repository, because requests waiting for review or a retry
-  exist only on those branches.
+  exist only on those branches. It holds only the commits origin doesn't have, so it stays small (none at all when
+  every branch is pushed). To restore, fetch it into a clone of the repository:
+  `git fetch <bundle> 'refs/heads/agentry/*:refs/heads/agentry/*'`.
 - A copy of all **attached files**.
 
 The 14 newest days are kept. Run logs older than 90 days are deleted, while their run records and summaries
