@@ -69,6 +69,7 @@ export type GroupLock = { name: string; lock_reason: string | null };
 export type HomeData = {
   projects: Project[]; needs: ReqRow[]; queue: ReqRow[]; recent: ReqRow[]; groupLocks: GroupLock[];
   paused: string | null; runnerAlive: boolean; runnerHost: string | null; backupAgeMs: number | null; backupStale: boolean;
+  attachedTo: string | null;  // the queue this machine's runner works instead of this one (agentry attach)
 };
 
 const ago = (ms: number) => ms < 3600_000 ? `${Math.max(1, Math.round(ms / 60_000))} min ago` : ms < 86400_000 ? `${Math.round(ms / 3600_000)} h ago` : `${Math.round(ms / 86400_000)} d ago`;
@@ -130,12 +131,18 @@ export function homePage(d: HomeData, user: User, flash?: string): string {
     ...(d.backupStale ? [html`<div class="card warn">No backup for ${d.backupAgeMs === null ? "ever" : ago(d.backupAgeMs)}.</div>`] : []),
     ...d.needs.map(needsCard),
   ];
+  // The attached queue's machine by the first label of its host name, linked to its UI.
+  const attached = d.attachedTo && html`<a href="${d.attachedTo}">${new URL(d.attachedTo).hostname.split(".")[0]}</a>`;
   return page("Home", html`
 ${flash ? html`<div class="card bad">${flash}</div>` : ""}
-<div class="muted">${d.runnerAlive ? `Runner online${d.runnerHost ? ` on ${d.runnerHost}` : ""}` : html`<span class="warn">Runner offline</span>`} ·
+<div class="muted">${d.runnerAlive ? `Runner online${d.runnerHost ? ` on ${d.runnerHost}` : ""}`
+  : attached ? html`Runner attached to ${attached}'s queue`
+  : html`<span class="warn">Runner offline</span>`} ·
   ${d.queue.length} in queue · backup ${d.backupAgeMs === null ? "never" : ago(d.backupAgeMs)}</div>
 
 <h2>New request</h2>
+${attached ? html`<div class="card">File requests on ${attached}: this machine's runner works that queue.
+  <code>agentry detach</code> brings back this machine's own.</div>` : html`
 <form method="post" action="/requests" class="card" enctype="multipart/form-data">
   <details class="combo"><summary>Projects: <span data-picked>choose one or more</span></summary>
     ${d.projects.map((p) => html`<label><input type="checkbox" name="project" value="${p.name}">${p.name}</label>`)}</details>
@@ -145,7 +152,7 @@ ${flash ? html`<div class="card bad">${flash}</div>` : ""}
   <div class="row"><input type="text" name="done_when_test" placeholder="Done-when test name (optional)"></div>
   ${filePicker}
   <div class="row"><button class="primary">Queue it</button></div>
-</form>
+</form>`}
 
 <h2>Needs you (${needsYou.length})</h2>
 ${needsYou.length ? needsYou : html`<div class="muted">Nothing.</div>`}

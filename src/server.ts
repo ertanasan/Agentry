@@ -23,7 +23,7 @@ import * as g from "./git.ts";
 import { suggestedWorkers } from "./platform.ts";
 import { readTail } from "./proc.ts";
 import { parseRecipe } from "./recipe.ts";
-import { runnerApi, storedDiff } from "./remote.ts";
+import { readAttached, runnerApi, storedDiff } from "./remote.ts";
 import { MAX_DIFF_CHARS } from "./verifier.ts";
 import {
   APP_JS, HOME_JS, homePage, loginPage, logBlock, messagePage, registerPage, runPage, settingsPage, type GroupLock, type ReqRow, type StepRow,
@@ -201,6 +201,8 @@ export function startServer(o: ServerOptions) {
     try {
       const shown = asActor(`user:${user.name}`, (): Response | void => {
         if (path === "/requests") {
+          const attached = readAttached(o.home);
+          if (attached) throw new A.ActionError(`this machine's runner works the queue at ${attached.url}: file the request there`);
           const types = checkUploads(db, null, uploads);
           db.transaction(() => {
             const id = A.addRequest(db, {
@@ -299,6 +301,7 @@ export function startServer(o: ServerOptions) {
       runnerAlive: runner.owner_token !== null && runner.lease_expires_at > Date.now(), runnerHost: runner.owner_host,
       backupAgeMs: last === null ? null : Date.now() - last,
       backupStale: last === null || Date.now() - last > STALE_AFTER_MS,
+      attachedTo: readAttached(o.home)?.url ?? null,
     };
   }
 

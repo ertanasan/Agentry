@@ -70,6 +70,26 @@ describe("sign-up and sign-in", () => {
     expect(await home.text()).toContain("New request");
   });
 
+  test("while this machine's runner works another queue, the home page points there and takes no new requests", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    const standalone = await (await h.call("/", { cookie })).text();
+    expect(standalone).toContain("Runner offline");
+    expect(standalone).toContain('action="/requests"');
+
+    writeFileSync(join(h.home, "queue.json"), JSON.stringify({ url: "https://winhost.example.ts.net", key: "agentry_rk_x" }));
+    const page = await (await h.call("/", { cookie })).text();
+    const link = '<a href="https://winhost.example.ts.net">winhost</a>';
+    expect(page).toContain(`Runner attached to ${link}'s queue`);
+    expect(page).toContain(`File requests on ${link}`);
+    expect(page).not.toContain("Runner offline");
+    expect(page).not.toContain('action="/requests"');
+    const r = await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "Here anyway" } });
+    expect(r.status).toBe(409);
+    expect(await r.text()).toContain("file the request there");
+    expect(h.db.query("SELECT COUNT(*) AS n FROM requests").get()).toEqual({ n: 0 });
+  });
+
   test("a passkey signs in again later; sign-out revokes the session", async () => {
     const h = await setup();
     const { key } = await h.signUp();
