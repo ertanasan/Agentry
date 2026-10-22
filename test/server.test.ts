@@ -351,6 +351,23 @@ describe("escaping (slice 2 review Q1)", () => {
     expect(body.length).toBeLessThan(70_000);
     expect(body).toContain('hx-trigger="every 2s"'); // still running → keeps polling
   });
+
+  test("the home page's lists refresh from /live with the status line, never the new-request form", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    const home = await (await h.call("/", { cookie })).text();
+    expect(home).toContain('<div id="board" hx-get="/live" hx-trigger="every 5s" hx-swap="outerHTML">');
+    expect(home).toContain('<script src="/static/htmx.js"></script>');
+
+    await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "<b>moved on</b>" } });
+    const live = await (await h.call("/live", { cookie })).text();
+    expect(live).toContain('id="statusbar" role="status" hx-swap-oob="true"');
+    expect(live).toContain("0 running, 1 queued");
+    expect(live).toContain('<div id="board" hx-get="/live"');
+    expect(live).toContain("&lt;b&gt;moved on&lt;/b&gt;");
+    expect(live).not.toContain('action="/requests"');
+    expect((await h.call("/live")).status).toBe(303); // signed in only
+  });
 });
 
 // The first bytes are all the server looks at; the rest only gives the files a size.
