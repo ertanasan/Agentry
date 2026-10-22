@@ -37,6 +37,8 @@ main { max-width: 760px; margin: 0 auto; padding: 0 16px 48px; }
 .muted { color: var(--muted); }
 .num, table, .meta { font-variant-numeric: tabular-nums; }
 code, pre, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.mono { font-size: .9em; }
+p, .hint, .why { text-wrap: pretty; }
 code { font-size: .9em; background: var(--sunk); padding: 1px 5px; border-radius: 4px; }
 
 header.top { display: flex; align-items: center; gap: 4px 16px; flex-wrap: wrap; padding: 12px 0; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
@@ -89,6 +91,7 @@ p { margin: 6px 0; }
 .req a.title:hover { text-decoration: underline; }
 .req .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 4px; font-size: 14px; color: var(--muted); }
 .req .why { margin: 6px 0 0; font-size: 15px; overflow-wrap: anywhere; }
+.req .why.wait { color: var(--attn); font-weight: 550; display: flex; align-items: baseline; gap: 8px; }
 .empty { color: var(--muted); margin: 8px 0; }
 .cards { list-style: none; margin: 0; padding: 0; }
 
@@ -138,6 +141,7 @@ details.confirm > summary { display: inline-flex; }
 details.confirm[open] { display: block; flex-basis: 100%; }
 .confirm-body { margin-top: 8px; padding: 12px; border-radius: 10px; background: color-mix(in srgb, var(--fail) 10%, var(--surface)); }
 .confirm-body .actions { margin-top: 8px; }
+.confirm.go .confirm-body { background: color-mix(in srgb, var(--attn) 11%, var(--surface)); }
 
 details.new { margin-top: 16px; }
 details.new > summary { font-weight: 600; font-size: 16px; color: var(--on-accent); background: var(--accent); border-radius: 10px; padding: 0 16px; width: fit-content; }
@@ -172,8 +176,9 @@ pre { background: var(--sunk); border: 1px solid var(--line); border-radius: 10p
   font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; }
 pre.wide { white-space: pre; overflow-wrap: normal; }
 .flags { list-style: none; padding: 0; margin: 0; }
-.flags li { padding: 8px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
-.flags strong { color: var(--attn); }
+.flags li { padding: 6px 0; overflow-wrap: anywhere; }
+.flagbox { margin-top: 12px; }
+.flagbox .flags { margin-top: 4px; }
 .panel { margin-top: 10px; }
 .settings-section { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px 14px; }
 .settings-section table { margin-top: 8px; }
@@ -209,9 +214,15 @@ export type ReqRow = {
   body: string; done_when: string | null; files: string; // the attachments, a JSON array of FileRef
   commit_sha: string | null; groups: string | null;     // the last commit made for it, and its deploy groups
   waiting?: string | null;                               // a queued request whose runner can't take it now: why
+  runner?: string | null;                                // a running request: the runner working on it
+  flag_count?: number | null;                            // the check flags of its latest run
 };
-// A runner of the queue: this machine's (named by its host) or an attached one (named by its runner key).
-export type RunnerInfo = { name: string; local: boolean; online: boolean; running: number };
+// A runner of the queue: this machine's (named by its host) or an attached one (named by its runner key), what it
+// works on and how many queued requests wait for it.
+export type RunnerInfo = {
+  name: string; local: boolean; online: boolean; running: number; waiting: number;
+  working: { id: number; title: string; run: number | null; step: string | null }[];
+};
 export type GroupLock = { name: string; lock_reason: string | null };
 export type Flash = { kind: "ok" | "bad"; text: string };
 // What was typed into the new-request form when the server refused it, to show again.
@@ -219,6 +230,7 @@ export type Draft = { projects: string[]; title: string; body: string; done_when
 export type HomeData = {
   projects: Project[]; needs: ReqRow[]; queue: ReqRow[]; recent: ReqRow[]; groupLocks: GroupLock[];
   paused: string | null; runners: RunnerInfo[]; backupAgeMs: number | null; backupStale: boolean;
+  runnerAlerts: string[];     // runner problems that hold queued requests: offline, a missing recipe, no runner at all
   attachedTo: string | null;  // the queue this machine's runner works instead of this one (agentry attach)
 };
 
@@ -259,19 +271,24 @@ const filePicker = (id: string) => html`<label for="${id}">Files <span class="op
   <p class="hint">Up to 5 files of 10 MB: images, PDF, text or Office documents.</p>`;
 
 function reqLine(r: ReqRow): Html {
-  const why = r.waiting ?? reasonOf(r);
+  const why = reasonOf(r);
+  const flags = r.flag_count ?? 0;
   return html`<div class="req">${r.last_run ? html`<a class="title" href="/runs/${r.last_run}">${r.title}</a>` : html`<span class="title">${r.title}</span>`}
-  <div class="meta">${stateOf(r.status, r.status_reason)}<span class="num">#${r.id}</span><span>${r.project}</span></div>
-  ${why ? html`<p class="why">${why}</p>` : ""}${thumbs(r.files)}</div>`;
+  <div class="meta">${stateOf(r.status, r.status_reason)}<span class="num">#${r.id}</span><span>${r.project}</span>
+    ${r.runner ? html`<span>on ${r.runner}</span>` : ""}
+    ${flags ? html`<span class="st attn"><i aria-hidden="true"></i>${flags} check flag${flags > 1 ? "s" : ""}</span>` : ""}</div>
+  ${r.waiting ? html`<p class="why wait"><span class="st attn"><i aria-hidden="true"></i></span>${r.waiting}</p>` : why ? html`<p class="why">${why}</p>` : ""}
+  ${thumbs(r.files)}</div>`;
 }
 
 const post = (id: number, name: string, label: string, cls = "") =>
   html`<form method="post" action="/requests/${id}/${name}"><button class="${cls}">${label}</button></form>`;
 
-// A step that can't be undone asks once more, naming what it does; it works without JavaScript.
-const confirm = (id: number, name: string, label: string, question: string) =>
-  html`<details class="confirm"><summary class="btn danger">${label}…</summary><div class="confirm-body"><p>${question}</p>
-  <div class="actions">${post(id, name, `${label} #${id}`, "danger")}</div></div></details>`;
+// A step that can't be undone asks once more, naming what it does; it works without JavaScript. "go": one that
+// goes ahead (approving), rather than one that stops something.
+const confirm = (id: number, name: string, label: string, question: string, tone: "danger" | "go" = "danger") =>
+  html`<details class="confirm ${tone}"><summary class="btn${tone === "danger" ? " danger" : ""}">${label}…</summary><div class="confirm-body"><p>${question}</p>
+  <div class="actions">${post(id, name, `${label} #${id}`, tone === "danger" ? "danger" : "primary")}</div></div></details>`;
 
 // The actions of a request that needs a person, by its state; the same on the home page and its run page.
 function actionsFor(r: ReqRow): Html {
@@ -284,7 +301,8 @@ function actionsFor(r: ReqRow): Html {
         <div class="actions">${confirm(r.id, "cancel", "Cancel", "Cancel this request? It leaves the queue for good.")}</div>`;
     case "needs_review":
       return html`<div class="actions">${r.last_run ? html`<a class="btn primary" href="/runs/${r.last_run}#diff">Review the diff</a>` : ""}
-        ${post(r.id, "approve", "Approve")}${confirm(r.id, "reject", "Reject", "Reject this change? The request is canceled.")}</div>`;
+        ${confirm(r.id, "approve", "Approve", `Approve #${r.id}? Its changes, including those outside the request's scope, go on to build and tests, then are pushed${r.groups ? ` and deployed (${r.groups.replace(/,/g, ", ")})` : ""}.`, "go")}
+        ${confirm(r.id, "reject", "Reject", "Reject this change? The request is canceled.")}</div>`;
     case "blocked_pre_push":
       return html`<div class="actions">${post(r.id, "retry", "Retry", "primary")}
         ${confirm(r.id, "cancel", "Cancel", "Cancel this request? It leaves the queue for good.")}</div>
@@ -332,11 +350,19 @@ function runnerState(d: HomeData): Html {
   const mark = (family: string) => html`<span class="st ${family}"><i aria-hidden="true"></i></span>`;
   if (d.attachedTo) return html`<span class="runner">${mark("work")}Runner attached to ${queueLink(d.attachedTo)}</span>`;
   if (d.paused) return html`<span class="runner">${mark("attn")}Runner${d.runners.length > 1 ? "s" : ""} paused</span>`;
+  // What a runner works on: its first request, linked to its run, with the step it's in.
+  const doing = (r: RunnerInfo) => {
+    const [w] = r.working;
+    if (!w) return html``;
+    const what = html`#${w.id} ${w.step ? STEP_NAMES[w.step] ?? w.step : "starting"}`;
+    return html` · ${w.run ? html`<a href="/runs/${w.run}">${what}</a>` : what}${r.working.length > 1 ? ` +${r.working.length - 1}` : ""}`;
+  };
   if (d.runners.length === 1) {
     const [r] = d.runners;
-    return r.online ? html`<span class="runner">${mark("done")}Runner online on ${r.name}</span>` : html`<span class="runner">${mark("fail")}Runner offline</span>`;
+    return r.online ? html`<span class="runner">${mark("done")}Runner online on ${r.name}${doing(r)}</span>` : html`<span class="runner">${mark("fail")}Runner offline</span>`;
   }
-  return html`${d.runners.map((r) => html`<span class="runner">${mark(r.online ? "done" : "fail")}${r.name} ${r.online ? "online" : "offline"}${r.running ? `, ${r.running} running` : ""}</span>`)}`;
+  return html`${d.runners.map((r) => html`<span class="runner">${mark(r.online ? "done" : "fail")}${r.name} ${r.online ? "online" : "offline"}${doing(r)}${
+    !r.online && r.waiting ? `, ${r.waiting} waiting` : ""}</span>`)}`;
 }
 
 // `flash`: what the last action did. `draft` and `error`: a new request the server refused, shown again with why.
@@ -350,6 +376,7 @@ export function homePage(d: HomeData, user: User, o: { flash?: Flash; draft?: Dr
       <form method="post" action="/runner/resume"><button class="primary">Resume</button></form></div>`] : []),
     ...d.groupLocks.map((g) => html`<div class="alert fail"><div class="what"><strong>Deploy group ${g.name} is blocked:</strong> ${g.lock_reason}</div>
       <form method="post" action="/groups/${g.name}/unblock"><button>Unblock</button></form></div>`),
+    ...d.runnerAlerts.map((t) => html`<div class="alert attn"><div class="what">${t}</div></div>`),
     ...(d.backupStale ? [html`<div class="alert attn"><div class="what">${d.backupAgeMs === null ? "No backup has run yet." : `The last backup was ${since(d.backupAgeMs)} ago.`}</div></div>`] : []),
   ];
   const own = d.attachedTo ? "This machine's own " : "";
@@ -423,6 +450,7 @@ export function liveBlock(d: RunData): Html {
 <div class="req"><div class="meta">${stateOf(d.req.status, d.req.status_reason)}<span class="num">#${d.req.id}</span><span>${d.req.project}</span>
   ${live ? html`<span class="live">${d.remoteHost ? `Running on ${d.remoteHost} · log every 15 s` : "Live"}</span>` : ""}</div>
   ${why ? html`<p class="why">${why}</p>` : ""}${thumbs(d.req.files)}</div>
+${flagsBox(d.run.flags)}
 ${actionsFor(d.req)}
 ${pipeline(d)}
 <h2>Steps</h2>
@@ -435,16 +463,21 @@ ${d.steps.map((s) => html`<tr${s.n === d.logStep ? html` aria-current="true"` : 
 </div>`;
 }
 
+// What the checks noticed in the run, such as a deleted or skipped test: shown before the actions, since it bears on
+// whether to retry or approve.
+function flagsBox(json: string): Html {
+  const flags = JSON.parse(json || "[]") as { kind: string; path: string; detail?: string }[];
+  if (!flags.length) return html``;
+  return html`<div class="alert attn flagbox"><div class="what"><strong>${flags.length} check flag${flags.length > 1 ? "s" : ""}</strong>
+    <ul class="flags">${flags.map((f) => html`<li>${f.kind.replace(/_/g, " ")}: <span class="mono">${f.path}</span>${f.detail ? ` (${f.detail})` : ""}</li>`)}</ul></div></div>`;
+}
+
 export function runPage(d: RunData, user: User): string {
-  const flags = (JSON.parse(d.run.flags || "[]") as { kind: string; path: string; detail?: string }[]);
   return page(`Run ${d.run.id}`, html`
 <h1>${d.req.title}</h1>
 <p class="muted meta">Run ${d.run.id} · attempt ${d.run.attempt}${d.run.branch ? html` · <span class="mono">${d.run.branch}</span>` : ""}
   ${d.run.commit_sha ? html` · commit <span class="mono">${d.run.commit_sha.slice(0, 7)}</span>, ${PUSH[d.run.push_state] ?? d.run.push_state}` : ""}</p>
 ${liveBlock(d)}
-
-${flags.length ? html`<h2>Flags <span class="count num">${flags.length}</span></h2><ul class="flags">${flags.map((f) =>
-  html`<li><strong>${f.kind.replace(/_/g, " ")}</strong>: <span class="mono">${f.path}</span>${f.detail ? ` (${f.detail})` : ""}</li>`)}</ul>` : ""}
 
 <h2 id="diff">Changes</h2>
 ${d.diffStat ? html`<pre class="wide">${d.diffStat.replace(/^\n+/, "")}</pre><details class="more panel"><summary>Full diff${d.diffCut ? " (cut short)" : ""}</summary><pre class="wide">${d.diff}</pre></details>`
@@ -471,6 +504,11 @@ export function settingsPage(d: SettingsData, user: User, link?: NewLink): strin
   const owner = user.role === "owner";
   const off = owner && d.verified ? html`` : html` disabled`;
   const runnerOff = d.attachedTo ? html` disabled` : off;
+  // A change that can't be undone asks once more; before the passkey check it's a disabled button.
+  const ask = (action: string, label: string, question: string) => owner && d.verified
+    ? html`<details class="confirm danger"><summary class="btn danger">${label}…</summary><div class="confirm-body"><p>${question}</p>
+      <div class="actions"><form method="post" action="${action}"><button class="danger">${label}</button></form></div></div></details>`
+    : html`<button class="danger" disabled>${label}</button>`;
   const change = (action: string, label: string, cls = "") =>
     html`<form method="post" action="${action}"><button class="${cls}"${off}>${label}</button></form>`;
   const userPath = (name: string, verb: string) => `/settings/users/${encodeURIComponent(name)}/${verb}`;
@@ -516,7 +554,8 @@ ${d.users.map((u) => html`<tr><td>${u.name}${u.name === user.name ? html` <span 
   <td class="t">${u.last_used ? ago(Date.now() - u.last_used) : "never"}</td></tr>
   ${owner && u.name !== user.name ? html`<tr><td colspan="4"><details class="more"><summary>Change ${u.name}</summary>
     <p class="hint">Reset signs ${u.name} out everywhere and makes a new one-time link.${u.passkeys ? "" : " Use it when their link has run out."}</p>
-    <div class="actions">${change(userPath(u.name, "reset"), "Reset passkeys")}${change(userPath(u.name, "remove"), `Remove ${u.name}`, "danger")}</div></details></td></tr>` : ""}`)}
+    <div class="actions">${ask(userPath(u.name, "reset"), "Reset passkeys", `Reset ${u.name}'s passkeys? ${u.name} is signed out everywhere and needs the new one-time link to sign in again.`)}
+    ${ask(userPath(u.name, "remove"), `Remove ${u.name}`, `Remove ${u.name}? Their passkeys and sessions are deleted. This can't be undone.`)}</div></details></td></tr>` : ""}`)}
 </tbody></table>
 ${owner ? html`<form method="post" action="/settings/users">
   <label for="new-user">New user's name</label><input type="text" id="new-user" name="name" required maxlength="32"${off}>

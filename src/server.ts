@@ -24,7 +24,7 @@ import { suggestedWorkers } from "./platform.ts";
 import { readTail } from "./proc.ts";
 import { parseRecipe } from "./recipe.ts";
 import { readAttached, runnerApi, storedDiff } from "./remote.ts";
-import { LOCAL, waitingFor } from "./routing.ts";
+import { LOCAL, waitOf, waitText, type Wait } from "./routing.ts";
 import { MAX_DIFF_CHARS } from "./verifier.ts";
 import {
   APP_JS, HOME_JS, homePage, liveBlock, loginPage, messagePage, registerPage, RUN_JS, runPage, settingsPage, type Draft, type Flash, type GroupLock,
@@ -320,34 +320,61 @@ export function startServer(o: ServerOptions) {
     };
   }
 
-  // Requests as the pages show them, with what their actions need: the last commit made and the deploy groups.
+  // Requests as the pages show them, with what their actions need: the last commit made, the deploy groups, the
+  // runner that has it and the check flags of its latest run.
   const rows = (where: string, order = "r.id", ...args: number[]) => db.query(`SELECT r.id, ${PROJECT_NAMES} AS project, r.title, r.status,
-    r.status_reason, r.updated_at, r.body, r.done_when, (SELECT MAX(id) FROM runs WHERE request_id = r.id) AS last_run,
+    r.status_reason, r.updated_at, r.body, r.done_when, r.holder, (SELECT MAX(id) FROM runs WHERE request_id = r.id) AS last_run,
     (SELECT json_group_array(json_object('id', id, 'name', name, 'mime', mime)) FROM (SELECT id, name, mime FROM attachments WHERE request_id = r.id ORDER BY id)) AS files,
     (SELECT commit_sha FROM runs WHERE request_id = r.id AND commit_sha IS NOT NULL ORDER BY id DESC LIMIT 1) AS commit_sha,
     (SELECT group_concat(DISTINCT g.name) FROM request_projects rp JOIN projects p ON p.id = rp.project_id
-      JOIN deploy_groups g ON g.id = p.deploy_group_id WHERE rp.request_id = r.id) AS groups
-    FROM requests r WHERE ${where} ORDER BY ${order}`).all(...args) as ReqRow[];
+      JOIN deploy_groups g ON g.id = p.deploy_group_id WHERE rp.request_id = r.id) AS groups,
+    (SELECT json_array_length(flags) FROM runs WHERE request_id = r.id ORDER BY id DESC LIMIT 1) AS flag_count
+    FROM requests r WHERE ${where} ORDER BY ${order}`).all(...args) as (ReqRow & { holder: string | null })[];
 
-  // The queue's runners: this machine's and every runner key's, each online while its lease is live.
-  function runners(now = Date.now()): RunnerInfo[] {
-    const leases = new Map((db.query("SELECT holder, host, expires_at FROM leases").all() as { holder: string; host: string | null; expires_at: number }[])
-      .map((l) => [l.holder, l]));
-    const running = new Map((db.query("SELECT holder, COUNT(*) AS n FROM requests WHERE status = 'running' AND holder IS NOT NULL GROUP BY holder")
-      .all() as { holder: string; n: number }[]).map((r) => [r.holder, r.n]));
+  // A runner as the pages name it: this machine's by its host, an attached one by its runner key.
+  const leaseHosts = () => new Map((db.query("SELECT holder, host, expires_at FROM leases").all() as
+    { holder: string; host: string | null; expires_at: number }[]).map((l) => [l.holder, l]));
+  const nameOf = (holder: string, leases = leaseHosts()) => holder === LOCAL ? leases.get(LOCAL)?.host ?? hostname() : holder;
+
+  // The queue's runners: this machine's and every runner key's, each online while its lease is live, with what it
+  // works on and how many queued requests wait for it.
+  function runners(waitingFor: Map<string, number>, now = Date.now()): RunnerInfo[] {
+    const leases = leaseHosts();
+    const working = db.query(`SELECT r.id, r.title, r.holder, ru.id AS run, ru.current_step AS step FROM requests r
+      LEFT JOIN runs ru ON ru.id = (SELECT MAX(id) FROM runs WHERE request_id = r.id AND status = 'running')
+      WHERE r.status = 'running' AND r.holder IS NOT NULL ORDER BY r.id`).all() as
+      { id: number; title: string; holder: string; run: number | null; step: string | null }[];
     const keys = (db.query("SELECT name FROM runner_keys ORDER BY name").all() as { name: string }[]).map((k) => k.name);
     return [LOCAL, ...keys].map((h) => {
       const l = leases.get(h);
-      return { name: h === LOCAL ? l?.host ?? hostname() : h, local: h === LOCAL, online: !!l && l.expires_at > now, running: running.get(h) ?? 0 };
+      const mine = working.filter((w) => w.holder === h).map(({ id, title, run, step }) => ({ id, title, run, step }));
+      return { name: nameOf(h, leases), local: h === LOCAL, online: !!l && l.expires_at > now, running: mine.length, working: mine, waiting: waitingFor.get(h) ?? 0 };
     });
   }
 
   function homeData() {
     const runner = runnerRow(db);
     const last = lastBackupAt(db);
-    // A queued request says why it waits, when its runner can't take it now.
-    const queue = rows("r.status IN ('queued', 'running')", "r.status DESC, r.priority DESC, r.created_at")
-      .map((r) => r.status === "queued" ? { ...r, waiting: waitingFor(db, r.id) } : r);
+    const leases = leaseHosts();
+    // A queued request says why it waits, when its runner can't take it now; a running one, which runner has it.
+    const waits = new Map<number, Wait>();
+    const queue = rows("r.status IN ('queued', 'running')", "r.status DESC, r.priority DESC, r.created_at").map((r) => {
+      if (r.status === "running") return { ...r, runner: r.holder ? nameOf(r.holder, leases) : null };
+      const w = waitOf(db, r.id);
+      if (w) waits.set(r.id, w);
+      return { ...r, waiting: w ? waitText(w) : null };
+    });
+    // Runner problems that hold queued requests, as alerts: the request lines alone read like ordinary queueing.
+    const waitingFor = new Map<string, number>();
+    const problems = new Map<string, number>();
+    for (const w of waits.values()) {
+      if (w.kind !== "no-runner") waitingFor.set(w.holder, (waitingFor.get(w.holder) ?? 0) + 1);
+      const name = w.kind === "no-runner" ? "" : w.holder === LOCAL ? "This machine's runner" : w.holder;
+      const text = w.kind === "offline" ? `${name} is offline` : w.kind === "not-allowed" ? `${name} may no longer run the projects it was given`
+        : w.kind === "no-recipe" ? `${name} has no recipe for ${w.projects.join(", ")}` : "No runner may run all of their projects";
+      problems.set(text, (problems.get(text) ?? 0) + 1);
+    }
+    const runnerAlerts = [...problems].map(([text, n]) => `${text}: ${n} request${n > 1 ? "s wait" : " waits"}.`);
     return {
       projects: db.query("SELECT name FROM projects WHERE enabled = 1 ORDER BY name").all() as { name: string }[],
       needs: rows("r.status IN ('needs_info', 'needs_review', 'blocked_pre_push', 'blocked_post_push')", "r.updated_at"),
@@ -355,7 +382,8 @@ export function startServer(o: ServerOptions) {
       recent: rows("r.status IN ('done', 'done_manual', 'canceled')", "r.updated_at DESC LIMIT 10"),
       groupLocks: db.query("SELECT name, lock_reason FROM deploy_groups WHERE lock = 'blocked' AND locked_by_request IS NULL").all() as GroupLock[],
       paused: runner.paused ? runner.pause_reason ?? "paused" : null,
-      runners: runners(),
+      runners: runners(waitingFor),
+      runnerAlerts,
       backupAgeMs: last === null ? null : Date.now() - last,
       backupStale: last === null || Date.now() - last > STALE_AFTER_MS,
       attachedTo: readAttached(o.home)?.url ?? null,

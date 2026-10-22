@@ -244,7 +244,41 @@ describe("actions", () => {
     const page = await (await h.call("/", { cookie })).text();
     expect(page).toContain("winhost online");
     expect(page).toContain("machost offline");
-    expect(page).toContain('<p class="why">waiting for machost</p>');
+    expect(page).toContain('<span class="st attn"><i aria-hidden="true"></i></span>waiting for machost</p>');
+    expect(page).toContain('<div class="alert attn"><div class="what">machost is offline: 1 request waits.</div></div>');
+  });
+
+  test("the status line names what each runner works on, and running rows say which runner has them", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    h.db.query("INSERT INTO leases (holder, token, pid, host, expires_at) VALUES ('local', 't', 1, 'winhost', ?)").run(Date.now() + 60_000);
+    h.db.exec(`INSERT INTO requests (project_id, title, status, holder, created_at, updated_at) VALUES (1, 'busy', 'running', 'local', 0, 0);
+      INSERT INTO runs (request_id, attempt, status, current_step, holder, started_at) VALUES (1, 1, 'running', 'build', 'local', 0);`);
+    const page = await (await h.call("/", { cookie })).text();
+    expect(page).toContain('Runner online on winhost · <a href="/runs/1">#1 Build</a>');
+    expect(page).toContain("<span>on winhost</span>");
+  });
+
+  test("check flags show on the request's card and before the actions on its run page", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    const flags = JSON.stringify([{ kind: "test_deleted", path: "T.cs", detail: "Paging" }, { kind: "skip_added", path: "T.cs" }]);
+    h.db.query("INSERT INTO requests (project_id, title, status, status_reason, created_at, updated_at) VALUES (1, 'x', 'blocked_pre_push', 'tests failed', 0, 0)").run();
+    h.db.query("INSERT INTO runs (request_id, attempt, status, flags, started_at) VALUES (1, 1, 'failed', ?, 0)").run(flags);
+    expect(await (await h.call("/", { cookie })).text()).toContain('<i aria-hidden="true"></i>2 check flags</span>');
+    const run = await (await h.call("/runs/1", { cookie })).text();
+    expect(run.indexOf("2 check flags")).toBeGreaterThan(0);
+    expect(run.indexOf("2 check flags")).toBeLessThan(run.indexOf(">Retry</button>"));
+    expect(run).toContain("test deleted: <span class=\"mono\">T.cs</span> (Paging)");
+  });
+
+  test("approving asks once more and names the push and deploy", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    h.db.query("INSERT INTO requests (project_id, title, status, created_at, updated_at) VALUES (1, 'x', 'needs_review', 0, 0)").run();
+    const home = await (await h.call("/", { cookie })).text();
+    expect(home).toContain('<details class="confirm go"><summary class="btn">Approve…</summary>');
+    expect(home).toContain("Approve #1? Its changes, including those outside the request&#39;s scope, go on to build and tests, then are pushed and deployed (g1).");
   });
 
   test("an action ends on the home page saying what it did; only known confirmations show", async () => {
@@ -557,6 +591,19 @@ describe("settings", () => {
     expect(settingsPage({ ...d, workers: 3 }, user)).toContain("3 workers is more than this machine suits");
     expect(settingsPage({ ...d, windows: true }, user)).toContain("AgentrySandbox");
     expect(settingsPage({ ...d, workers: 1, windows: true }, user)).not.toContain("AgentrySandbox");
+  });
+
+  test("resetting or removing a user asks once more; before the passkey check both are disabled", () => {
+    const user = { id: 1, name: "ertan", role: "owner" as const };
+    const sam = { name: "sam", role: "admin", passkeys: 1, last_used: null };
+    const d = { workers: 1, maxWorkers: 8, suggested: 2, cores: 10, memoryGb: 16, windows: false, paused: null, verified: true, projects: [], users: [sam] };
+    const page = settingsPage(d, user);
+    expect(page).toContain('<summary class="btn danger">Remove sam…</summary>');
+    expect(page).toContain("Remove sam? Their passkeys and sessions are deleted. This can&#39;t be undone.");
+    expect(page).toContain('<summary class="btn danger">Reset passkeys…</summary>');
+    const locked = settingsPage({ ...d, verified: false }, user);
+    expect(locked).toContain('<button class="danger" disabled>Remove sam</button>');
+    expect(locked).not.toContain("Remove sam…");
   });
 });
 
