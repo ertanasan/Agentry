@@ -39,12 +39,31 @@ export function missingRecipes(db: Database, holder: string, names: string[]): s
 export const runnerName = (holder: string) => holder === LOCAL ? "this machine's runner" : holder;
 
 // Why a queued request isn't being worked on, or null when its runner can take it.
-export function waitingFor(db: Database, requestId: number, now = Date.now()): string | null {
+export type Wait =
+  | { kind: "no-runner" }
+  | { kind: "offline" | "not-allowed"; holder: string }
+  | { kind: "no-recipe"; holder: string; projects: string[] };
+
+export function waitOf(db: Database, requestId: number, now = Date.now()): Wait | null {
   const r = routeOf(db, requestId);
-  if (!r.holder) return "no runner may run all of its projects";
+  if (!r.holder) return { kind: "no-runner" };
   const lease = db.query("SELECT expires_at FROM leases WHERE holder = ?").get(r.holder) as { expires_at: number } | null;
-  if (!lease || lease.expires_at < now) return `waiting for ${runnerName(r.holder)}`;
-  if (!r.eligible.includes(r.holder)) return `waiting for ${runnerName(r.holder)}, which may no longer run these projects`;
+  if (!lease || lease.expires_at < now) return { kind: "offline", holder: r.holder };
+  if (!r.eligible.includes(r.holder)) return { kind: "not-allowed", holder: r.holder };
   const missing = missingRecipes(db, r.holder, r.projects);
-  return missing.length ? `${runnerName(r.holder)} has no recipe for ${missing.join(", ")}` : null;
+  return missing.length ? { kind: "no-recipe", holder: r.holder, projects: missing } : null;
+}
+
+export function waitText(w: Wait): string {
+  switch (w.kind) {
+    case "no-runner": return "no runner may run all of its projects";
+    case "offline": return `waiting for ${runnerName(w.holder)}`;
+    case "not-allowed": return `waiting for ${runnerName(w.holder)}, which may no longer run these projects`;
+    case "no-recipe": return `${runnerName(w.holder)} has no recipe for ${w.projects.join(", ")}`;
+  }
+}
+
+export function waitingFor(db: Database, requestId: number, now = Date.now()): string | null {
+  const w = waitOf(db, requestId, now);
+  return w ? waitText(w) : null;
 }
