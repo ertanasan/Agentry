@@ -9,7 +9,7 @@
 // recorded as the actor on every audit event.
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
-import { availableParallelism, totalmem } from "node:os";
+import { availableParallelism, hostname, totalmem } from "node:os";
 import { join } from "node:path";
 import * as A from "./actions.ts";
 import { attachment, attachmentFile, checkUploads, MAX_FILE_BYTES, MAX_FILES_PER_REQUEST, saveUploads, type Upload } from "./attachments.ts";
@@ -26,7 +26,8 @@ import { parseRecipe } from "./recipe.ts";
 import { readAttached, runnerApi, storedDiff } from "./remote.ts";
 import { MAX_DIFF_CHARS } from "./verifier.ts";
 import {
-  APP_JS, HOME_JS, homePage, loginPage, logBlock, messagePage, registerPage, runPage, settingsPage, type GroupLock, type ReqRow, type StepRow,
+  APP_JS, HOME_JS, homePage, liveBlock, loginPage, messagePage, registerPage, RUN_JS, runPage, settingsPage, type Draft, type Flash, type GroupLock,
+  type ReqRow, type StepRow,
 } from "./views.ts";
 
 export const DEFAULT_PORT = 4747;
@@ -46,6 +47,7 @@ const STATIC: Record<string, { path?: string; body?: string; type: string }> = {
   "/static/webauthn.js": { path: join(modules, "@simplewebauthn", "browser", "dist", "bundle", "index.umd.min.js"), type: "text/javascript" },
   "/static/app.js": { body: APP_JS, type: "text/javascript" },
   "/static/home.js": { body: HOME_JS, type: "text/javascript" },
+  "/static/run.js": { body: RUN_JS, type: "text/javascript" },
   "/static/icon.png": { path: join(assets, "icon.png"), type: "image/png" },
   "/static/apple-touch-icon.png": { path: join(assets, "apple-touch-icon.png"), type: "image/png" },  // iOS home screen
 };
@@ -142,7 +144,7 @@ export function startServer(o: ServerOptions) {
       endSession(db, cookies[SESSION_COOKIE]!);
       return redirect("/login", { "set-cookie": cookie(SESSION_COOKIE, "", 0) });
     }
-    if (url.pathname === "/" && req.method === "GET") return htmlRes(200, homePage(homeData(), user));
+    if (url.pathname === "/" && req.method === "GET") return htmlRes(200, homePage(homeData(), user, { flash: doneFlash(url.searchParams) }));
     const verified = recentlyVerified(db, cookies[SESSION_COOKIE]);
     if (url.pathname === "/settings" && req.method === "GET") return htmlRes(200, settingsPage(settingsData(verified), user));
 
@@ -163,11 +165,12 @@ export function startServer(o: ServerOptions) {
       }
     }
 
-    const run = url.pathname.match(/^\/runs\/(\d+)(\/log)?$/);
+    // A run's page, or (/live) the part of it that refreshes while the run runs.
+    const run = url.pathname.match(/^\/runs\/(\d+)(\/live)?$/);
     if (run && req.method === "GET") {
       const data = await runData(Number(run[1]), Number(url.searchParams.get("n")) || null);
-      if (!data) return htmlRes(404, messagePage("Run", "No such run.", user));
-      if (run[2]) return htmlRes(200, logBlock(data.run.id, data.logStep, data.log, data.run.status === "running").s);
+      if (!data) return htmlRes(404, messagePage("No such run", "There is no run with that number.", user));
+      if (run[2]) return htmlRes(200, liveBlock(data).s);
       return htmlRes(200, runPage(data, user));
     }
 
@@ -198,6 +201,8 @@ export function startServer(o: ServerOptions) {
   function act(path: string, form: FormData, uploads: Upload[], user: User, verified: boolean): Response {
     const field = (k: string) => { const v = form.get(k); return typeof v === "string" ? v : undefined; };
     const optional = (k: string) => { const v = field(k)?.trim(); return v ? v : null; };
+    // What was done, for the confirmation on the home page (doneFlash).
+    const done: { verb?: string; id?: number; from?: number } = {};
     try {
       const shown = asActor(`user:${user.name}`, (): Response | void => {
         if (path === "/requests") {
@@ -210,16 +215,18 @@ export function startServer(o: ServerOptions) {
               doneWhen: optional("done_when"), doneWhenTest: optional("done_when_test"),
             });
             saveUploads(db, o.home, id, uploads, types);
+            Object.assign(done, { verb: "added", id });
           })();
           return;
         }
-        if (path === "/runner/resume") return A.resume(db);
+        if (path === "/runner/resume") { A.resume(db); done.verb = "resumed"; return; }
         if (path === "/settings" || path.startsWith("/settings/")) return changeSettings(path, field, user, verified);
         const grp = path.match(/^\/groups\/([^/]+)\/unblock$/);
-        if (grp) return A.unblock(db, decodeURIComponent(grp[1]));
+        if (grp) { A.unblock(db, decodeURIComponent(grp[1])); done.verb = "unblocked"; return; }
         const m = path.match(/^\/requests\/(\d+)\/(answer|approve|reject|retry|cancel|redeploy|resolve|reopen)$/);
         if (!m) throw new A.ActionError("no such action", "not_found");
         const id = Number(m[1]);
+        Object.assign(done, { verb: m[2], id });
         switch (m[2]) {
           case "answer": {
             const types = checkUploads(db, id, uploads);
@@ -232,23 +239,50 @@ export function startServer(o: ServerOptions) {
           case "cancel": return A.cancel(db, id);
           case "redeploy": return A.requestRedeploy(db, id);
           case "resolve": return A.resolve(db, id);
-          case "reopen": { A.reopen(db, id, field("text") ?? ""); return; }
+          case "reopen": { Object.assign(done, { id: A.reopen(db, id, field("text") ?? ""), from: id }); return; }
         }
       });
       if (shown) return shown;
     } catch (e) {
-      if (e instanceof AuthError) return htmlRes(400, messagePage("Not done", e.message, user));
-      if (!(e instanceof A.ActionError)) throw e;
-      const status = { not_found: 404, invalid: 400, forbidden: 403, wrong_state: 409 }[e.kind];
+      if (!(e instanceof AuthError) && !(e instanceof A.ActionError)) throw e;
+      const status = e instanceof A.ActionError ? { not_found: 404, invalid: 400, forbidden: 403, wrong_state: 409 }[e.kind] : 400;
+      // A refused new request comes back in its form with the reason, so nothing typed is lost.
+      if (path === "/requests") {
+        const data = homeData();
+        const draft: Draft = {
+          projects: form.getAll("project").filter((v): v is string => typeof v === "string"), title: field("title") ?? "", body: field("body") ?? "",
+          done_when: field("done_when") ?? "", done_when_test: field("done_when_test") ?? "", hadFiles: uploads.length > 0,
+        };
+        return htmlRes(status, homePage(data, user, data.attachedTo ? { flash: { kind: "bad", text: e.message } } : { draft, error: e.message }));
+      }
       return htmlRes(status, messagePage("Not done", e.message, user));
     }
-    return redirect(path.startsWith("/settings") ? "/settings" : "/");
+    if (path.startsWith("/settings")) return redirect("/settings");
+    return redirect(done.verb ? `/?done=${done.verb}${done.id ? `&id=${done.id}` : ""}${done.from ? `&from=${done.from}` : ""}` : "/");
+  }
+
+  // The confirmation for `?done=<verb>&id=<n>`: fixed sentences, so a link can't put words on the page.
+  function doneFlash(q: URLSearchParams): Flash | undefined {
+    const id = Number(q.get("id")), from = Number(q.get("from"));
+    const said: Record<string, string> = {
+      added: `#${id} is queued.`, answer: `#${id} answered. It's back in the queue.`, approve: `#${id} approved. It goes on from the build.`,
+      reject: `#${id} rejected and canceled.`, retry: `#${id} is queued for another try.`, cancel: `#${id} canceled.`,
+      redeploy: `The deploy of #${id} is queued. The runner starts it next.`, resolve: `#${id} marked resolved.`,
+      reopen: `#${from} reopened as #${id}.`, resumed: "The runner resumed.", unblocked: "Deploy group unblocked.",
+    };
+    const verb = q.get("done") ?? "";
+    if (!Object.hasOwn(said, verb) || !Number.isInteger(id) || !Number.isInteger(from)) return undefined;
+    return { kind: "ok", text: said[verb] };
   }
 
   // The settings page's changes: owners only, and all but a pause after a recent passkey check. Adding a user or
   // resetting one shows the new one-time registration link; everything else goes back to the page.
   function changeSettings(path: string, field: (k: string) => string | undefined, user: User, verified: boolean): Response | void {
     if (user.role !== "owner") throw new A.ActionError("Only an owner can change settings.", "forbidden");
+    const attached = readAttached(o.home);
+    if (attached && (path === "/settings/pause" || path === "/settings")) {
+      throw new A.ActionError(`This machine's runner works the queue at ${attached.url}, so the runner settings there apply: change them there.`);
+    }
     if (path === "/settings/pause") return A.pause(db, `paused by ${user.name}`);
     if (!verified) throw new A.ActionError("Confirm with your passkey first: the button at the top of the settings page.", "forbidden");
     if (path === "/settings") return A.setWorkers(db, Number(field("workers")));
@@ -281,14 +315,20 @@ export function startServer(o: ServerOptions) {
       users: db.query(`SELECT u.name, u.role, COUNT(c.id) AS passkeys, MAX(c.last_used_at) AS last_used FROM users u
         LEFT JOIN credentials c ON c.user_id = u.id GROUP BY u.id ORDER BY u.name`).all() as
         { name: string; role: string; passkeys: number; last_used: number | null }[],
+      attachedTo: readAttached(o.home)?.url ?? null,
     };
   }
 
+  // Requests as the pages show them, with what their actions need: the last commit made and the deploy groups.
+  const rows = (where: string, order = "r.id", ...args: number[]) => db.query(`SELECT r.id, ${PROJECT_NAMES} AS project, r.title, r.status,
+    r.status_reason, r.updated_at, r.body, r.done_when, (SELECT MAX(id) FROM runs WHERE request_id = r.id) AS last_run,
+    (SELECT json_group_array(json_object('id', id, 'name', name, 'mime', mime)) FROM (SELECT id, name, mime FROM attachments WHERE request_id = r.id ORDER BY id)) AS files,
+    (SELECT commit_sha FROM runs WHERE request_id = r.id AND commit_sha IS NOT NULL ORDER BY id DESC LIMIT 1) AS commit_sha,
+    (SELECT group_concat(DISTINCT g.name) FROM request_projects rp JOIN projects p ON p.id = rp.project_id
+      JOIN deploy_groups g ON g.id = p.deploy_group_id WHERE rp.request_id = r.id) AS groups
+    FROM requests r WHERE ${where} ORDER BY ${order}`).all(...args) as ReqRow[];
+
   function homeData() {
-    const rows = (where: string, order = "r.id") => db.query(`SELECT r.id, ${PROJECT_NAMES} AS project, r.title, r.status, r.status_reason, r.updated_at,
-      r.body, r.done_when, (SELECT MAX(id) FROM runs WHERE request_id = r.id) AS last_run,
-      (SELECT json_group_array(json_object('id', id, 'name', name, 'mime', mime)) FROM (SELECT id, name, mime FROM attachments WHERE request_id = r.id ORDER BY id)) AS files
-      FROM requests r WHERE ${where} ORDER BY ${order}`).all() as ReqRow[];
     const runner = runnerRow(db);
     const last = lastBackupAt(db);
     return {
@@ -328,8 +368,12 @@ export function startServer(o: ServerOptions) {
       diff = (await g.run(repo, ["diff", "--no-color", run.base_sha, head])).out;
       if (diff.length > MAX_DIFF_CHARS) { diff = diff.slice(0, MAX_DIFF_CHARS); diffCut = true; }
     }
+    // A running run whose lease is held by a runner on another machine (agentry attach): its log arrives with each heartbeat.
+    const runner = runnerRow(db);
+    const remoteHost = run.status === "running" && runner.owner_token && runner.lease_expires_at > Date.now() && runner.owner_host
+      && runner.owner_host !== hostname() ? runner.owner_host : null;
     return {
-      run, req: { id: req.id, title: req.title, status: req.status, status_reason: req.status_reason, project: req.project, files: req.files },
+      run, req: rows("r.id = ?", "r.id", req.id)[0], remoteHost, attachedTo: readAttached(o.home)?.url ?? null,
       steps, log, logStep: chosen?.n ?? null, diffStat, diff, diffCut,
       recipe: recipes.map((p) => `${recipes.length > 1 ? `// ${p.name}\n` : ""}${JSON.stringify(JSON.parse(p.recipe), null, 2)}`).join("\n\n"),
     };

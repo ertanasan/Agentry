@@ -80,14 +80,22 @@ describe("sign-up and sign-in", () => {
     writeFileSync(join(h.home, "queue.json"), JSON.stringify({ url: "https://winhost.example.ts.net", key: "agentry_rk_x" }));
     const page = await (await h.call("/", { cookie })).text();
     const link = '<a href="https://winhost.example.ts.net">winhost</a>';
-    expect(page).toContain(`Runner attached to ${link}'s queue`);
-    expect(page).toContain(`File requests on ${link}`);
+    expect(page).toContain(`Runner attached to ${link}`);
+    expect(page).toContain(`This machine's runner works <strong>${link}</strong>'s queue`);
     expect(page).not.toContain("Runner offline");
     expect(page).not.toContain('action="/requests"');
     const r = await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "Here anyway" } });
     expect(r.status).toBe(409);
     expect(await r.text()).toContain("file the request there");
     expect(h.db.query("SELECT COUNT(*) AS n FROM requests").get()).toEqual({ n: 0 });
+
+    // The runner settings are the other machine's: shown read-only here, and refused.
+    const settings = await (await h.call("/settings", { cookie })).text();
+    expect(settings).toContain(`works ${link}'s queue, so that machine's runner settings apply`);
+    expect(settings).toMatch(/id="workers"[^>]* disabled/);
+    const pause = await h.call("/settings/pause", { method: "POST", cookie });
+    expect(pause.status).toBe(409);
+    expect(runnerRow(h.db).paused).toBe(0);
   });
 
   test("a passkey signs in again later; sign-out revokes the session", async () => {
@@ -185,10 +193,16 @@ describe("actions", () => {
     expect((await post(["vt-web", "vt-ios"])).status).toBe(303);
     expect(h.db.query("SELECT p.name FROM request_projects rp JOIN projects p ON p.id = rp.project_id WHERE rp.request_id = 1 ORDER BY p.name").all())
       .toEqual([{ name: "vt-ios" }, { name: "vt-web" }]);
-    expect(await (await h.call("/", { cookie })).text()).toMatch(/#1<\/strong> <span class="muted">vt-web, vt-ios<\/span>/);
+    expect(await (await h.call("/", { cookie })).text()).toContain('<span class="num">#1</span><span>vt-web, vt-ios</span>');
+    // Refused: the form comes back open with the reason and what was typed.
     const mixed = await post(["vt-web", "habit"]);
     expect(mixed.status).toBe(400);
-    expect(await mixed.text()).toContain("the projects of one request must share a repository");
+    const again = await mixed.text();
+    expect(again).toContain('role="alert">the projects of one request must share a repository');
+    expect(again).toContain('<details class="new" open>');
+    expect(again).toContain('value="vt-web" checked');
+    expect(again).toContain('value="habit" checked');
+    expect(again).toMatch(/id="title"[^>]* value="t"/);
     expect((await post([])).status).toBe(400);
     expect(h.db.query("SELECT COUNT(*) AS n FROM requests").get()).toEqual({ n: 1 });
   });
@@ -216,9 +230,30 @@ describe("actions", () => {
     const h = await setup();
     const { cookie } = await h.signUp();
     h.db.query("UPDATE deploy_groups SET lock = 'blocked', lock_reason = 'prod runs abc+uncommitted'").run();
-    expect(await (await h.call("/", { cookie })).text()).toContain("Deploy group g1 is blocked: prod runs abc+uncommitted");
+    expect(await (await h.call("/", { cookie })).text()).toContain("Deploy group g1 is blocked:</strong> prod runs abc+uncommitted");
     expect((await h.call("/groups/g1/unblock", { method: "POST", cookie })).status).toBe(303);
     expect(h.db.query("SELECT lock FROM deploy_groups").get()).toEqual({ lock: "free" });
+  });
+
+  test("an action ends on the home page saying what it did; only known confirmations show", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    const added = await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "x" } });
+    expect(added.headers.get("location")).toBe("/?done=added&id=1");
+    expect(await (await h.call("/?done=added&id=1", { cookie })).text()).toContain('<p class="flash ok" role="status">#1 is queued.</p>');
+    const cancel = await h.call("/requests/1/cancel", { method: "POST", cookie });
+    expect(cancel.headers.get("location")).toBe("/?done=cancel&id=1");
+    for (const q of ["?done=hacked&id=1", "?done=cancel&id=x", "?done=constructor"]) {
+      expect(await (await h.call(`/${q}`, { cookie })).text()).not.toContain('class="flash');
+    }
+  });
+
+  test("a request waiting on a failed deploy offers to re-run it, naming the commit and its group", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    h.db.query("INSERT INTO requests (project_id, title, status, created_at, updated_at) VALUES (1, 'blocked', 'blocked_post_push', 0, 0)").run();
+    h.db.query("INSERT INTO runs (request_id, attempt, commit_sha, started_at) VALUES (1, 1, 'abc1234def', 0)").run();
+    expect(await (await h.call("/", { cookie })).text()).toContain(">Re-run deploy of abc1234 to g1</button>");
   });
 });
 
@@ -241,7 +276,7 @@ describe("escaping (slice 2 review Q1)", () => {
     expect(page).not.toContain("<img src=x");
   });
 
-  test("the live log endpoint returns only the last 64 KiB", async () => {
+  test("a running run's live part returns only the last 64 KiB of the log, and keeps polling", async () => {
     const h = await setup();
     const { cookie } = await h.signUp();
     h.db.query("INSERT INTO requests (project_id, title, status, created_at, updated_at) VALUES (1, 't', 'running', 0, 0)").run();
@@ -250,7 +285,7 @@ describe("escaping (slice 2 review Q1)", () => {
     writeFileSync(log, "x".repeat(500_000) + "\nTHE END\n");
     h.db.query("INSERT INTO runs (id, request_id, attempt, status, started_at) VALUES (1, 1, 1, 'running', 0)").run();
     h.db.query("INSERT INTO steps (run_id, step, started_at, log_path) VALUES (1, 'build', 0, ?)").run(log);
-    const r = await h.call("/runs/1/log", { cookie });
+    const r = await h.call("/runs/1/live", { cookie });
     const body = await r.text();
     expect(body).toContain("THE END");
     expect(body.length).toBeLessThan(70_000);
