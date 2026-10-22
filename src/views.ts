@@ -1,7 +1,7 @@
 // The web UI's pages, server-rendered (winhost design "UI"). Every value goes through `html`, which escapes it
 // unless it is itself the output of `html`: request text, logs and diffs are written by people and agents, and
 // must never become markup on a page that carries the session cookie (slice 2 review Q1). Actions are plain
-// forms posting to the server; htmx only refreshes the live part of a running run's page.
+// forms posting to the server; htmx only refreshes the live parts: a running run's page, and the home page's lists.
 import type { User } from "./accounts.ts";
 
 export class Html { constructor(readonly s: string) {} toString() { return this.s; } }
@@ -375,8 +375,6 @@ function runnerState(d: HomeData): Html {
 // `flash`: what the last action did. `draft` and `error`: a new request the server refused, shown again with why.
 export function homePage(d: HomeData, user: User, o: { flash?: Flash; draft?: Draft; error?: string } = {}): string {
   const { flash, draft, error } = o;
-  const running = d.queue.filter((r) => r.status === "running").length;
-  const waiting = d.queue.length - running;
   const pausedBy = d.paused && /^paused /.test(d.paused) ? `Runner ${d.paused}.` : `Runner paused${d.paused ? `: ${d.paused}` : ""}.`;
   const alerts = [
     ...(d.paused ? [html`<div class="alert attn"><div class="what"><strong>${pausedBy}</strong> No new requests start; those running finish.</div>
@@ -386,15 +384,31 @@ export function homePage(d: HomeData, user: User, o: { flash?: Flash; draft?: Dr
     ...d.runnerAlerts.map((t) => html`<div class="alert attn"><div class="what">${t}</div></div>`),
     ...(d.backupStale ? [html`<div class="alert attn"><div class="what">${d.backupAgeMs === null ? "No backup has run yet." : `The last backup was ${since(d.backupAgeMs)} ago.`}</div></div>`] : []),
   ];
-  const own = d.attachedTo ? "This machine's own " : "";
   return page("Home", html`
 <h1 class="sr">Home</h1>
-<p class="statusbar" role="status">${d.attachedTo ? "" : html`${runnerState(d)}<span>${running} running, ${waiting} queued</span>`}
-  <span>Backup ${d.backupAgeMs === null ? "never ran" : ago(d.backupAgeMs)}</span></p>
+${statusBar(d)}
 ${flash ? html`<p class="flash ${flash.kind}" role="${flash.kind === "bad" ? "alert" : "status"}">${flash.text}</p>` : ""}
 ${alerts.length ? html`<div class="alerts">${alerts}</div>` : ""}
 ${d.attachedTo ? "" : newRequestForm(d, draft, error)}
+${board(d)}
+`, user, html`<script src="/static/htmx.js"></script><script src="/static/home.js" defer></script>`, { nav: "home", attachedTo: d.attachedTo });
+}
 
+// The home page's status line; `oob`: sent with the lists from /live, it replaces the one on the page too.
+function statusBar(d: HomeData, oob = false): Html {
+  const running = d.queue.filter((r) => r.status === "running").length;
+  const waiting = d.queue.length - running;
+  return html`<p class="statusbar" id="statusbar" role="status"${oob ? html` hx-swap-oob="true"` : ""}>${d.attachedTo ? "" : html`${runnerState(d)}<span>${running} running, ${waiting} queued</span>`}
+  <span>Backup ${d.backupAgeMs === null ? "never ran" : ago(d.backupAgeMs)}</span></p>`;
+}
+
+// What /live sends the home page every 5 s: its lists, and the status line counting them.
+export const homeLive = (d: HomeData): Html => html`${statusBar(d, true)}${board(d)}`;
+
+// The home page's lists. They refresh themselves every 5 s, except while you use them (home.js).
+function board(d: HomeData): Html {
+  const own = d.attachedTo ? "This machine's own " : "";
+  return html`<div id="board" hx-get="/live" hx-trigger="every 5s" hx-swap="outerHTML">
 <h2>${d.attachedTo ? "Needs you here" : "Needs you"} <span class="count num">${d.needs.length}</span></h2>
 ${d.needs.length ? html`<ul class="cards">${d.needs.map(needsCard)}</ul>` : html`<p class="empty">Nothing needs you.</p>`}
 
@@ -407,7 +421,7 @@ ${d.recent.length ? html`<ul class="list">${d.recent.map((r) => html`<li>${reqLi
   <form method="post" action="/requests/${r.id}/reopen"><label for="reopen-${r.id}">What's wrong?</label><textarea id="reopen-${r.id}" name="text" required></textarea>
   <div class="actions"><button class="primary">Reopen #${r.id}</button></div></form></details>` : ""}</li>`)}</ul>`
   : html`<p class="empty">Nothing finished yet.</p>`}
-`, user, html`<script src="/static/home.js" defer></script>`, { nav: "home", attachedTo: d.attachedTo });
+</div>`;
 }
 
 export type StepRow = { n: number; step: string; exit_code: number | null; started_at: number; ended_at: number | null };
@@ -594,7 +608,9 @@ export function messagePage(title: string, message: string, user?: User | null):
   return page(title, html`<h1>${title}</h1><p class="message">${message}</p><div class="actions"><a class="btn" href="/">Back to home</a></div>`, user);
 }
 
-// The home page's project picker (served as /static/home.js): the form isn't sent with no project ticked.
+// The home page's script (served as /static/home.js). The project picker: the form isn't sent with no project ticked.
+// The lists: their refresh waits while one of their folded forms is open or focus is in them, so it never drops
+// what you type or where you are.
 export const HOME_JS = `
 for (const form of document.querySelectorAll("form[action='/requests']")) {
   const picks = form.querySelector(".picks");
@@ -602,6 +618,12 @@ for (const form of document.querySelectorAll("form[action='/requests']")) {
     if (picks && !picks.querySelector("input:checked")) { e.preventDefault(); picks.querySelector("input")?.focus(); }
   });
 }
+document.addEventListener("htmx:beforeRequest", (e) => {
+  const board = document.getElementById("board");
+  if (e.detail.elt === board && (board.querySelector("details[open]") || board.contains(document.activeElement))) e.preventDefault();
+});
+// Back from a run's page, the link that went there still has focus: let the lists refresh again.
+addEventListener("pageshow", (e) => { if (e.persisted) document.activeElement?.blur(); });
 `;
 
 // The run page's log (served as /static/run.js): it opens at its newest line and stays there across htmx

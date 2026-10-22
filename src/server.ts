@@ -27,7 +27,7 @@ import { readAttached, runnerApi, storedDiff } from "./remote.ts";
 import { LOCAL, waitOf, waitText, type Wait } from "./routing.ts";
 import { MAX_DIFF_CHARS } from "./verifier.ts";
 import {
-  APP_JS, HOME_JS, homePage, liveBlock, loginPage, messagePage, registerPage, RUN_JS, runPage, settingsPage, type Draft, type Flash, type GroupLock,
+  APP_JS, HOME_JS, homeLive, homePage, liveBlock, loginPage, messagePage, registerPage, RUN_JS, runPage, settingsPage, type Draft, type Flash, type GroupLock,
   type ReqRow, type RunnerInfo, type StepRow,
 } from "./views.ts";
 
@@ -146,6 +146,7 @@ export function startServer(o: ServerOptions) {
       return redirect("/login", { "set-cookie": cookie(SESSION_COOKIE, "", 0) });
     }
     if (url.pathname === "/" && req.method === "GET") return htmlRes(200, homePage(homeData(), user, { flash: doneFlash(url.searchParams) }));
+    if (url.pathname === "/live" && req.method === "GET") return htmlRes(200, homeLive(homeData()).s); // the home page's lists, refreshing
     const verified = recentlyVerified(db, cookies[SESSION_COOKIE]);
     if (url.pathname === "/settings" && req.method === "GET") return htmlRes(200, settingsPage(settingsData(verified), user));
 
