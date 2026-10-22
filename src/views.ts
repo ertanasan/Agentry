@@ -53,9 +53,10 @@ nav.top button.link { color: var(--muted); }
 
 .modebar { margin: 12px 0 0; padding: 12px 14px; border-radius: 10px; background: color-mix(in srgb, var(--work) 12%, var(--surface)); }
 .modebar strong { font-weight: 600; }
+.modebar p { margin: 0; } .modebar .hint { margin-top: 6px; }
 
-h1 { font-size: 22px; line-height: 1.3; font-weight: 650; margin: 24px 0 6px; letter-spacing: -.01em; text-wrap: balance; }
-h2 { font-size: 16px; font-weight: 650; margin: 32px 0 10px; display: flex; align-items: baseline; gap: 8px; }
+h1 { font-size: 25px; line-height: 1.3; font-weight: 650; margin: 24px 0 6px; letter-spacing: -.01em; text-wrap: balance; }
+h2 { font-size: 20px; font-weight: 650; margin: 36px 0 12px; padding-top: 14px; border-top: 1px solid var(--line); display: flex; align-items: baseline; gap: 8px; letter-spacing: -.005em; }
 h2 .count { font-weight: 500; color: var(--muted); }
 h3 { font-size: 15px; font-weight: 600; margin: 0; }
 p { margin: 6px 0; }
@@ -136,7 +137,10 @@ details > summary::-webkit-details-marker { display: none; }
 details.more > summary { color: var(--accent); font-weight: 550; font-size: 15px; }
 details.more > summary::before { content: ""; width: 7px; height: 7px; border: solid currentColor; border-width: 0 2px 2px 0; transform: rotate(-45deg); transition: transform .15s ease-out; margin: 0 2px; }
 details.more[open] > summary::before { transform: rotate(45deg); }
-details.confirm { display: inline-block; }
+details.confirm, details.answer { display: inline-block; }
+details.answer > summary { display: inline-flex; }
+details.answer[open] { display: block; flex-basis: 100%; }
+details.answer[open] > summary { display: none; }
 details.confirm > summary { display: inline-flex; }
 details.confirm[open] { display: block; flex-basis: 100%; }
 .confirm-body { margin-top: 8px; padding: 12px; border-radius: 10px; background: color-mix(in srgb, var(--fail) 10%, var(--surface)); }
@@ -199,8 +203,9 @@ export function page(title: string, body: Html, user?: User | null, extraHead: H
 <header class="top"><a class="brand" href="/"><img src="/static/icon.png" alt="">Agentry</a>${user ? html`<nav class="top" aria-label="Main">
   <a href="/"${here("home")}>Home</a><a href="/settings"${here("settings")}>Settings</a>
   <span class="who">${user.name}</span><form method="post" action="/logout"><button class="link">Sign out</button></form></nav>` : ""}</header>
-${user && o.attachedTo ? html`<p class="modebar">This machine's runner works <strong>${queueLink(o.attachedTo)}</strong>'s queue.
-  File requests and follow runs there.</p>` : ""}
+${user && o.attachedTo ? html`<div class="modebar"><p>This machine's runner works <strong>${queueLink(o.attachedTo)}</strong>'s queue:
+  file requests, follow runs and change runner settings <a href="${o.attachedTo}">there</a> (<a href="${o.attachedTo}/settings">its settings</a>).</p>
+  <p class="hint"><code>agentry detach</code> on this machine brings back its own queue.</p></div>` : ""}
 ${body}
 </main></body></html>`.s;
 }
@@ -295,10 +300,12 @@ function actionsFor(r: ReqRow): Html {
   const fid = `files-${r.id}`;
   switch (r.status) {
     case "needs_info":
-      return html`<form method="post" action="/requests/${r.id}/answer" enctype="multipart/form-data">
+      // Folded: a question card stays short on a phone until you answer it.
+      return html`<div class="actions"><details class="answer"><summary class="btn primary">Answer…</summary>
+        <form method="post" action="/requests/${r.id}/answer" enctype="multipart/form-data">
         <label for="answer-${r.id}">Your answer</label><textarea id="answer-${r.id}" name="text" required></textarea>
-        ${filePicker(fid)}<div class="actions"><button class="primary">Answer</button></div></form>
-        <div class="actions">${confirm(r.id, "cancel", "Cancel", "Cancel this request? It leaves the queue for good.")}</div>`;
+        ${filePicker(fid)}<div class="actions"><button class="primary">Send answer</button></div></form></details>
+        ${confirm(r.id, "cancel", "Cancel", "Cancel this request? It leaves the queue for good.")}</div>`;
     case "needs_review":
       return html`<div class="actions">${r.last_run ? html`<a class="btn primary" href="/runs/${r.last_run}#diff">Review the diff</a>` : ""}
         ${confirm(r.id, "approve", "Approve", `Approve #${r.id}? Its changes, including those outside the request's scope, go on to build and tests, then are pushed${r.groups ? ` and deployed (${r.groups.replace(/,/g, ", ")})` : ""}.`, "go")}
@@ -382,13 +389,13 @@ export function homePage(d: HomeData, user: User, o: { flash?: Flash; draft?: Dr
   const own = d.attachedTo ? "This machine's own " : "";
   return page("Home", html`
 <h1 class="sr">Home</h1>
-<p class="statusbar" role="status">${runnerState(d)}<span>${running} running, ${waiting} queued</span>
+<p class="statusbar" role="status">${d.attachedTo ? "" : html`${runnerState(d)}<span>${running} running, ${waiting} queued</span>`}
   <span>Backup ${d.backupAgeMs === null ? "never ran" : ago(d.backupAgeMs)}</span></p>
 ${flash ? html`<p class="flash ${flash.kind}" role="${flash.kind === "bad" ? "alert" : "status"}">${flash.text}</p>` : ""}
-${d.attachedTo ? "" : newRequestForm(d, draft, error)}
 ${alerts.length ? html`<div class="alerts">${alerts}</div>` : ""}
+${d.attachedTo ? "" : newRequestForm(d, draft, error)}
 
-<h2>${d.attachedTo ? "This machine's requests that need you" : "Needs you"} <span class="count num">${d.needs.length}</span></h2>
+<h2>${d.attachedTo ? "Needs you here" : "Needs you"} <span class="count num">${d.needs.length}</span></h2>
 ${d.needs.length ? html`<ul class="cards">${d.needs.map(needsCard)}</ul>` : html`<p class="empty">Nothing needs you.</p>`}
 
 <h2>${own ? `${own}queue` : "Queue"} <span class="count num">${d.queue.length}</span></h2>
@@ -503,7 +510,6 @@ export type NewLink = { name: string; url: string };
 export function settingsPage(d: SettingsData, user: User, link?: NewLink): string {
   const owner = user.role === "owner";
   const off = owner && d.verified ? html`` : html` disabled`;
-  const runnerOff = d.attachedTo ? html` disabled` : off;
   // A change that can't be undone asks once more; before the passkey check it's a disabled button.
   const ask = (action: string, label: string, question: string) => owner && d.verified
     ? html`<details class="confirm danger"><summary class="btn danger">${label}…</summary><div class="confirm-body"><p>${question}</p>
@@ -523,22 +529,22 @@ ${link ? html`<div class="card"><p class="ok">Open this link on the device that 
 
 <h2>Runner</h2>
 <div class="settings-section">
-${d.attachedTo ? html`<p>This machine's runner works ${queueLink(d.attachedTo)}'s queue, so that machine's runner settings apply. Change them there.</p>`
-  : d.paused
+${d.attachedTo ? html`<p>Pause and workers are set on ${queueLink(d.attachedTo)}: <a href="${d.attachedTo}/settings">change them there</a>.</p></div>`
+  : html`${d.paused
   ? html`<p class="warn"><strong>Paused:</strong> ${d.paused}</p><div class="actions"><form method="post" action="/runner/resume"><button class="primary">Resume</button></form></div>`
   : html`<p>Running new requests.</p>${owner ? html`<div class="actions"><form method="post" action="/settings/pause"><button>Pause</button></form></div>
     <p class="hint">Requests already running finish.</p>` : ""}`}
 <form method="post" action="/settings">
   <label for="workers">Workers</label>
   <p class="hint">How many requests the runner works on at once. Pushes and deploys still go one at a time for each deploy group.</p>
-  <input type="number" id="workers" name="workers" min="1" max="${d.maxWorkers}" step="1" value="${d.workers}" required${runnerOff}>
+  <input type="number" id="workers" name="workers" min="1" max="${d.maxWorkers}" step="1" value="${d.workers}" required${off}>
   <p class="hint">Suggested for this machine: ${d.suggested} (${d.cores} CPU cores, ${d.memoryGb} GB of memory: one worker for every 4 cores and every 8 GB).</p>
   ${d.workers > d.suggested ? html`<p class="warn">${d.workers} workers is more than this machine suits. Builds and tests will slow each other down,
     and every worker uses the same Claude account, so runs may hit its rate limits.</p>` : ""}
   ${d.windows && d.workers > 1 ? html`<p class="warn">On Windows every worker runs as the one AgentrySandbox user, so one request's agent can
     reach the files of the others running at the same time.</p>` : ""}
-  ${owner && !d.attachedTo ? html`<div class="actions"><button class="primary"${off}>Save</button></div>` : ""}
-</form></div>
+  ${owner ? html`<div class="actions"><button class="primary"${off}>Save</button></div>` : ""}
+</form></div>`}
 
 <h2>Projects</h2>
 <div class="settings-section"><p class="hint">A disabled project's requests wait in the queue until it is enabled again.</p>

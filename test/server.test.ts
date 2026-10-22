@@ -80,9 +80,12 @@ describe("sign-up and sign-in", () => {
     writeFileSync(join(h.home, "queue.json"), JSON.stringify({ url: "https://winhost.example.ts.net", key: "agentry_rk_x" }));
     const page = await (await h.call("/", { cookie })).text();
     const link = '<a href="https://winhost.example.ts.net">winhost</a>';
-    expect(page).toContain(`Runner attached to ${link}`);
+    // One band says it all: where to go instead, and how to come back.
     expect(page).toContain(`This machine's runner works <strong>${link}</strong>'s queue`);
+    expect(page).toContain('(<a href="https://winhost.example.ts.net/settings">its settings</a>)');
+    expect(page).toContain("<code>agentry detach</code> on this machine brings back its own queue.");
     expect(page).not.toContain("Runner offline");
+    expect(page).not.toContain("0 running, 0 queued"); // this machine's own queue isn't worked while attached
     expect(page).not.toContain('action="/requests"');
     const r = await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "Here anyway" } });
     expect(r.status).toBe(409);
@@ -91,8 +94,9 @@ describe("sign-up and sign-in", () => {
 
     // The runner settings are the other machine's: shown read-only here, and refused.
     const settings = await (await h.call("/settings", { cookie })).text();
-    expect(settings).toContain(`works ${link}'s queue, so that machine's runner settings apply`);
-    expect(settings).toMatch(/id="workers"[^>]* disabled/);
+    expect(settings).toContain(`Pause and workers are set on ${link}`);
+    expect(settings).toContain('<a href="https://winhost.example.ts.net/settings">change them there</a>');
+    expect(settings).not.toContain('id="workers"');
     const pause = await h.call("/settings/pause", { method: "POST", cookie });
     expect(pause.status).toBe(409);
     expect(runnerRow(h.db).paused).toBe(0);
@@ -270,6 +274,16 @@ describe("actions", () => {
     expect(run.indexOf("2 check flags")).toBeGreaterThan(0);
     expect(run.indexOf("2 check flags")).toBeLessThan(run.indexOf(">Retry</button>"));
     expect(run).toContain("test deleted: <span class=\"mono\">T.cs</span> (Paging)");
+  });
+
+  test("a question's answer form is folded behind Answer…, beside Cancel", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    h.db.query("INSERT INTO requests (project_id, title, status, status_reason, created_at, updated_at) VALUES (1, 'x', 'needs_info', 'Which game?', 0, 0)").run();
+    const home = await (await h.call("/", { cookie })).text();
+    expect(home).toContain('<div class="actions"><details class="answer"><summary class="btn primary">Answer…</summary>');
+    expect(home).toMatch(/<\/details>\s*<details class="confirm danger"><summary class="btn danger">Cancel…/);
+    expect((await h.call("/requests/1/answer", { method: "POST", cookie, form: { text: "Fill in the blank" } })).status).toBe(303);
   });
 
   test("approving asks once more and names the push and deploy", async () => {
