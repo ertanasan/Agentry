@@ -434,6 +434,6 @@ Next:
      and register it:                 agentry project add <name> <recipe.json>
 $(if (-not $hasToken) { "  4. Save a claude token (from ``claude setup-token``):  agentry token
      then start the runner:            Start-ScheduledTask '$($tasks.run)'" })
-$(if (-not $Owner) { "  5. Create your account:              agentry user add <name> --owner   (or run setup again with -Owner <name>)" })
+$(if (-not $Owner) { "  5. Create your account:              agentry user add <name>   (or run setup again with -Owner <name>)" })
 In a new shell, ``agentry`` runs $Root\agentry.cmd. Open the web UI at $(if ($PublicUrl) { $PublicUrl } else { "http://localhost:$Port" }).
 "@

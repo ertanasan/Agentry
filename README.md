@@ -692,7 +692,7 @@ agentry unblock <group>               clear a deploy-group lock no request holds
 agentry resume                        unpause the runner
 agentry token                         save a `claude setup-token` token (paste, then Ctrl-D)
 agentry serve                         the web UI, with nightly backups
-agentry user add <name> [--owner]     create a web UI account; prints a one-time passkey link
+agentry user add <name> [--admin]     create a web UI account, an owner unless --admin; prints a one-time passkey link
 agentry user reset <name>             revoke a user's passkeys and sessions; prints a new link
 agentry user remove <name>            delete a web UI account with its passkeys and sessions (not the last owner)
 agentry backup                        back up now

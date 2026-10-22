@@ -46,7 +46,8 @@ const USAGE = `usage: agentry <command>
   resume                             unpause the runner
   token                              save a \`claude setup-token\` token for subscription auth (paste, then Ctrl-D)
   serve                              the web UI on 127.0.0.1:$AGENTRY_PORT (default 4747), with nightly backups
-  user add <name> [--owner]          create a web UI account; prints a one-time passkey link (30 min)
+  user add <name> [--admin]          create a web UI account, an owner (--admin: one that can't change settings);
+                                     prints a one-time passkey link (30 min)
   user reset <name>                  revoke a user's passkeys and sessions; prints a new link
   user remove <name>                 delete a web UI account with its passkeys and sessions
   backup                            back up the database and agentry/* branches now
@@ -68,7 +69,7 @@ function main(argv: string[]): Promise<number> | number {
     options: {
       body: { type: "string" }, "done-when": { type: "string" }, "done-when-test": { type: "string" },
       priority: { type: "string" }, once: { type: "boolean" }, all: { type: "boolean" }, help: { type: "boolean", short: "h" },
-      owner: { type: "boolean" },
+      owner: { type: "boolean" }, admin: { type: "boolean" },
     },
   });
   if (!cmd || o.help) { console.log(USAGE); return cmd ? 0 : 1; }
@@ -107,7 +108,7 @@ function main(argv: string[]): Promise<number> | number {
     case "detach": return detach();
     case "runner-key": return runnerKey(db, args);
     case "serve": return serve(db);
-    case "user": return userCmd(db, args, !!o.owner);
+    case "user": return userCmd(db, args, o.owner && o.admin ? fail("give --owner or --admin, not both") : !o.admin);
     case "backup": return backupNow(db);
     case "resume": A.resume(db); return 0;
     default: return fail(`unknown command "${cmd}"\n${USAGE}`);
@@ -382,7 +383,7 @@ async function serve(db: Database): Promise<number> {
 function userCmd(db: Database, args: string[], owner: boolean): number {
   const [sub, name] = args;
   if (!name || !["add", "reset", "remove"].includes(sub)) {
-    fail("usage: agentry user add <name> [--owner] | agentry user reset <name> | agentry user remove <name>");
+    fail("usage: agentry user add <name> [--admin] | agentry user reset <name> | agentry user remove <name>");
   }
   try {
     if (sub === "remove") {

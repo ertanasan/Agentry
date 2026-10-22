@@ -65,7 +65,7 @@ export function removeUser(db: Database, name: string, now = Date.now()): void {
   const user = db.query("SELECT id, role FROM users WHERE name = ?").get(name) as { id: number; role: Role } | null;
   if (!user) throw new AuthError(`no user ${name}`);
   const owners = (db.query("SELECT COUNT(*) AS n FROM users WHERE role = 'owner' AND disabled = 0").get() as { n: number }).n;
-  if (user.role === "owner" && owners <= 1) throw new AuthError(`${name} is the last owner; add another with \`agentry user add <name> --owner\` first`);
+  if (user.role === "owner" && owners <= 1) throw new AuthError(`${name} is the last owner; add another with \`agentry user add <name>\` first`);
   db.transaction(() => {
     for (const table of ["credentials", "sessions", "registrations"]) db.query(`DELETE FROM ${table} WHERE user_id = ?`).run(user.id);
     db.query("DELETE FROM users WHERE id = ?").run(user.id);
