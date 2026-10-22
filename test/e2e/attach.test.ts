@@ -141,6 +141,42 @@ describe("a runner attached to another machine's queue", () => {
     }
   });
 
+  test("a detach or attach while the runner runs switches queues without a restart", async () => {
+    const h = setup();
+    const p = Bun.spawn(["bun", CLI, "run"], { env: { ...process.env, AGENTRY_HOME: h.home, AGENTRY_CLAUDE_BIN: h.bin }, stdout: "pipe", stderr: "pipe" });
+    const reader = p.stdout.getReader();
+    const decoder = new TextDecoder();
+    let out = "";
+    const until = async (s: string) => {
+      while (!out.includes(s)) {
+        const { done, value } = await reader.read();
+        if (done) throw new Error(`the runner exited before "${s}":\n${out}`);
+        out += decoder.decode(value, { stream: true });
+      }
+    };
+    try {
+      await until("working this machine's queue");
+      h.db.query("UPDATE runner SET owner_token = 'other', owner_pid = 4242, owner_host = 'winhost', lease_expires_at = ?").run(Date.now() + 60_000);
+      await h.cli(h.key, "attach", h.url);
+      await until("switching queues");
+      await until(`working the queue at ${h.url}`);
+      await until("another runner holds the lease");
+      const own = openDb(join(h.home, "agentry.db"));
+      expect(own.query("SELECT owner_token FROM runner").get()).toEqual({ owner_token: null });
+
+      // Waiting for the owner's lease doesn't keep it from going back.
+      out = "";
+      expect((await h.cli(undefined, "detach")).code).toBe(0);
+      await until("working this machine's queue");
+      for (let i = 0; i < 50 && (own.query("SELECT owner_pid FROM runner").get() as { owner_pid: number | null }).owner_pid !== p.pid; i++) await Bun.sleep(100);
+      expect(own.query("SELECT owner_pid FROM runner").get()).toEqual({ owner_pid: p.pid });
+    } finally {
+      p.kill();
+      await p.exited;
+      h.stop();
+    }
+  });
+
   test("the runner API: a known key, a lease token, and only the queue's methods", async () => {
     const h = setup();
     try {

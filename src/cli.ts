@@ -183,13 +183,14 @@ function claudeBin(): string {
 }
 
 // Takes the lease for this process. While another runner holds it, `once` refuses and otherwise this waits.
-// An attached queue that can't be reached is waited for the same way.
-async function lease(q: Queue, once: boolean): Promise<void> {
+// An attached queue that can't be reached is waited for the same way. False: `stale` turned true while waiting.
+async function lease(q: Queue, once: boolean, stale: () => boolean): Promise<boolean> {
   for (let said = ""; ; ) {
+    if (stale()) return false;
     let why: string;
     try {
       const r = await q.acquire(process.pid, hostname());
-      if (!r) return;
+      if (!r) return true;
       why = `another runner holds the lease (pid ${r.pid}${r.host ? ` on ${r.host}` : ""}, until ${new Date(r.until).toLocaleTimeString()})`;
     } catch (e) {
       if (!(e instanceof Unreachable)) throw e;
@@ -215,13 +216,14 @@ function makeCtx(q: Queue, work: string): RunnerCtx {
 }
 
 // Holds the lease and heartbeat around `body`; a runner that loses its lease exits at once (D17).
-async function withLease(q: Queue, once: boolean, work: string, body: (ctx: RunnerCtx) => Promise<void>): Promise<number> {
+// "switch": the attach file changed, before the lease was taken or while `body` ran.
+async function withLease(q: Queue, once: boolean, work: string, stale: () => boolean,
+  body: (ctx: RunnerCtx) => Promise<"switch" | void>): Promise<number | "switch"> {
   const ctx = makeCtx(q, work);
-  await lease(q, once);
+  if (!(await lease(q, once, stale))) return "switch";
   const stop = startHeartbeat(q, () => [...ctx.running], () => { console.error("lease lost: another runner took over"); process.exit(3); });
   try {
-    await body(ctx);
-    return 0;
+    return (await body(ctx)) ?? 0;
   } catch (e) {
     if (e instanceof LeaseLost) { console.error(e.message); return 3; }
     throw e;
@@ -232,14 +234,29 @@ async function withLease(q: Queue, once: boolean, work: string, body: (ctx: Runn
 }
 
 // Works this machine's queue, or the one `agentry attach` named, with this machine's recipes for its projects.
-function run(db: Database, once: boolean): Promise<number> {
+// An attach or detach while it runs: it finishes the requests in progress, then starts again on the other queue.
+async function run(db: Database, once: boolean): Promise<number> {
+  for (;;) {
+    const code = await runQueue(db, once);
+    if (code !== "switch") return code;
+  }
+}
+
+// The attach file as written, "" when there is none.
+function queueChoice(): string {
+  try { return readFileSync(join(home, "queue.json"), "utf8"); } catch { return ""; }
+}
+
+function runQueue(db: Database, once: boolean): Promise<number | "switch"> {
   const token = randomUUID();
+  const chosen = queueChoice();
+  const stale = () => queueChoice() !== chosen;
   const attached = readAttached(home);
   const work = attached ? workDir(home, attached) : home;
   mkdirSync(work, { recursive: true });
   const q = attached ? remoteQueue({ ...attached, token, recipes: localRecipes(db), work }) : localQueue(db, token, home);
-  if (attached) console.log(`working the queue at ${attached.url} (agentry detach: this machine's own)`);
-  return withLease(q, once, work, async (ctx) => {
+  console.log(attached ? `working the queue at ${attached.url} (agentry detach: this machine's own)` : "working this machine's queue");
+  return withLease(q, once, work, stale, async (ctx) => {
     const rep = await recover(ctx);
     if (rep.killed.length) console.log(`recovery: killed leftover process groups ${rep.killed.join(", ")}`);
     for (const r of rep.interrupted) console.log(`recovery: #${r.requestId} was interrupted → ${r.status}`);
@@ -264,7 +281,13 @@ function run(db: Database, once: boolean): Promise<number> {
       console.log(`#${out.requestId} → ${out.status}${reason ? `  (${reason})` : ""}`);
     };
     let next: Awaited<ReturnType<typeof startNext>> = { kind: "idle" };
+    let switching = false;
     while (!stopping) {
+      if (stale()) {
+        switching = true;
+        console.log(`the attach file changed: switching queues${active.size ? " after the requests in progress" : ""}`);
+        break;
+      }
       try {
         next = await fill();
       } catch (e) {
@@ -277,7 +300,10 @@ function run(db: Database, once: boolean): Promise<number> {
       await Promise.race([Bun.sleep(POLL_MS), ...active]);
     }
     await Promise.all(active);
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
     if (failure) throw failure;
+    if (switching && !stopping) return "switch";
 
     async function fill(): Promise<Awaited<ReturnType<typeof startNext>>> {
       if (Date.now() - lastResolve >= RESOLVE_EVERY_MS) {
@@ -310,7 +336,7 @@ function localRecipes(db: Database): Map<string, string> {
 }
 
 // Saves the queue this machine's runner works instead of its own, with a runner key from that queue's owner
-// (pasted on stdin), once the key works there. The runner picks it up when it next starts.
+// (pasted on stdin), once the key works there. A running runner switches once its requests in progress finish.
 async function attach(db: Database, url: string | undefined): Promise<number> {
   if (!url || !/^https?:\/\//.test(url)) fail("usage: agentry attach <the queue owner's URL, e.g. https://agentry.example.com>");
   if (process.stdin.isTTY) console.log("Paste the runner key (agentry runner-key add, on the queue's owner), then press Enter and Ctrl-D:");
@@ -327,7 +353,7 @@ async function attach(db: Database, url: string | undefined): Promise<number> {
   const file = join(home, "queue.json");
   rmSync(file, { force: true });
   writeFileSync(file, JSON.stringify(attached) + "\n", { mode: 0o600 });
-  console.log(`This machine's runner now works the queue at ${attached.url}; restart it to switch.`);
+  console.log(`This machine's runner now works the queue at ${attached.url}; a running one switches once its requests in progress finish.`);
   console.log(mine.length ? `It takes requests for ${mine.join(", ")}: the projects of that queue with a recipe here.`
     : "None of that queue's projects has a recipe here yet (agentry project add, same name), so it takes no requests.");
   return 0;
@@ -337,7 +363,7 @@ function detach(): number {
   const a = readAttached(home);
   if (!a) fail("this machine's runner works its own queue already");
   rmSync(join(home, "queue.json"));
-  console.log(`This machine's runner works its own queue again (was ${a!.url}); restart it to switch.`);
+  console.log(`This machine's runner works its own queue again (was ${a!.url}); a running one switches once its requests in progress finish.`);
   return 0;
 }
 

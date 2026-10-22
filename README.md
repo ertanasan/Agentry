@@ -244,7 +244,7 @@ On the machine whose runner should work that queue (say `machost`):
 
 ```sh
 agentry project add web recipe.json # this machine's recipe for each project, under the owner's project name
-agentry attach https://winhost.example.ts.net   # paste the key, then restart the runner
+agentry attach https://winhost.example.ts.net   # paste the key; the runner switches by itself
 agentry detach                                  # later: back to this machine's own queue
 ```
 
