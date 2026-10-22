@@ -153,7 +153,7 @@ describe("agentry CLI, end to end", () => {
     // Queued for the runner, which handles it before the waiting request (slice 2 review D7).
     acquireLease(h.db, "someone-else", 4242);
     expect(h.ok("redeploy", String(a))).toContain(`#${a} re-run deploy queued`);
-    h.db.query("UPDATE runner SET owner_token = NULL, lease_expires_at = 0").run();
+    h.db.query("DELETE FROM leases").run();
     expect(h.ok("run", "--once")).toMatch(new RegExp(`#${a} → done[\\s\\S]*#${b} → done`));
     expect(h.group().lock).toBe("free");
     expect(h.originHead().startsWith(h.live())).toBe(true);

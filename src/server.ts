@@ -24,10 +24,11 @@ import { suggestedWorkers } from "./platform.ts";
 import { readTail } from "./proc.ts";
 import { parseRecipe } from "./recipe.ts";
 import { readAttached, runnerApi, storedDiff } from "./remote.ts";
+import { LOCAL, waitingFor } from "./routing.ts";
 import { MAX_DIFF_CHARS } from "./verifier.ts";
 import {
   APP_JS, HOME_JS, homePage, liveBlock, loginPage, messagePage, registerPage, RUN_JS, runPage, settingsPage, type Draft, type Flash, type GroupLock,
-  type ReqRow, type StepRow,
+  type ReqRow, type RunnerInfo, type StepRow,
 } from "./views.ts";
 
 export const DEFAULT_PORT = 4747;
@@ -328,17 +329,33 @@ export function startServer(o: ServerOptions) {
       JOIN deploy_groups g ON g.id = p.deploy_group_id WHERE rp.request_id = r.id) AS groups
     FROM requests r WHERE ${where} ORDER BY ${order}`).all(...args) as ReqRow[];
 
+  // The queue's runners: this machine's and every runner key's, each online while its lease is live.
+  function runners(now = Date.now()): RunnerInfo[] {
+    const leases = new Map((db.query("SELECT holder, host, expires_at FROM leases").all() as { holder: string; host: string | null; expires_at: number }[])
+      .map((l) => [l.holder, l]));
+    const running = new Map((db.query("SELECT holder, COUNT(*) AS n FROM requests WHERE status = 'running' AND holder IS NOT NULL GROUP BY holder")
+      .all() as { holder: string; n: number }[]).map((r) => [r.holder, r.n]));
+    const keys = (db.query("SELECT name FROM runner_keys ORDER BY name").all() as { name: string }[]).map((k) => k.name);
+    return [LOCAL, ...keys].map((h) => {
+      const l = leases.get(h);
+      return { name: h === LOCAL ? l?.host ?? hostname() : h, local: h === LOCAL, online: !!l && l.expires_at > now, running: running.get(h) ?? 0 };
+    });
+  }
+
   function homeData() {
     const runner = runnerRow(db);
     const last = lastBackupAt(db);
+    // A queued request says why it waits, when its runner can't take it now.
+    const queue = rows("r.status IN ('queued', 'running')", "r.status DESC, r.priority DESC, r.created_at")
+      .map((r) => r.status === "queued" ? { ...r, waiting: waitingFor(db, r.id) } : r);
     return {
       projects: db.query("SELECT name FROM projects WHERE enabled = 1 ORDER BY name").all() as { name: string }[],
       needs: rows("r.status IN ('needs_info', 'needs_review', 'blocked_pre_push', 'blocked_post_push')", "r.updated_at"),
-      queue: rows("r.status IN ('queued', 'running')", "r.status DESC, r.priority DESC, r.created_at"),
+      queue,
       recent: rows("r.status IN ('done', 'done_manual', 'canceled')", "r.updated_at DESC LIMIT 10"),
       groupLocks: db.query("SELECT name, lock_reason FROM deploy_groups WHERE lock = 'blocked' AND locked_by_request IS NULL").all() as GroupLock[],
       paused: runner.paused ? runner.pause_reason ?? "paused" : null,
-      runnerAlive: runner.owner_token !== null && runner.lease_expires_at > Date.now(), runnerHost: runner.owner_host,
+      runners: runners(),
       backupAgeMs: last === null ? null : Date.now() - last,
       backupStale: last === null || Date.now() - last > STALE_AFTER_MS,
       attachedTo: readAttached(o.home)?.url ?? null,
@@ -346,7 +363,7 @@ export function startServer(o: ServerOptions) {
   }
 
   async function runData(id: number, n: number | null) {
-    const run = db.query(`SELECT id, request_id, status, attempt, branch, current_step, flags, commit_sha, candidate_sha, base_sha, push_state
+    const run = db.query(`SELECT id, request_id, status, attempt, branch, current_step, flags, commit_sha, candidate_sha, base_sha, push_state, holder
       FROM runs WHERE id = ?`).get(id) as any;
     if (!run) return null;
     const req = db.query(`SELECT r.id, r.title, r.status, r.status_reason, ${PROJECT_NAMES} AS project, p.recipe,
@@ -368,10 +385,8 @@ export function startServer(o: ServerOptions) {
       diff = (await g.run(repo, ["diff", "--no-color", run.base_sha, head])).out;
       if (diff.length > MAX_DIFF_CHARS) { diff = diff.slice(0, MAX_DIFF_CHARS); diffCut = true; }
     }
-    // A running run whose lease is held by a runner on another machine (agentry attach): its log arrives with each heartbeat.
-    const runner = runnerRow(db);
-    const remoteHost = run.status === "running" && runner.owner_token && runner.lease_expires_at > Date.now() && runner.owner_host
-      && runner.owner_host !== hostname() ? runner.owner_host : null;
+    // A running run of a runner on another machine (agentry attach): its log arrives with each heartbeat.
+    const remoteHost = run.status === "running" && run.holder !== LOCAL ? run.holder : null;
     return {
       run, req: rows("r.id = ?", "r.id", req.id)[0], remoteHost, attachedTo: readAttached(o.home)?.url ?? null,
       steps, log, logStep: chosen?.n ?? null, diffStat, diff, diffCut,

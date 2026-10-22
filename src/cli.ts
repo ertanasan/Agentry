@@ -23,7 +23,8 @@ import { DEFAULT_PORT, startServer } from "./server.ts";
 import { parseRecipe } from "./recipe.ts";
 import { localQueue, startHeartbeat, Unreachable, type Queue } from "./queue.ts";
 import { addRunnerKey, readAttached, remoteQueue, removeRunnerKey, workDir } from "./remote.ts";
-import { recover, resolvePushUnknown } from "./recovery.ts";
+import { recover, recoverExpired, resolvePushUnknown } from "./recovery.ts";
+import { LOCAL, runnersOf } from "./routing.ts";
 import { startNext, type RunnerCtx, type RunOutcome } from "./runner.ts";
 import { AGENTRY_HOME } from "./sandbox.ts";
 import { claudeVerifier } from "./verifier.ts";
@@ -32,7 +33,8 @@ const POLL_MS = 5_000;
 const RESOLVE_EVERY_MS = 60_000;
 
 const USAGE = `usage: agentry <command>
-  project add <name> <recipe.json>
+  project add <name> <recipe.json> [--runner R,...]   register or update a project; --runner: the runners that
+                                     may run it, home first ("local": this machine's; others: runner key names)
   add <project>[,<project>...] <title> [--body B] [--done-when D] [--done-when-test T] [--priority N]
   list [--all]
   run [--once]                       work the queue (--once: stop when idle or paused and nothing runs)
@@ -51,7 +53,8 @@ const USAGE = `usage: agentry <command>
   user reset <name>                  revoke a user's passkeys and sessions; prints a new link
   user remove <name>                 delete a web UI account with its passkeys and sessions
   backup                            back up the database and agentry/* branches now
-  runner-key add <name> | remove <name>   a key for a runner on another machine to work this queue (printed once)
+  runner-key add <name> | remove <name>   a key for a runner on another machine to work this queue beside this one's
+                                     (printed once); remove: for a machine gone for good, its runs pass to this one
   attach <url>                       this machine's runner works the queue at <url> instead (paste its runner key)
   detach                             this machine's runner works its own queue again
 
@@ -69,7 +72,7 @@ function main(argv: string[]): Promise<number> | number {
     options: {
       body: { type: "string" }, "done-when": { type: "string" }, "done-when-test": { type: "string" },
       priority: { type: "string" }, once: { type: "boolean" }, all: { type: "boolean" }, help: { type: "boolean", short: "h" },
-      owner: { type: "boolean" }, admin: { type: "boolean" },
+      owner: { type: "boolean" }, admin: { type: "boolean" }, runner: { type: "string" },
     },
   });
   if (!cmd || o.help) { console.log(USAGE); return cmd ? 0 : 1; }
@@ -81,7 +84,7 @@ function main(argv: string[]): Promise<number> | number {
   return cmd === "run" || cmd === "serve" ? dispatch() : asActor("cli", dispatch);
   function dispatch(): Promise<number> | number {
   switch (cmd) {
-    case "project": return projectAdd(db, args);
+    case "project": return projectAdd(db, args, o.runner);
     case "add": return add(db, args, o);
     case "list": return list(db, !!o.all);
     case "run": return run(db, !!o.once);
@@ -116,11 +119,20 @@ function main(argv: string[]): Promise<number> | number {
   }
 }
 
-function projectAdd(db: Database, args: string[]): number {
-  if (args[0] !== "add" || args.length !== 3) fail("usage: agentry project add <name> <recipe.json>");
+// `runners`: the runners that may run the project, home first: 'local' (this machine's) or runner-key names
+// (two-runners review D4). Left out, a new project is this machine's only and an existing one keeps its list.
+function projectAdd(db: Database, args: string[], runners: string | undefined): number {
+  if (args[0] !== "add" || args.length !== 3) fail("usage: agentry project add <name> <recipe.json> [--runner local,<runner key name>...]");
   const [, name, file] = args;
   const json = readFileSync(file, "utf8");
   const recipe = parseRecipe(json);
+  const list = runners === undefined ? null : runnersOf(runners);
+  if (list) {
+    if (!list.length) fail("--runner needs at least one runner");
+    const known = new Set([LOCAL, ...(db.query("SELECT name FROM runner_keys").all() as { name: string }[]).map((k) => k.name)]);
+    const unknown = list.filter((r) => !known.has(r));
+    if (unknown.length) fail(`no runner key named ${unknown.join(", ")} (agentry runner-key add <name>; this machine's runner is "${LOCAL}")`);
+  }
   db.transaction(() => {
     db.query("INSERT OR IGNORE INTO repos (name, path) VALUES (?, ?)").run(recipe.repo, recipe.repo);
     db.query("INSERT OR IGNORE INTO deploy_groups (name) VALUES (?)").run(recipe.deploy_group);
@@ -128,8 +140,10 @@ function projectAdd(db: Database, args: string[]): number {
       VALUES (?, (SELECT id FROM repos WHERE path = ?), (SELECT id FROM deploy_groups WHERE name = ?), ?)
       ON CONFLICT(name) DO UPDATE SET repo_id = excluded.repo_id, deploy_group_id = excluded.deploy_group_id, recipe = excluded.recipe`)
       .run(name, recipe.repo, recipe.deploy_group, json);
+    if (list) db.query("UPDATE projects SET runners = ? WHERE name = ?").run(list.join(","), name);
   })();
-  console.log(`project ${name}: ${basename(recipe.repo)}, group ${recipe.deploy_group}`);
+  const set = (db.query("SELECT runners FROM projects WHERE name = ?").get(name) as { runners: string | null }).runners;
+  console.log(`project ${name}: ${basename(recipe.repo)}, group ${recipe.deploy_group}, runs on ${runnersOf(set).join(", ")}`);
   return 0;
 }
 
@@ -261,6 +275,7 @@ function runQueue(db: Database, once: boolean): Promise<number | "switch"> {
     if (rep.killed.length) console.log(`recovery: killed leftover process groups ${rep.killed.join(", ")}`);
     for (const r of rep.interrupted) console.log(`recovery: #${r.requestId} was interrupted → ${r.status}`);
     for (const r of rep.resolved) console.log(`recovery: run ${r.runId} push ${r.result}`);
+    for (const id of rep.requeued) console.log(`recovery: #${id} was claimed but never started → queued`);
 
     let stopping = false;
     const onSignal = () => {
@@ -313,6 +328,8 @@ function runQueue(db: Database, once: boolean): Promise<number | "switch"> {
           if (res !== "unknown") console.log(`run ${runId}: push ${res}`);
         }
       }
+      // Runs handed to this runner by `agentry runner-key remove` (two-runners review D8).
+      for (const r of await recoverExpired(ctx)) console.log(`recovery: #${r.requestId} was interrupted → ${r.status}`);
       // Start requests until every worker is busy; read each time, so a change on the settings page applies at once.
       let next: Awaited<ReturnType<typeof startNext>> = { kind: "idle" };
       while (active.size < (await q.settings()).workers) {
@@ -371,8 +388,9 @@ function runnerKey(db: Database, args: string[]): number {
   const [sub, name] = args;
   if (!name || !["add", "remove"].includes(sub)) fail("usage: agentry runner-key add <name> | agentry runner-key remove <name>");
   if (sub === "remove") {
-    if (!removeRunnerKey(db, name)) fail(`no runner key named ${name}`);
-    console.log(`removed runner key ${name}`);
+    let handedBack = 0;
+    try { ({ handedBack } = removeRunnerKey(db, name)); } catch (e) { fail(e instanceof Error ? e.message : String(e)); }
+    console.log(`removed runner key ${name}${handedBack ? `; this machine's runner recovers its ${handedBack} unfinished run(s)` : ""}`);
     return 0;
   }
   let key = "";

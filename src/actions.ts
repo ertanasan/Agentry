@@ -3,6 +3,7 @@
 // in one transaction and refuses a request that is not in a state it acts on.
 import type { Database } from "bun:sqlite";
 import { logEvent, setRequestStatus, type RequestStatus } from "./db.ts";
+import { eligible, runnersOf } from "./routing.ts";
 
 // A refused action: wrong state, unknown request or project, or a user whose role may not take it. The CLI exits
 // 1 with the message; the server answers 409 (wrong state), 404 (not found), 400 (invalid) or 403 (forbidden).
@@ -36,11 +37,15 @@ export function addRequest(db: Database, r: NewRequest): number {
   const names = [...new Set(r.projects.map((n) => n.trim()).filter(Boolean))];
   if (!names.length) throw new ActionError("a request needs a project", "invalid");
   const ps = names.map((name) => {
-    const p = db.query("SELECT id, repo_id FROM projects WHERE name = ?").get(name) as { id: number; repo_id: number } | null;
+    const p = db.query("SELECT id, repo_id, runners FROM projects WHERE name = ?").get(name) as { id: number; repo_id: number; runners: string | null } | null;
     if (!p) throw new ActionError(`no project "${name}"`, "not_found");
     return p;
   });
   if (new Set(ps.map((p) => p.repo_id)).size > 1) throw new ActionError("the projects of one request must share a repository", "invalid");
+  // One runner works the whole request, so one must be allowed to run every project (two-runners review).
+  if (!eligible(ps).length) {
+    throw new ActionError(`no runner may run all of these projects: ${names.map((n, i) => `${n} runs on ${runnersOf(ps[i].runners).join(" or ")}`).join("; ")}`, "invalid");
+  }
   const now = Date.now();
   return db.transaction(() => {
     const id = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, priority, created_at, updated_at)

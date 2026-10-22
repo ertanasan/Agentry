@@ -235,6 +235,18 @@ describe("actions", () => {
     expect(h.db.query("SELECT lock FROM deploy_groups").get()).toEqual({ lock: "free" });
   });
 
+  test("with several runners, the home page lists each and says which runner a queued request waits for", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    h.db.exec("INSERT INTO runner_keys (name, key_hash, created_at) VALUES ('machost', 'h', 0); UPDATE projects SET runners = 'machost'");
+    h.db.query("INSERT INTO leases (holder, token, pid, host, expires_at) VALUES ('local', 't', 1, 'winhost', ?)").run(Date.now() + 60_000);
+    await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "for the mac" } });
+    const page = await (await h.call("/", { cookie })).text();
+    expect(page).toContain("winhost online");
+    expect(page).toContain("machost offline");
+    expect(page).toContain('<p class="why">waiting for machost</p>');
+  });
+
   test("an action ends on the home page saying what it did; only known confirmations show", async () => {
     const h = await setup();
     const { cookie } = await h.signUp();

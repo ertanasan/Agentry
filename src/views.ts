@@ -208,14 +208,17 @@ export type ReqRow = {
   id: number; project: string; title: string; status: string; status_reason: string | null; updated_at: number; last_run: number | null;
   body: string; done_when: string | null; files: string; // the attachments, a JSON array of FileRef
   commit_sha: string | null; groups: string | null;     // the last commit made for it, and its deploy groups
+  waiting?: string | null;                               // a queued request whose runner can't take it now: why
 };
+// A runner of the queue: this machine's (named by its host) or an attached one (named by its runner key).
+export type RunnerInfo = { name: string; local: boolean; online: boolean; running: number };
 export type GroupLock = { name: string; lock_reason: string | null };
 export type Flash = { kind: "ok" | "bad"; text: string };
 // What was typed into the new-request form when the server refused it, to show again.
 export type Draft = { projects: string[]; title: string; body: string; done_when: string; done_when_test: string; hadFiles: boolean };
 export type HomeData = {
   projects: Project[]; needs: ReqRow[]; queue: ReqRow[]; recent: ReqRow[]; groupLocks: GroupLock[];
-  paused: string | null; runnerAlive: boolean; runnerHost: string | null; backupAgeMs: number | null; backupStale: boolean;
+  paused: string | null; runners: RunnerInfo[]; backupAgeMs: number | null; backupStale: boolean;
   attachedTo: string | null;  // the queue this machine's runner works instead of this one (agentry attach)
 };
 
@@ -256,7 +259,7 @@ const filePicker = (id: string) => html`<label for="${id}">Files <span class="op
   <p class="hint">Up to 5 files of 10 MB: images, PDF, text or Office documents.</p>`;
 
 function reqLine(r: ReqRow): Html {
-  const why = reasonOf(r);
+  const why = r.waiting ?? reasonOf(r);
   return html`<div class="req">${r.last_run ? html`<a class="title" href="/runs/${r.last_run}">${r.title}</a>` : html`<span class="title">${r.title}</span>`}
   <div class="meta">${stateOf(r.status, r.status_reason)}<span class="num">#${r.id}</span><span>${r.project}</span></div>
   ${why ? html`<p class="why">${why}</p>` : ""}${thumbs(r.files)}</div>`;
@@ -324,12 +327,16 @@ function newRequestForm(d: HomeData, draft?: Draft, error?: string): Html {
 </form></details>`;
 }
 
-// The runner in a few words: attached elsewhere, paused, working, or offline.
+// The runners in a few words: attached elsewhere, paused, or each one online or offline.
 function runnerState(d: HomeData): Html {
-  if (d.attachedTo) return html`<span class="runner"><span class="st work"><i aria-hidden="true"></i></span>Runner attached to ${queueLink(d.attachedTo)}</span>`;
-  if (d.paused) return html`<span class="runner"><span class="st attn"><i aria-hidden="true"></i></span>Runner paused</span>`;
-  if (d.runnerAlive) return html`<span class="runner"><span class="st done"><i aria-hidden="true"></i></span>Runner online${d.runnerHost ? ` on ${d.runnerHost}` : ""}</span>`;
-  return html`<span class="runner"><span class="st fail"><i aria-hidden="true"></i></span>Runner offline</span>`;
+  const mark = (family: string) => html`<span class="st ${family}"><i aria-hidden="true"></i></span>`;
+  if (d.attachedTo) return html`<span class="runner">${mark("work")}Runner attached to ${queueLink(d.attachedTo)}</span>`;
+  if (d.paused) return html`<span class="runner">${mark("attn")}Runner${d.runners.length > 1 ? "s" : ""} paused</span>`;
+  if (d.runners.length === 1) {
+    const [r] = d.runners;
+    return r.online ? html`<span class="runner">${mark("done")}Runner online on ${r.name}</span>` : html`<span class="runner">${mark("fail")}Runner offline</span>`;
+  }
+  return html`${d.runners.map((r) => html`<span class="runner">${mark(r.online ? "done" : "fail")}${r.name} ${r.online ? "online" : "offline"}${r.running ? `, ${r.running} running` : ""}</span>`)}`;
 }
 
 // `flash`: what the last action did. `draft` and `error`: a new request the server refused, shown again with why.

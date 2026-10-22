@@ -25,13 +25,14 @@ export type RecoveryReport = {
   worktreesRemoved: string[];
   resolved: { runId: number; result: Resolution }[];
   interrupted: { runId: number; requestId: number; status: "blocked_pre_push" | "blocked_post_push" }[];
+  requeued: number[];  // requests claimed but never started by a runner of this holder that died
 };
 
 export type Resolution = "pushed" | "not_pushed" | "unknown";
 
 export async function recover(ctx: RecoveryCtx, o: { graceMs?: number; now?: number } = {}): Promise<RecoveryReport> {
   const { q } = ctx;
-  const report: RecoveryReport = { killed: [], worktreesRemoved: [], resolved: [], interrupted: [] };
+  const report: RecoveryReport = { killed: [], worktreesRemoved: [], resolved: [], interrupted: [], requeued: [] };
 
   for (const r of await q.orphans()) {
     if (groupAlive(r.pgid)) {
@@ -45,12 +46,17 @@ export async function recover(ctx: RecoveryCtx, o: { graceMs?: number; now?: num
 
   for (const runId of await q.unresolvedPushes()) report.resolved.push({ runId, result: await resolvePushUnknown(ctx, runId) });
 
-  const now = o.now ?? Date.now();
-  for (const run of await q.expiredRuns(now)) {
-    const status = await interrupt(ctx, run, now);
-    report.interrupted.push({ runId: run.id, requestId: run.request_id, status });
-  }
+  report.interrupted = await recoverExpired(ctx, o.now ?? Date.now());
+  report.requeued = await q.requeueStaleClaims();
   return report;
+}
+
+// This runner's runs whose lease expired → interrupted. At startup, and on every poll after it, so runs handed
+// back by `agentry runner-key remove` are recovered without a restart (two-runners review D8).
+export async function recoverExpired(ctx: RecoveryCtx, now = Date.now()): Promise<RecoveryReport["interrupted"]> {
+  const out: RecoveryReport["interrupted"] = [];
+  for (const run of await ctx.q.expiredRuns(now)) out.push({ runId: run.id, requestId: run.request_id, status: await interrupt(ctx, run, now) });
+  return out;
 }
 
 // Every worktree left on disk belongs to a dead run: this runner holds the lease and has not started one yet.
