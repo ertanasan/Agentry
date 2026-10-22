@@ -3,7 +3,8 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openDb, acquireLease, renewLease, releaseLease, fenced, LeaseLost, runnerRow, LEASE_TTL_MS, BASE_SCHEMA, MIGRATIONS } from "../src/db.ts";
+import { hostname } from "node:os";
+import { openDb, acquireLease, renewLease, releaseLease, fenced, LeaseLost, leaseOf, runnerRow, LEASE_TTL_MS, BASE_SCHEMA, MIGRATIONS } from "../src/db.ts";
 
 const mem = () => openDb(":memory:");
 
@@ -18,7 +19,7 @@ describe("runner lease", () => {
     const db = mem();
     acquireLease(db, "a", 1, 1000);
     expect(acquireLease(db, "b", 2, 1000 + LEASE_TTL_MS + 1)).toBe(true);
-    expect(runnerRow(db).owner_token).toBe("b");
+    expect(leaseOf(db)!.token).toBe("b");
   });
 
   test("renewing keeps a lease alive past its first TTL", () => {
@@ -55,9 +56,26 @@ describe("runner lease", () => {
     const db = mem();
     acquireLease(db, "a", 1, 0);
     releaseLease(db, "b");
-    expect(runnerRow(db).owner_token).toBe("a");
+    expect(leaseOf(db)!.token).toBe("a");
     releaseLease(db, "a");
     expect(acquireLease(db, "b", 2, 1)).toBe(true);
+  });
+
+  test("two runners hold leases at once, each fenced by its own token (two-runners review D1)", () => {
+    const db = mem();
+    expect(acquireLease(db, "a", 1, 0, "winhost")).toBe(true);
+    expect(acquireLease(db, "m", 2, 0, "machost", "machost", ["ios"])).toBe(true);
+    expect(leaseOf(db, "machost")).toMatchObject({ token: "m", host: "machost", recipes: '["ios"]' });
+    expect(fenced(db, "a", () => 1)).toBe(1);
+    expect(fenced(db, "m", () => 2, "machost")).toBe(2);
+    // A token is good only for its own holder.
+    expect(() => fenced(db, "m", () => 0)).toThrow(LeaseLost);
+    expect(() => fenced(db, "a", () => 0, "machost")).toThrow(LeaseLost);
+    expect(() => renewLease(db, "a", [], 1, "machost")).toThrow(LeaseLost);
+    // Each holder's lease expires and is taken over on its own.
+    renewLease(db, "a", [], LEASE_TTL_MS - 1);
+    expect(acquireLease(db, "a2", 3, LEASE_TTL_MS + 1)).toBe(false);
+    expect(acquireLease(db, "m2", 4, LEASE_TTL_MS + 1, "machost", "machost")).toBe(true);
   });
 });
 
@@ -92,6 +110,41 @@ describe("migrations (review D11)", () => {
     const db = mem();
     expect(version(db)).toBe(MIGRATIONS.length);
     expect(columns(db)).toContain("redeploy_requested");
+  });
+
+  // A database at `v` with this runner row, as an Agentry before migration 8 left it.
+  const atVersion = (v: number, setup: string) => {
+    const path = join(mkdtempSync(join(tmpdir(), "agentry-db-")), "agentry.db");
+    const old = new Database(path, { create: true });
+    old.exec(BASE_SCHEMA);
+    for (let i = 0; i < v; i++) old.exec(MIGRATIONS[i]);
+    old.exec(`PRAGMA user_version = ${v};
+      INSERT INTO repos (name, path) VALUES ('r', '/r'); INSERT INTO deploy_groups (name) VALUES ('g');
+      INSERT INTO projects (name, repo_id, deploy_group_id, recipe) VALUES ('p', 1, 1, '{}');
+      INSERT INTO requests (project_id, title, status, created_at, updated_at) VALUES (1, 'busy', 'running', 1, 1);
+      ${setup}`);
+    old.close();
+    return path;
+  };
+
+  test("the upgrade to several runners waits while another machine's runner has work in flight (two-runners review O6)", () => {
+    const later = Date.now() + 60_000;
+    const elsewhere = atVersion(7, `UPDATE runner SET owner_token = 'x', owner_host = 'machost-elsewhere', lease_expires_at = ${later};
+      INSERT INTO runs (request_id, attempt, status, lease_token, started_at) VALUES (1, 1, 'running', 'x', 1);`);
+    expect(() => openDb(elsewhere)).toThrow("the runner on machost-elsewhere is working this queue");
+    const raw = new Database(elsewhere);
+    expect((raw.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(7);
+    raw.exec("UPDATE runs SET status = 'passed'");
+    raw.close();
+    expect(version(openDb(elsewhere))).toBe(MIGRATIONS.length);
+
+    // This machine's own runner, or a lease that lapsed: its runs become this machine's.
+    const here = atVersion(7, `UPDATE runner SET owner_token = 'x', owner_host = '${hostname()}', lease_expires_at = ${later};
+      INSERT INTO runs (request_id, attempt, status, lease_token, started_at) VALUES (1, 1, 'running', 'x', 1);`);
+    const db = openDb(here);
+    expect(db.query("SELECT holder FROM runs").get()).toEqual({ holder: "local" });
+    expect(db.query("SELECT holder FROM requests").get()).toEqual({ holder: "local" });
+    expect(leaseOf(db)).toBeNull();
   });
 
   test("a database from a newer Agentry is refused, not downgraded", () => {

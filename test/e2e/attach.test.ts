@@ -46,7 +46,9 @@ function setup() {
   db.query("INSERT INTO repos (name, path) VALUES ('repo', '/elsewhere/repo')").run();
   db.query("INSERT INTO deploy_groups (name) VALUES ('g1'), ('ios')").run();
   const ownerRecipe = (group: string) => JSON.stringify({ ...recipe, repo: "/elsewhere/repo", deploy_group: group });
-  db.query("INSERT INTO projects (name, repo_id, deploy_group_id, recipe) VALUES ('p1', 1, 1, ?), ('ios', 1, 2, ?)").run(ownerRecipe("g1"), ownerRecipe("ios"));
+  // Both may run on the attached machine ("mac"); it has a recipe only for p1.
+  db.query("INSERT INTO projects (name, repo_id, deploy_group_id, recipe, runners) VALUES ('p1', 1, 1, ?, 'mac'), ('ios', 1, 2, ?, 'mac')")
+    .run(ownerRecipe("g1"), ownerRecipe("ios"));
   const key = addRunnerKey(db, "mac");
   const srv = startServer({ db, home: ownerHome, port: 0 });
   const url = `http://127.0.0.1:${srv.server.port}`;
@@ -97,7 +99,7 @@ describe("a runner attached to another machine's queue", () => {
       }
       expect(readFileSync(steps[1].log_path, "utf8")).toContain('"result":"done"');
       expect(storedDiff(h.ownerHome, run.id)?.diff).toContain("+more");
-      expect(h.db.query("SELECT owner_token FROM runner").get()).toEqual({ owner_token: null });
+      expect(h.db.query("SELECT COUNT(*) AS n FROM leases").get()).toEqual({ n: 0 });
 
       // Nothing of it in the runner's own database; its files under the queue's folder.
       const own = openDb(join(h.home, "agentry.db"));
@@ -128,7 +130,7 @@ describe("a runner attached to another machine's queue", () => {
     const h = setup();
     try {
       await h.cli(h.key, "attach", h.url);
-      h.db.query("UPDATE runner SET owner_token = 'other', owner_pid = 4242, owner_host = 'winhost', lease_expires_at = ?").run(Date.now() + 60_000);
+      h.db.query("INSERT INTO leases (holder, token, pid, host, expires_at) VALUES ('mac', 'other', 4242, 'winhost', ?)").run(Date.now() + 60_000);
       const p = Bun.spawn(["bun", CLI, "run"], { env: { ...process.env, AGENTRY_HOME: h.home, AGENTRY_CLAUDE_BIN: h.bin }, stdout: "pipe", stderr: "pipe" });
       const reader = p.stdout.getReader();
       let out = "";
@@ -156,20 +158,21 @@ describe("a runner attached to another machine's queue", () => {
     };
     try {
       await until("working this machine's queue");
-      h.db.query("UPDATE runner SET owner_token = 'other', owner_pid = 4242, owner_host = 'winhost', lease_expires_at = ?").run(Date.now() + 60_000);
+      h.db.query("INSERT INTO leases (holder, token, pid, host, expires_at) VALUES ('mac', 'other', 4242, 'winhost', ?)").run(Date.now() + 60_000);
       await h.cli(h.key, "attach", h.url);
       await until("switching queues");
       await until(`working the queue at ${h.url}`);
       await until("another runner holds the lease");
       const own = openDb(join(h.home, "agentry.db"));
-      expect(own.query("SELECT owner_token FROM runner").get()).toEqual({ owner_token: null });
+      expect(own.query("SELECT COUNT(*) AS n FROM leases").get()).toEqual({ n: 0 });
 
       // Waiting for the owner's lease doesn't keep it from going back.
       out = "";
       expect((await h.cli(undefined, "detach")).code).toBe(0);
       await until("working this machine's queue");
-      for (let i = 0; i < 50 && (own.query("SELECT owner_pid FROM runner").get() as { owner_pid: number | null }).owner_pid !== p.pid; i++) await Bun.sleep(100);
-      expect(own.query("SELECT owner_pid FROM runner").get()).toEqual({ owner_pid: p.pid });
+      const ownLease = () => own.query("SELECT pid FROM leases WHERE holder = 'local'").get() as { pid: number } | null;
+      for (let i = 0; i < 50 && ownLease()?.pid !== p.pid; i++) await Bun.sleep(100);
+      expect(ownLease()).toEqual({ pid: p.pid });
     } finally {
       p.kill();
       await p.exited;
@@ -189,11 +192,21 @@ describe("a runner attached to another machine's queue", () => {
       for (const m of ["setPgid", "orphans", "copyAttachments", "constructor"]) expect((await call(m, [1, 1], auth)).status).toBe(404);
       // Writes are fenced by the lease, as a local runner's are.
       expect((await call("setStatus", [1, "done", null], auth)).status).toBe(409);
-      expect(await (await call("acquire", [42, "machost"], auth)).json()).toEqual({ result: null });
-      expect(h.db.query("SELECT owner_host, owner_pid FROM runner").get()).toEqual({ owner_host: "machost", owner_pid: 42 });
-      // A step's log can only go to that run's folder here.
+      expect(await (await call("acquire", [42, "machost", ["p1"]], auth)).json()).toEqual({ result: null });
+      expect(h.db.query("SELECT host, pid, recipes FROM leases WHERE holder = 'mac'").get()).toEqual({ host: "machost", pid: 42, recipes: '["p1"]' });
+      // The key decides the holder, and the holder gets only what is routed to it and it has recipes for.
+      const ios = A.addRequest(h.db, { projects: ["ios"], title: "no recipe on mac" });
       const req = A.addRequest(h.db, { projects: ["p1"], title: "x" });
+      expect((await (await call("claim", [], auth)).json()).result).toMatchObject({ id: req, status: "running" });
+      expect(h.db.query("SELECT status, holder FROM requests WHERE id = ?").get(ios)).toEqual({ status: "queued", holder: null });
       const runId = (await (await call("startRun", [req, { attempt: 1, branch: "agentry/x-1", base: null, candidate: null }], auth)).json()).result;
+      // Writes only to its own runs and requests (two-runners review D6).
+      const other = Number(h.db.query("INSERT INTO runs (request_id, attempt, holder, started_at) VALUES (?, 1, 'local', 0)").run(ios).lastInsertRowid);
+      expect((await call("setRun", [other, { base_sha: "x" }], auth)).status).toBe(409);
+      expect((await call("setStatus", [ios, "done", null], auth)).status).toBe(409);
+      expect((await call("finish", [{ runId, requestId: ios, runStatus: "passed", flags: [], status: "done", reason: null, requeue: null, pause: false, free: false, lock: null }], auth)).status).toBe(409);
+      expect(h.db.query("SELECT status FROM requests WHERE id = ?").get(ios)).toEqual({ status: "queued" });
+      // A step's log can only go to that run's folder here.
       expect((await call("beginStep", [runId, "agent", "/tmp/../../etc/x.log"], auth)).status).toBe(500);
       const stepId = (await (await call("beginStep", [runId, "agent", "/runner/runs/9/1-agent.log"], auth)).json()).result;
       expect((await call("saveLog", [stepId, "hello"], auth)).status).toBe(200);
@@ -203,16 +216,34 @@ describe("a runner attached to another machine's queue", () => {
     }
   });
 
-  test("an expired run with a process group recorded is left to the runner of its own machine", () => {
+  test("on the owner, --runner names must exist, and a runner key can't be removed while projects list it (D4)", async () => {
+    const h = setup();
+    h.stop();
+    const owner = async (...args: string[]) => {
+      const p = Bun.spawn(["bun", CLI, ...args], { env: { ...process.env, AGENTRY_HOME: h.ownerHome }, stdout: "pipe", stderr: "pipe" });
+      const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      return { code, out, err };
+    };
+    const recipe = join(h.fx.root, "recipe.json");
+    const typo = await owner("project", "add", "web", recipe, "--runner", "local,macea");
+    expect(typo.code).toBe(1);
+    expect(typo.err).toContain("no runner key named macea");
+    const ok = await owner("project", "add", "web", recipe, "--runner", "local,mac");
+    expect(ok.out).toContain("runs on local, mac");
+    expect((await owner("project", "add", "web", recipe)).out).toContain("runs on local, mac"); // left out: kept
+    const removal = await owner("runner-key", "remove", "mac");
+    expect(removal.code).toBe(1);
+    expect(removal.err).toContain("these projects still list mac: ios, p1, web");
+  });
+
+  test("each runner recovers only its own expired runs (two-runners review D3)", async () => {
     const h = setup();
     h.stop();
     const req = A.addRequest(h.db, { projects: ["p1"], title: "x" });
-    h.db.query("INSERT INTO runs (request_id, attempt, lease_token, lease_expires_at, branch, pgid, started_at) VALUES (?, 1, 'old', 1, 'b', 999, 0)").run(req);
-    h.db.query("INSERT INTO runs (request_id, attempt, lease_token, lease_expires_at, branch, started_at) VALUES (?, 1, 'old', 1, 'b', 0)").run(req);
-    const q = localQueue(h.db, "new", h.ownerHome);
-    return Promise.all([q.expiredRuns(Date.now()), q.expiredRuns(Date.now(), undefined, true)]).then(([all, remote]) => {
-      expect(all.length).toBe(2);
-      expect(remote.map((r) => r.pgid)).toEqual([null]);
-    });
+    const local = Number(h.db.query("INSERT INTO runs (request_id, attempt, lease_token, lease_expires_at, branch, pgid, started_at) VALUES (?, 1, 'old', 1, 'b', 999, 0)").run(req).lastInsertRowid);
+    const mac = Number(h.db.query("INSERT INTO runs (request_id, attempt, lease_token, lease_expires_at, branch, holder, started_at) VALUES (?, 1, 'old', 1, 'b', 'mac', 0)").run(req).lastInsertRowid);
+    expect((await localQueue(h.db, "new", h.ownerHome).expiredRuns(Date.now())).map((r) => r.id)).toEqual([local]);
+    expect((await localQueue(h.db, "new", h.ownerHome, "mac").expiredRuns(Date.now())).map((r) => r.id)).toEqual([mac]);
+    expect((await localQueue(h.db, "new", h.ownerHome, "mac").orphans()).map((r) => r.id)).toEqual([]);
   });
 });

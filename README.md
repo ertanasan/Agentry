@@ -187,15 +187,17 @@ Agentry is built so that two processes can never act on the same request or the 
 
 ### The runner lease
 
-- **One runner at a time.** `agentry run` takes a database lease: a random token with a 60-second TTL, renewed
-  every 15 seconds by a heartbeat. A second runner waits while the lease is live, and names the pid and machine
-  that hold it (`run --once` refuses instead).
+- **One process per runner.** `agentry run` takes its runner's database lease: a random token with a 60-second
+  TTL, renewed every 15 seconds by a heartbeat. A second process for the same runner waits while the lease is
+  live, and names the pid and machine that hold it (`run --once` refuses instead). Each runner of a queue (this
+  machine's, and any [attached](#one-queue-across-machines) from another machine) holds its own lease.
 - **Several requests at once.** The runner works on up to **Workers** requests at a time, set on the
   [settings page](#the-web-ui) (default 1). The agent, build, tests and verifier of different requests run side
   by side, each in its own worktree. A change to the count applies before the next request starts.
 - **Fenced writes.** Every state change the runner makes runs in a transaction that first checks it still owns
-  the lease. If another runner has taken over, for example after a long system sleep, the old one's writes are
-  refused and it exits with code 3. A stale runner can never overwrite a newer runner's decisions.
+  its lease. If another process has taken over, for example after a long system sleep, the old one's writes are
+  refused and it exits with code 3. A stale runner can never overwrite a newer runner's decisions, and a runner
+  can only write to the runs and requests it claimed.
 - **Graceful stop.** `Ctrl-C` lets the requests in progress finish. Pressing it again quits at once, and startup
   recovery cleans up on the next run.
 
@@ -229,46 +231,57 @@ work, because its group stays blocked until it's handled.
 
 ## One queue across machines
 
-Each machine runs its own Agentry by default: its own database, settings, web UI and runner. You can also point
-one machine's runner at another machine's queue, for example a Mac runner working the queue of an always-on
-Windows server, so one web UI covers both. The attached machine's own database, settings and UI are left as they
-are, and they come back when you detach.
+Each machine runs its own Agentry by default: its own database, settings, web UI and runner. You can also attach
+another machine's runner to a queue, for example a Mac runner that builds iOS apps beside an always-on Windows
+server that builds the web app. Both runners work the server's queue at the same time, and one web UI covers
+both. The attached machine's own database, settings and UI are left as they are, and they come back when you
+detach.
 
 On the queue's owner (say `winhost`):
 
 ```sh
-agentry runner-key add machost      # prints the key once
+agentry runner-key add machost                              # prints the key once
+agentry project add ios ios.json --runner machost           # only the Mac may run it
+agentry project add web web.json --runner local,machost     # winhost first; the Mac too
 ```
 
 On the machine whose runner should work that queue (say `machost`):
 
 ```sh
-agentry project add web recipe.json # this machine's recipe for each project, under the owner's project name
+agentry project add ios ios.json    # this machine's recipe for each project, under the owner's project name
+agentry project add web web.json
 agentry attach https://winhost.example.ts.net   # paste the key; the runner switches by itself
 agentry detach                                  # later: back to this machine's own queue
 ```
 
 How it works:
 
-- **The owner's queue and settings apply.** The attached runner takes the owner's single lease, so the owner's
-  own runner waits while it's attached. Workers, pause and project enable come from the owner's settings page,
-  and the request states, step logs and diffs show up in the owner's web UI ("Runner online on machost").
+- **Each project names its runners**, home first: `local` is the owner's own runner, and other names are runner
+  keys. A project without `--runner` is the owner's only, as before. Names are checked when you set them.
+- **One runner works a whole request:** the first runner of the first project's list that may run every project
+  of the request. In the example a web request goes to `winhost`, an iOS request to `machost`, and an iOS + web
+  request to `machost`, the only one allowed both. A request no runner may run is refused when it's filed. One
+  that is waiting says why on the owner's home page ("waiting for machost").
+- **A request and its continuation stay together.** An approved or retried request resumes on the runner that
+  made its branch, since that branch is only on that machine.
+- **Deploy groups never overlap across runners.** A request waits while the other runner works on a request in
+  one of its deploy groups. Taking a request and checking that rule happen in one database transaction.
+- **The owner's settings apply** to both runners: workers, pause and project enable. Request states, step logs and
+  diffs show up in the owner's web UI, which lists each runner ("winhost online · machost online, 1 running").
 - **The runner's own recipes.** A recipe holds a machine's paths and commands, so the attached runner uses its own
-  recipe for each project, matched by name. It only takes requests whose projects all have a recipe on its
-  machine; the rest wait for a runner that has them.
+  recipe for each project, matched by name. It reports which projects it has recipes for when it connects, and
+  it's only given requests whose projects are all among them. A missing one shows on the owner's page.
 - **Everything else stays on the runner's machine:** worktrees, full logs (the owner gets each step's last 64 KB,
   sent on every heartbeat), the sandbox, the Claude token, and the processes it starts. Its files go under
   `$AGENTRY_HOME/queues/<owner host>/`, apart from its own queue's.
 - **The same safety rules.** Every call carries the lease token and every write is fenced, exactly as for a
   local runner. Calls that are safe to repeat are retried for about 15 seconds when the owner is out of reach,
   and the heartbeat tolerates three missed beats. If the runner crashes, its next start kills the processes it
-  left behind and recovers its runs. An attached runner leaves alone the runs the owner's own runner left with
-  processes still recorded, since only that runner can kill them. The owner's runner can't stop processes on the
-  attached machine either.
-- **Turn the owner's runner off while another machine is attached.** Otherwise, whenever the attached runner is
-  away for more than a minute (a sleeping laptop), the owner's runner takes the lease, recovers the attached
-  runner's runs while their processes may still be running over there, and works the queue with the owner's
-  recipes.
+  left behind and recovers its runs. Each runner recovers only its own runs, since only the machine that ran
+  them knows whether their processes are gone. A sleeping laptop's runs wait for it to wake up.
+- **Removing a machine for good:** `agentry runner-key remove machost` on the owner, once that runner is
+  disconnected and no project lists it any more. Its unfinished runs pass to the owner's runner, which
+  recovers them within a few seconds; requests waiting to resume one of its branches start over from `main`.
 
 ## Automated deployment
 
@@ -384,8 +397,9 @@ executes code at build time needs a person's approval**: `*.csproj`, `*.props`, 
   text, logs and diffs, all written by people or agents, never become markup.
 - **Runner keys.** A runner on another machine calls `/api/runner/*` with a key from `agentry runner-key add`,
   stored as a SHA-256 hash. The key reaches only the queue methods a runner uses (no accounts, no settings),
-  and every write it makes is fenced by its lease. It can still change any request's state and read its files:
-  keep it as you would an owner's credentials, and `agentry runner-key remove` it when a machine leaves.
+  and every write it makes is fenced by its lease and limited to the runs and requests its runner claimed. It can
+  still read every request and its files: keep it as you would an owner's credentials, and `agentry runner-key
+  remove` it when a machine leaves.
 - **One code path for state.** The web UI and the CLI call the same state actions, so a state rule lives in one
   place, and each action records its actor (`user:<name>` or `cli`) in the audit log.
 
@@ -458,15 +472,17 @@ fix the cause and press **Resume**.
 
 Every time a runner takes the lease, before it picks up any work, it:
 
-1. Kills the recorded process group of every run it doesn't own, such as a push or deploy left by a crashed
-   runner.
+1. Kills the recorded process group of every one of its runner's runs this process doesn't own, such as a push
+   or deploy left by a crashed runner.
 2. Deletes leftover worktrees and temp dirs, and prunes git's worktree list. This happens only after those
    processes are dead, so a killed deploy never loses its directory mid-run.
 3. Asks the remote about every unresolved push.
-4. Marks runs whose lease expired as interrupted, and lets **the remote decide** the request's state. If the
+4. Marks its runner's runs whose lease expired as interrupted (it repeats this on every poll, for runs handed
+   over by `agentry runner-key remove`), and lets **the remote decide** the request's state. If the
    commit (or one with its `Agentry-Request` trailer) is on `origin`, the request becomes `blocked_post_push`
    with its groups locked. If not, it becomes `blocked_pre_push`. If the remote can't be reached, it becomes
    `push_unknown` with its groups locked.
+5. Puts back in the queue any request its runner claimed but never started.
 
 ## The web UI
 

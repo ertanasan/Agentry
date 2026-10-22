@@ -119,14 +119,21 @@ export async function startNext(ctx: RunnerCtx): Promise<Started> {
     })();
     return { kind: "started", requestId: queued, done };
   }
-  const req = await q.pick();
+  // Claimed: running and this runner's. If its run can't start, it goes back to the queue.
+  const req = await q.claim();
   if (!req) return { kind: "idle" };
-  const resume = req.resume_run ? await q.run(req.resume_run) : null;
-  const attempt = resume ? resume.attempt : req.attempts + 1;
-  const j = await startRun(ctx, req, {
-    attempt, branch: resume?.branch ?? `agentry/${req.id}-${attempt}`, base: resume?.base_sha ?? null, candidate: resume?.candidate_sha ?? null,
-  });
-  const done = execute(j, () => pipeline(j, resume !== null)).then((status): RunOutcome => ({ kind: "ran", requestId: req.id, status }));
+  let j: Job;
+  try {
+    const resume = req.resume_run ? await q.run(req.resume_run) : null;
+    const attempt = resume ? resume.attempt : req.attempts + 1;
+    j = await startRun(ctx, req, {
+      attempt, branch: resume?.branch ?? `agentry/${req.id}-${attempt}`, base: resume?.base_sha ?? null, candidate: resume?.candidate_sha ?? null,
+    });
+  } catch (e) {
+    if (!(e instanceof LeaseLost)) await q.unclaim(req.id).catch(() => {});
+    throw e;
+  }
+  const done = execute(j, () => pipeline(j, j.resumeFrom !== null)).then((status): RunOutcome => ({ kind: "ran", requestId: req.id, status }));
   return { kind: "started", requestId: req.id, done };
 }
 

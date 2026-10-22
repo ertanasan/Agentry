@@ -2,11 +2,12 @@
 // its localQueue under /api/runner/; the attached runner calls them through `remoteQueue`, so it runs exactly
 // the steps a local runner runs:
 //
-//   attached runner ──POST /api/runner/call/<method> [args]──► owner's server ──► localQueue(db, lease token)
-//     Authorization: Bearer <runner key>   (agentry runner-key add, on the owner)
+//   attached runner ──POST /api/runner/call/<method> [args]──► owner's server ──► localQueue(db, lease token, key's name)
+//     Authorization: Bearer <runner key>   (agentry runner-key add, on the owner; its name is the runner's holder)
 //     X-Agentry-Lease: <lease token>       (every write is fenced by it, as for a local runner)
 //
-// One runner per queue: the attached runner takes the queue's one lease, and the owner's own runner waits.
+// The attached runner works beside the owner's own: each holds its own lease and takes only the requests routed
+// to it (routing.ts), for projects it reported recipes for when it took its lease (two-runners review).
 // What stays on the runner's machine: the recipes (its own projects of the same names: its paths and commands),
 // worktrees, full logs, and the process groups it starts, which only it can kill. The owner gets each step's
 // log tail (on every heartbeat and at the end of the step) and each run's diff, for the run page.
@@ -15,24 +16,25 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { attachment, attachmentFile, extOf, type RunFile } from "./attachments.ts";
-import { fenced, LeaseLost } from "./db.ts";
+import { fenced, LeaseLost, leaseOf, NotYours, setRequestStatus } from "./db.ts";
 import * as g from "./git.ts";
 import { readTail } from "./proc.ts";
 import { localQueue, Unreachable, type LocalQueue, type PartRow, type ProjectRow, type Queue, type RecoveryRun } from "./queue.ts";
+import { LOCAL, runnersOf } from "./routing.ts";
 import { MAX_DIFF_CHARS } from "./verifier.ts";
 
 const CALL_TIMEOUT_MS = 30_000;
 // Out of reach: a call is tried again after each of these; the lease outlasts them. Not the calls that add a
 // row or take work, which a lost reply would make run twice.
 const RETRY_MS = [1_000, 3_000, 10_000];
-const ONCE = new Set(["startRun", "beginStep", "takeRedeploy"]);
+const ONCE = new Set(["startRun", "beginStep", "takeRedeploy", "claim"]);
 // As much of a log as the run page shows.
 const LOG_TAIL_BYTES = 64 * 1024;
 
 // The localQueue methods a remote runner may call. Not process groups (they stay on the runner's machine) and not
 // attachment copies (the runner downloads them), and beginStep only through the wrapper below.
 const CALLS = new Set<keyof LocalQueue>([
-  "acquire", "renew", "release", "settings", "takeRedeploy", "pick", "request", "run", "lastCommitRun", "parts", "projects",
+  "acquire", "renew", "release", "settings", "takeRedeploy", "claim", "unclaim", "requeueStaleClaims", "request", "run", "lastCommitRun", "parts", "projects",
   "blockedGroup", "baseCounts", "answers", "startRun", "setRun", "setRunTests", "endStep", "setStatus", "markPushed", "finish",
   "unresolvedPushes", "recoveryRun", "expiredRuns", "resolvePush", "interrupt",
 ]);
@@ -44,13 +46,37 @@ const hash = (s: string) => createHash("sha256").update(s).digest("hex");
 // A new key for a runner on another machine; only its hash is kept.
 export function addRunnerKey(db: Database, name: string): string {
   if (!/^[A-Za-z0-9._-]{1,32}$/.test(name)) throw new Error("a runner key's name is 1-32 letters, digits, '.', '_' or '-'");
+  if (name === LOCAL) throw new Error(`"${LOCAL}" names this machine's own runner; pick another name`);
   const key = `agentry_rk_${randomBytes(32).toString("base64url")}`;
   db.query("INSERT INTO runner_keys (name, key_hash, created_at) VALUES (?, ?, ?)").run(name, hash(key), Date.now());
   return key;
 }
 
-export function removeRunnerKey(db: Database, name: string): boolean {
-  return db.query("DELETE FROM runner_keys WHERE name = ?").run(name).changes === 1;
+// Removes a runner key, for a machine that is gone for good. Refused while that runner holds a live lease (D8) or
+// a project still lists it (D4). Its runs pass to this machine's runner, which recovers them at its next poll;
+// its claimed requests go back to the queue, and those waiting to resume one of its branches start over from main,
+// since the branch was on that machine (D7).
+export function removeRunnerKey(db: Database, name: string, now = Date.now()): { handedBack: number } {
+  return db.transaction(() => {
+    if (!db.query("SELECT 1 FROM runner_keys WHERE name = ?").get(name)) throw new Error(`no runner key named ${name}`);
+    const lease = leaseOf(db, name);
+    if (lease && lease.expires_at >= now) {
+      throw new Error(`${name}'s runner is connected: run \`agentry detach\` on ${lease.host ?? "it"}, or stop it, then try again in a minute`);
+    }
+    const listed = (db.query("SELECT name, runners FROM projects ORDER BY name").all() as { name: string; runners: string | null }[])
+      .filter((p) => runnersOf(p.runners).includes(name)).map((p) => p.name);
+    if (listed.length) throw new Error(`these projects still list ${name}: ${listed.join(", ")} (change them with agentry project add ... --runner)`);
+    db.query("UPDATE requests SET resume_run = NULL WHERE resume_run IN (SELECT id FROM runs WHERE holder = ?)").run(name);
+    const claimed = db.query(`SELECT id FROM requests r WHERE r.holder = ? AND r.status = 'running'
+      AND NOT EXISTS (SELECT 1 FROM runs WHERE request_id = r.id AND status = 'running')`).all(name) as { id: number }[];
+    for (const r of claimed) setRequestStatus(db, r.id, "queued", `${name} was removed before starting it`);
+    const handedBack = db.query("UPDATE runs SET holder = ? WHERE holder = ? AND status = 'running'").run(LOCAL, name).changes;
+    db.query("UPDATE runs SET holder = ? WHERE holder = ?").run(LOCAL, name);
+    db.query("UPDATE requests SET holder = ? WHERE holder = ?").run(LOCAL, name);
+    db.query("DELETE FROM leases WHERE holder = ?").run(name);
+    db.query("DELETE FROM runner_keys WHERE name = ?").run(name);
+    return { handedBack };
+  })();
 }
 
 // The stored diff of a run worked by a remote runner, whose worktree this machine can't read.
@@ -64,10 +90,13 @@ export function storedDiff(home: string, runId: number): Diff | null {
 export async function runnerApi(db: Database, home: string, req: Request, url: URL): Promise<Response | null> {
   if (!url.pathname.startsWith("/api/runner/")) return null;
   const key = (req.headers.get("authorization") ?? "").match(/^Bearer (\S+)$/)?.[1];
-  if (!key || !db.query("SELECT 1 FROM runner_keys WHERE key_hash = ?").get(hash(key))) return reply(401, { error: "unknown runner key" });
+  const runner = key ? db.query("SELECT name FROM runner_keys WHERE key_hash = ?").get(hash(key)) as { name: string } | null : null;
+  if (!runner) return reply(401, { error: "unknown runner key" });
   const token = req.headers.get("x-agentry-lease") ?? "";
   if (!/^[A-Za-z0-9-]{1,64}$/.test(token)) return reply(400, { error: "missing lease token" });
-  const q = localQueue(db, token, home);
+  // The key decides whose runner this is; the caller never names a holder.
+  const holder = runner.name;
+  const q = localQueue(db, token, home, holder);
 
   const file = url.pathname.match(/^\/api\/runner\/attachments\/(\d+)$/);
   if (file && req.method === "GET") {
@@ -83,7 +112,7 @@ export async function runnerApi(db: Database, home: string, req: Request, url: U
 
   // A run of this runner, for the writes that are files, not rows.
   const runDir = (runId: number) => {
-    const ok = db.query("SELECT 1 FROM runs WHERE id = ? AND lease_token = ? AND status = 'running'").get(runId, token);
+    const ok = db.query("SELECT 1 FROM runs WHERE id = ? AND lease_token = ? AND holder = ? AND status = 'running'").get(runId, token, holder);
     if (!ok) throw new Error(`run ${runId} is not running under this lease`);
     const dir = join(home, "runs", String(runId));
     mkdirSync(dir, { recursive: true });
@@ -105,10 +134,10 @@ export async function runnerApi(db: Database, home: string, req: Request, url: U
         const step = db.query("SELECT run_id, log_path FROM steps WHERE id = ?").get(stepId) as { run_id: number; log_path: string } | null;
         if (!step || join(runDir(step.run_id), basename(step.log_path)) !== step.log_path) throw new Error(`step ${stepId} has no log here`);
         writeFileSync(step.log_path, String(text));
-      });
+      }, holder);
     } else if (method === "saveDiff") {
       const [runId, d] = args as [number, Diff];
-      fenced(db, token, () => writeFileSync(join(runDir(runId), "diff.json"), JSON.stringify({ stat: String(d.stat), diff: String(d.diff), cut: !!d.cut })));
+      fenced(db, token, () => writeFileSync(join(runDir(runId), "diff.json"), JSON.stringify({ stat: String(d.stat), diff: String(d.diff), cut: !!d.cut })), holder);
     } else if (CALLS.has(method as keyof LocalQueue)) {
       result = await (q[method as keyof LocalQueue] as (...a: unknown[]) => unknown)(...args);
     } else {
@@ -116,7 +145,7 @@ export async function runnerApi(db: Database, home: string, req: Request, url: U
     }
     return reply(200, { result: result ?? null });
   } catch (e) {
-    if (e instanceof LeaseLost) return reply(409, { error: e.message });
+    if (e instanceof LeaseLost || e instanceof NotYours) return reply(409, { error: e.message });
     return reply(500, { error: e instanceof Error ? e.message : String(e) });
   }
 }
@@ -131,11 +160,11 @@ export type RemoteOptions = {
   work: string;                  // this machine's folder for the queue's worktrees and runs
 };
 
-// The attached runner's side. Requests are claimed only when this machine has a recipe for each of their projects.
+// The attached runner's side. It reports the projects it has recipes for when it takes its lease; the owner hands
+// it only requests routed to it whose projects are all among them (two-runners review D9).
 export function remoteQueue(o: RemoteOptions): Queue {
   const base = o.url.replace(/\/+$/, "");
   const headers = { authorization: `Bearer ${o.key}`, "x-agentry-lease": o.token };
-  const only = [...o.recipes.keys()];
 
   async function send(path: string, init: RequestInit): Promise<Response> {
     let res: Response;
@@ -178,7 +207,7 @@ export function remoteQueue(o: RemoteOptions): Queue {
   };
 
   return {
-    acquire: (pid, host) => call("acquire", pid, host),
+    acquire: (pid, host) => call("acquire", pid, host, [...o.recipes.keys()]),
     async renew(runIds) {
       await call("renew", runIds);
       for (const [stepId, path] of open) await sendLog(stepId, path);
@@ -186,8 +215,10 @@ export function remoteQueue(o: RemoteOptions): Queue {
     release: () => call("release"),
     settings: () => call("settings"),
 
-    takeRedeploy: () => call("takeRedeploy", only),
-    pick: () => call("pick", only),
+    takeRedeploy: () => call("takeRedeploy"),
+    claim: () => call("claim"),
+    unclaim: (requestId) => call("unclaim", requestId),
+    requeueStaleClaims: () => call("requeueStaleClaims"),
     request: (id) => call("request", id),
     run: (id) => call("run", id),
     lastCommitRun: (requestId) => call("lastCommitRun", requestId),
@@ -239,12 +270,12 @@ export function remoteQueue(o: RemoteOptions): Queue {
     },
 
     orphans: async () => Object.entries(pgids()).map(([id, pgid]) => ({ id: Number(id), pgid })),
-    unresolvedPushes: () => call("unresolvedPushes", only),
+    unresolvedPushes: () => call("unresolvedPushes"),
     recoveryRun: async (runId) => {
       const run = await call<RecoveryRun | null>("recoveryRun", runId);
       return run && local(run);
     },
-    expiredRuns: async (now) => (await call<RecoveryRun[]>("expiredRuns", now, only, true)).map(local),
+    expiredRuns: async (now) => (await call<RecoveryRun[]>("expiredRuns", now)).map(local),
     resolvePush: (run, sha) => call("resolvePush", run, sha),
     interrupt: (run, i, now) => call("interrupt", run, i, now),
   };
