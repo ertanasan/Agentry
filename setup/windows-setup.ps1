@@ -294,11 +294,18 @@ $sshExe = if ($sshExe) { $sshExe.Source } else { Join-Path $gitUsr 'ssh.exe' }
 $gitSsh = "'$($sshExe -replace '\\', '/')' -i '$(($key -replace '\\', '/'))' -o IdentitiesOnly=yes -o UserKnownHostsFile='$((Join-Path $ssh 'known_hosts') -replace '\\', '/')' -o StrictHostKeyChecking=yes"
 
 # Clones belong to AgentryRunner, or its git refuses them as another user's ("dubious ownership").
+# The key is AgentryRunner's, so Windows' OpenSSH won't load it for this administrator ("bad permissions"): clone with
+# a copy only this administrator can read, deleted straight after.
 foreach ($url in $Clone) {
   $dest = Join-Path $Root "repos\$([IO.Path]::GetFileNameWithoutExtension(($url -split '[/:]')[-1]))"
   if (Test-Path $dest) { "already cloned: $dest"; continue }
-  $env:GIT_SSH_COMMAND = $gitSsh
-  git clone --quiet $url $dest; Assert-Exit "git clone $url (is the deploy key on the repository?)"
+  $cloneKey = Join-Path $env:TEMP "agentry-clone-key-$PID"
+  Copy-Item $key $cloneKey -Force
+  try {
+    icacls $cloneKey /inheritance:r /grant:r "$([Security.Principal.WindowsIdentity]::GetCurrent().Name):F" /Q | Out-Null; Assert-Exit "icacls $cloneKey"
+    $env:GIT_SSH_COMMAND = $gitSsh.Replace(($key -replace '\\', '/'), ($cloneKey -replace '\\', '/'))
+    git clone --quiet $url $dest; Assert-Exit "git clone $url (is the deploy key on the repository?)"
+  } finally { Remove-Item $cloneKey -Force -ErrorAction SilentlyContinue; Remove-Item Env:GIT_SSH_COMMAND -ErrorAction SilentlyContinue }
   icacls $dest /setowner $runner /T /C /Q | Out-Null; Assert-Exit "icacls $dest"
   "cloned: $dest"
 }
