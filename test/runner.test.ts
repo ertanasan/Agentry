@@ -10,7 +10,8 @@ import type { AgentResult, Verdict } from "../src/adapters/types.ts";
 import { checkDeployable, parseVersion, redeploy, runNext, startNext, type RunnerCtx, type RunOutcome, type Started } from "../src/runner.ts";
 import { requestRedeploy, resolve } from "../src/actions.ts";
 import { saveUploads } from "../src/attachments.ts";
-import { recover, unresolvedPushes } from "../src/recovery.ts";
+import { localQueue, unresolvedPushes } from "../src/queue.ts";
+import { recover } from "../src/recovery.ts";
 import { head, makeFixture } from "./fixture.ts";
 
 type AgentFn = (wt: string) => AgentResult | void;
@@ -37,7 +38,7 @@ function setup(o: { recipe?: Partial<Recipe>; files?: Record<string, string>; ag
   let verdict: Verdict = o.verdict ?? { verdict: "PASS", evidence: "looks done" };
   const prompts: string[] = [];
   const ctx: RunnerCtx = {
-    db, token: "tok", home, pushBackoffMs: [10, 10], running: new Set(),
+    q: localQueue(db, "tok", home), home, pushBackoffMs: [10, 10], running: new Set(),
     agent: { async run(io) { prompts.push(io.prompt); return agentFn(io.worktree) ?? { outcome: "finished" }; } },
     verifier: { async verify() { return verdict; } },
   };
@@ -690,9 +691,9 @@ describe("runner: several requests at once", () => {
     agentWaiting(h, barrier(2));
     const a = h.add();
     const b = h.add({ project: p2 });
-    const runs = [done(startNext(h.ctx)), done(startNext(h.ctx))];
+    const runs = [done(await startNext(h.ctx)), done(await startNext(h.ctx))];
     expect(h.ctx.running.size).toBe(2);
-    expect(startNext(h.ctx)).toEqual({ kind: "idle" });
+    expect(await startNext(h.ctx)).toEqual({ kind: "idle" });
     expect(await Promise.all(runs)).toEqual([{ kind: "ran", requestId: a, status: "done" }, { kind: "ran", requestId: b, status: "done" }]);
     expect(subjects(h)).toContain(`Agentry-Request: #${a}`);
     expect(subjects(h)).toContain(`Agentry-Request: #${b}`);
@@ -708,7 +709,7 @@ describe("runner: several requests at once", () => {
     agentWaiting(h, barrier(2));
     const a = h.add();
     const b = h.add();
-    const outs = await Promise.all([done(startNext(h.ctx)), done(startNext(h.ctx))]);
+    const outs = await Promise.all([done(await startNext(h.ctx)), done(await startNext(h.ctx))]);
     expect(outs.map((o) => o.kind === "ran" && o.status)).toEqual(["done", "done"]);
     expect(readFileSync(log, "utf8")).toBe("start\nend\nstart\nend\n");
     expect(subjects(h)).toContain(`Agentry-Request: #${a}`);
@@ -730,8 +731,8 @@ describe("runner: several requests at once", () => {
       else { writeFileSync(join(io.worktree, "app/b.txt"), "b\n"); await first; }
       return { outcome: "finished" };
     } };
-    first = done(startNext(h.ctx));
-    const second = done(startNext(h.ctx));
+    first = done(await startNext(h.ctx));
+    const second = done(await startNext(h.ctx));
     expect(await first).toEqual({ kind: "ran", requestId: a, status: "blocked_post_push" });
     expect(await second).toEqual({ kind: "ran", requestId: b, status: "blocked_pre_push" });
     expect(h.req(b).status_reason).toBe(`deploy group g1 (by #${a}) was blocked while this request ran; retry once it is free`);

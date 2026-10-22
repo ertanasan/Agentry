@@ -4,7 +4,8 @@
 //   bun test/helpers/fake-pusher.ts <db> <request id> <repo> <worktree>
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { acquireLease, fenced, LEASE_TTL_MS, openDb, startHeartbeat } from "../../src/db.ts";
+import { acquireLease, fenced, LEASE_TTL_MS, openDb } from "../../src/db.ts";
+import { localQueue, startHeartbeat } from "../../src/queue.ts";
 import * as g from "../../src/git.ts";
 
 const [dbPath, requestId, repo, wt] = process.argv.slice(2);
@@ -19,6 +20,6 @@ const base = await g.remoteHead(repo, "origin", "main");
 const runId = fenced(db, token, () => Number(db.query(`INSERT INTO runs (request_id, attempt, lease_token, lease_expires_at, branch,
   base_sha, commit_sha, current_step, push_state, started_at) VALUES (?, 1, ?, ?, 'agentry/1-1', ?, ?, 'push', 'push_started', ?)`)
   .run(requestId, token, now + LEASE_TTL_MS, base, sha, now).lastInsertRowid));
-startHeartbeat(db, token, () => [runId], () => process.exit(4));
+startHeartbeat(localQueue(db, token, ""), () => [runId], () => process.exit(4));
 await g.observer.run({ onStart: (pgid) => fenced(db, token, () => db.query("UPDATE runs SET pgid = ? WHERE id = ?").run(pgid, runId)) },
   () => g.push(repo, wt, "origin", sha, "main"));

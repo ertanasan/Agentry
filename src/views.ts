@@ -68,7 +68,7 @@ export type ReqRow = {
 export type GroupLock = { name: string; lock_reason: string | null };
 export type HomeData = {
   projects: Project[]; needs: ReqRow[]; queue: ReqRow[]; recent: ReqRow[]; groupLocks: GroupLock[];
-  paused: string | null; runnerAlive: boolean; backupAgeMs: number | null; backupStale: boolean;
+  paused: string | null; runnerAlive: boolean; runnerHost: string | null; backupAgeMs: number | null; backupStale: boolean;
 };
 
 const ago = (ms: number) => ms < 3600_000 ? `${Math.max(1, Math.round(ms / 60_000))} min ago` : ms < 86400_000 ? `${Math.round(ms / 3600_000)} h ago` : `${Math.round(ms / 86400_000)} d ago`;
@@ -132,7 +132,7 @@ export function homePage(d: HomeData, user: User, flash?: string): string {
   ];
   return page("Home", html`
 ${flash ? html`<div class="card bad">${flash}</div>` : ""}
-<div class="muted">${d.runnerAlive ? "Runner online" : html`<span class="warn">Runner offline</span>`} ·
+<div class="muted">${d.runnerAlive ? `Runner online${d.runnerHost ? ` on ${d.runnerHost}` : ""}` : html`<span class="warn">Runner offline</span>`} ·
   ${d.queue.length} in queue · backup ${d.backupAgeMs === null ? "never" : ago(d.backupAgeMs)}</div>
 
 <h2>New request</h2>

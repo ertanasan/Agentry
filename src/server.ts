@@ -1,8 +1,8 @@
 // The web UI and its HTTP routes (winhost design "Server"). Listens on 127.0.0.1 only; on winhost, Caddy is the
 // way in (agentry.example.com, basic auth in front). Every request is checked in this order:
 //
-//   Host in the allowlist (public name, localhost) ─► static files and sign-in routes
-//     ─► session cookie (passkey sign-in) ─► POST: Origin must be ours ─► route ─► actions.ts
+//   Host in the allowlist (public name, localhost) ─► /api/runner/* (a runner key, remote.ts)
+//     ─► static files and sign-in routes ─► session cookie (passkey sign-in) ─► POST: Origin must be ours ─► route ─► actions.ts
 //
 // The Host check stops DNS rebinding, the Origin check and SameSite=Strict stop cross-site forms (slice 2
 // review D9). Request state changes only through src/actions.ts, the same code the CLI runs, with the user
@@ -23,6 +23,7 @@ import * as g from "./git.ts";
 import { suggestedWorkers } from "./platform.ts";
 import { readTail } from "./proc.ts";
 import { parseRecipe } from "./recipe.ts";
+import { runnerApi, storedDiff } from "./remote.ts";
 import { MAX_DIFF_CHARS } from "./verifier.ts";
 import {
   APP_JS, HOME_JS, homePage, loginPage, logBlock, messagePage, registerPage, runPage, settingsPage, type GroupLock, type ReqRow, type StepRow,
@@ -83,6 +84,9 @@ export function startServer(o: ServerOptions) {
     const url = new URL(req.url);
     const host = req.headers.get("host") ?? "";
     if (!allowedHosts.has(host)) return text(421, "unknown host");
+    // A runner on another machine authenticates with its key, not a cookie, so the Origin check doesn't apply.
+    const api = await runnerApi(db, o.home, req, url);
+    if (api) return api;
     if (req.method === "POST" && !allowedOrigins.has(req.headers.get("origin") ?? "")) return text(403, "cross-origin request refused");
 
     const stat = STATIC[url.pathname];
@@ -292,7 +296,7 @@ export function startServer(o: ServerOptions) {
       recent: rows("r.status IN ('done', 'done_manual', 'canceled')", "r.updated_at DESC LIMIT 10"),
       groupLocks: db.query("SELECT name, lock_reason FROM deploy_groups WHERE lock = 'blocked' AND locked_by_request IS NULL").all() as GroupLock[],
       paused: runner.paused ? runner.pause_reason ?? "paused" : null,
-      runnerAlive: runner.owner_token !== null && runner.lease_expires_at > Date.now(),
+      runnerAlive: runner.owner_token !== null && runner.lease_expires_at > Date.now(), runnerHost: runner.owner_host,
       backupAgeMs: last === null ? null : Date.now() - last,
       backupStale: last === null || Date.now() - last > STALE_AFTER_MS,
     };
@@ -313,7 +317,9 @@ export function startServer(o: ServerOptions) {
     const log = chosen?.log_path && existsSync(chosen.log_path) ? readTail(chosen.log_path, LOG_TAIL_BYTES) : "";
     const head = run.commit_sha ?? run.candidate_sha;
     let diffStat = "", diff = "", diffCut = false;
-    if (head && run.base_sha) {
+    const stored = storedDiff(o.home, id);
+    if (stored) ({ stat: diffStat, diff, cut: diffCut } = stored);
+    else if (head && run.base_sha) {
       const repo = parseRecipe(req.recipe).repo;
       diffStat = (await g.run(repo, ["diff", "--stat", run.base_sha, head])).out;
       diff = (await g.run(repo, ["diff", "--no-color", run.base_sha, head])).out;
