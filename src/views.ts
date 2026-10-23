@@ -552,7 +552,7 @@ ${d.attachedTo ? html`<p>Pause and workers are set on ${queueLink(d.attachedTo)}
     <p class="hint">Requests already running finish.</p>` : ""}`}
 <form method="post" action="/settings">
   <label for="ai-agent">AI Agent</label>
-  <select id="ai-agent" name="ai_agent"${runnerOff}>
+  <select id="ai-agent" name="ai_agent"${off}>
     ${Object.entries(AGENTS).map(([id, label]) => html`<option value="${id}" ${(d.aiAgent ?? "claude") === id ? "selected" : ""}>${label}${id === "claude" ? " (default)" : ""}</option>`)}
   </select>
   <p class="hint">Applies to new runs, including their verifier. Use subscription or ChatGPT token access configured on each runner.</p>
