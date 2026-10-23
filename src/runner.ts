@@ -69,6 +69,7 @@ type Stop = {
   requeue?: boolean;                               // back to queued; the attempt does not count
   pause?: boolean;                                 // infrastructure failure: pause the runner
   lock?: { reason: string; sha: string | null; groups?: number[] };   // block these deploy groups; default all of the request's
+  repair?: string;                                 // internal: actionable build/test failure feedback
 };
 
 type Job = {
@@ -270,7 +271,7 @@ async function pipeline(j: Job, resumed: boolean): Promise<Stop> {
 
 // Gates, commit message, rebase if origin moved, push, deploy. `approved` skips the review flags.
 async function deliver(j: Job, approved: boolean): Promise<Stop> {
-  let stopped = await gates(j, approved);
+  let stopped = await gatesWithRepair(j, approved);
   if (stopped) return stopped;
   let sha = await g.amendMessage(j.wt, commitMessage(j.req));
   return holdGroups(groupsOf(j.parts), async () => {
@@ -285,7 +286,7 @@ async function deliver(j: Job, approved: boolean): Promise<Stop> {
         j.base = head;
         sha = await g.headSha(j.wt);
         await j.ctx.q.setRun(j.runId, { base_sha: head });
-        stopped = await gates(j, approved);
+        stopped = await gatesWithRepair(j, approved);
         if (stopped) return stopped;
       }
       const pushed = await push(j, sha);
@@ -299,6 +300,19 @@ async function deliver(j: Job, approved: boolean): Promise<Stop> {
 
 function commitMessage(r: ReqRow): string {
   return `${r.title}\n\n${r.body ? r.body + "\n\n" : ""}Agentry-Request: #${r.id}`;
+}
+
+// Retry actionable build/test failures with bounded agent repair passes. Every pass reruns all gates.
+async function gatesWithRepair(j: Job, approved: boolean): Promise<Stop | null> {
+  for (let attempt = 0; ; attempt++) {
+    const stopped = await gates(j, approved);
+    if (!stopped?.repair || attempt >= 2) return stopped;
+    const repaired = await agentStep(j, stopped.repair);
+    if (repaired) return repaired;
+    const candidate = await g.candidateCommit(j.wt, `agentry: repair for #${j.req.id}`);
+    if (!candidate) return pre("the agent made no changes while fixing the failed gate");
+    await j.ctx.q.setRun(j.runId, { candidate_sha: candidate });
+  }
 }
 
 // Step 4 (inspect), then build, tests and the done-when check on the worktree's HEAD. `approved` skips the
@@ -322,7 +336,10 @@ async function gates(j: Job, approved: boolean): Promise<Stop | null> {
     const b = await command(j, "build", recipe.build_cmd, { sandboxed: !recipe.build_unsandboxed, recipe });
     const t = tampered(j, "build");
     if (t) return t;
-    if (b.exitCode !== 0) return pre(b.timedOut ? "build timed out" : `build failed (exit ${b.exitCode})`);
+    if (b.exitCode !== 0) return {
+      ...pre(b.timedOut ? "build timed out" : `build failed (exit ${b.exitCode})`),
+      repair: `The build command failed (exit ${b.exitCode}${b.timedOut ? ", timed out" : ""}). Its output follows:\n${readTail(b.logPath, 24 * 1024)}`,
+    };
   }
 
   const runs: TestRun[] = [];
@@ -333,7 +350,10 @@ async function gates(j: Job, approved: boolean): Promise<Stop | null> {
     t = await command(j, "test", recipe.test_cmd, { sandboxed: true, recipe });
     const changed = tampered(j, "test");
     if (changed) return changed;
-    if (t.exitCode !== 0) return pre(t.timedOut ? "tests timed out" : `tests failed (exit ${t.exitCode})`);
+    if (t.exitCode !== 0) return {
+      ...pre(t.timedOut ? "tests timed out" : `tests failed (exit ${t.exitCode})`),
+      repair: `The test command failed (exit ${t.exitCode}${t.timedOut ? ", timed out" : ""}). Its output follows:\n${readTail(t.logPath, 24 * 1024)}`,
+    };
     if (!await g.trackedClean(j.wt)) return pre("the tests changed tracked files");
     if (!resultFile) continue;
 
@@ -403,13 +423,13 @@ async function otherProjects(j: Job): Promise<Owner[]> {
     .filter((p) => p.recipe.repo === j.repo).map((p) => ({ name: p.name, scope_path: p.recipe.scope_path }));
 }
 
-async function agentStep(j: Job): Promise<Stop | null> {
+async function agentStep(j: Job, repairFeedback?: string): Promise<Stop | null> {
   const s = await begin(j, "agent");
   // The request's files go into the run's temp dir, the one place outside the worktree the sandbox lets it read.
   const files = await j.ctx.q.copyAttachments(j.req.id, join(j.sbx!.env.TMPDIR, "attachments"));
   const res = await j.ctx.agent.run({
     worktree: j.wt, logPath: s.logPath, timeoutMs: longest(j, "agent"), sandbox: j.sbx!, onStart: s.onStart,
-    prompt: prompt(j, files, await j.ctx.q.answers(j.req.id)),
+    prompt: prompt(j, files, await j.ctx.q.answers(j.req.id), repairFeedback),
   });
   await s.end(res.outcome === "infra_error" ? 1 : 0);
   if (res.outcome === "infra_error") return infra(`agent: ${res.detail}`);
@@ -422,7 +442,7 @@ const OFFICE_XML: Record<string, string> = {
   [DOCX]: "word/document.xml", [XLSX]: "xl/sharedStrings.xml and xl/worksheets/", [PPTX]: "ppt/slides/",
 };
 
-function prompt(j: Job, files: RunFile[], answered: string[]): string {
+function prompt(j: Job, files: RunFile[], answered: string[], repairFeedback?: string): string {
   const { req } = j;
   const scopes = j.parts.map((p) => p.recipe.scope_path);
   const answers = answered.map((text) => `- ${text}`);
@@ -439,6 +459,7 @@ function prompt(j: Job, files: RunFile[], answered: string[]): string {
   ];
   if (req.done_when) parts.push(`\nDone when: ${req.done_when}`);
   if (req.done_when_test) parts.push(`\nDone when a test matching "${req.done_when_test}" passes.`);
+  if (repairFeedback) parts.push(`\n# Gate failure to fix\n${repairFeedback}\nFix the underlying issue in the request's scope, then stop. Do not edit tests, test-gate files, build files or CI configuration. If the failure needs a change outside the allowed scope, reply with a single line \`NEEDS_INFO: <what else must change, and where>\`.`);
   if (answers.length) parts.push(`\n# Answers to your earlier questions\n${answers.join("\n")}`);
   if (files.length) {
     const line = (f: RunFile) => `- ${f.path} (${f.name})${OFFICE_XML[f.mime] ? `: an Office file, a ZIP of XML. Unpack it into a new folder next to it
