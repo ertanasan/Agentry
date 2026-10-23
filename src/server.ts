@@ -287,7 +287,10 @@ export function startServer(o: ServerOptions) {
     }
     if (path === "/settings/pause") return A.pause(db, `paused by ${user.name}`);
     if (!verified) throw new A.ActionError("Confirm with your passkey first: the button at the top of the settings page.", "forbidden");
-    if (path === "/settings") return A.setWorkers(db, Number(field("workers")));
+    if (path === "/settings") return db.transaction(() => {
+      A.setWorkers(db, Number(field("workers")));
+      if (field("ai_agent") !== undefined) A.setAgent(db, field("ai_agent")!);
+    })();
     const project = path.match(/^\/settings\/projects\/([^/]+)\/(enable|disable)$/);
     if (project) return A.setProjectEnabled(db, decodeURIComponent(project[1]), project[2] === "enable");
     const linkFor = (name: string, code: string): Response =>
@@ -309,7 +312,7 @@ export function startServer(o: ServerOptions) {
     const memory = totalmem();
     const runner = runnerRow(db);
     return {
-      workers: runner.workers, maxWorkers: A.MAX_WORKERS, suggested: suggestedWorkers(cores, memory), cores,
+      aiAgent: runner.ai_agent, workers: runner.workers, maxWorkers: A.MAX_WORKERS, suggested: suggestedWorkers(cores, memory), cores,
       memoryGb: Math.round(memory / 2 ** 30), windows: process.platform === "win32",
       paused: runner.paused ? runner.pause_reason ?? "paused" : null, verified,
       projects: db.query(`SELECT p.name, g.name AS deploy_group, p.enabled FROM projects p JOIN deploy_groups g ON g.id = p.deploy_group_id

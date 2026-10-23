@@ -47,6 +47,7 @@ import type { Agent, Sandbox, Verifier } from "./adapters/types.ts";
 export type RunnerCtx = {
   q: Queue;                 // the queue, through this runner's lease
   home: string;             // ~/.agentry: worktrees/, runs/<id>/ (logs, temp), cache/
+  selectAgent?: () => Promise<RunnerCtx>;
   agent: Agent;
   verifier: Verifier;
   claudeBin?: string;
@@ -126,7 +127,8 @@ export async function startNext(ctx: RunnerCtx): Promise<Started> {
   try {
     const resume = req.resume_run ? await q.run(req.resume_run) : null;
     const attempt = resume ? resume.attempt : req.attempts + 1;
-    j = await startRun(ctx, req, {
+    const selected = ctx.selectAgent ? await ctx.selectAgent() : ctx;
+    j = await startRun(selected, req, {
       attempt, branch: resume?.branch ?? `agentry/${req.id}-${attempt}`, base: resume?.base_sha ?? null, candidate: resume?.candidate_sha ?? null,
     });
   } catch (e) {

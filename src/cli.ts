@@ -10,11 +10,15 @@
 // api-key-helper. AGENTRY_CLAUDE_BIN overrides the claude on PATH; AGENTRY_MODEL picks its model.
 import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import * as A from "./actions.ts";
+import { codexAgent, codexVerifier } from "./adapters/codex.ts";
+import { callGemini, googleAgent, googleVerifier, oauthCredentials } from "./adapters/google.ts";
+import { antigravityCredentials, callAntigravity, importAntigravityLogin } from "./adapters/antigravity.ts";
+import { isAgent } from "./adapters/providers.ts";
 import { claudeAgent, resolveAuth } from "./adapters/claude.ts";
 import { asActor, LeaseLost, openDb, runnerRow } from "./db.ts";
 import { addUser, AuthError, removeUser, resetUser } from "./accounts.ts";
@@ -46,7 +50,8 @@ const USAGE = `usage: agentry <command>
   reopen <id> <what's wrong>         done → a new linked request (counts one false-done)
   unblock <group>                    clear a deploy group's lock that no request holds (drift guard)
   resume                             unpause the runner
-  token                              save a \`claude setup-token\` token for subscription auth (paste, then Ctrl-D)
+  token [claude|codex|gemini|antigravity]   save a token (Google providers: OAuth JSON, not API keys)
+  token antigravity --from-login      import the current Windows account's Antigravity Google login
   serve                              the web UI on 127.0.0.1:$AGENTRY_PORT (default 4747), with nightly backups
   user add <name> [--admin]          create a web UI account, an owner (--admin: one that can't change settings);
                                      prints a one-time passkey link (30 min)
@@ -73,6 +78,7 @@ function main(argv: string[]): Promise<number> | number {
       body: { type: "string" }, "done-when": { type: "string" }, "done-when-test": { type: "string" },
       priority: { type: "string" }, once: { type: "boolean" }, all: { type: "boolean" }, help: { type: "boolean", short: "h" },
       owner: { type: "boolean" }, admin: { type: "boolean" }, runner: { type: "string" },
+      "from-login": { type: "boolean" },
     },
   });
   if (!cmd || o.help) { console.log(USAGE); return cmd ? 0 : 1; }
@@ -106,7 +112,7 @@ function main(argv: string[]): Promise<number> | number {
       return 0;
     }
     case "unblock": A.unblock(db, args[0] ?? fail("unblock needs a group name")); return 0;
-    case "token": return saveToken();
+    case "token": return saveToken(args[0], !!o["from-login"]);
     case "attach": return attach(db, args[0]);
     case "detach": return detach();
     case "runner-key": return runnerKey(db, args);
@@ -180,11 +186,24 @@ function list(db: Database, all: boolean): number {
 }
 
 // Reads a pasted `claude setup-token` token from stdin, refuses anything else, and saves it with mode 600.
-async function saveToken(): Promise<number> {
+async function saveToken(provider = "claude", fromLogin = false): Promise<number> {
+  if (!isAgent(provider)) fail("usage: agentry token [claude|codex|gemini|antigravity]");
+  if (fromLogin && provider !== "antigravity") fail("--from-login is supported for Antigravity on Windows only");
+  if (provider === "gemini" || provider === "antigravity") {
+    if (!fromLogin && process.stdin.isTTY) console.log("Paste the Google OAuth credential JSON, then finish stdin (Ctrl-D on macOS, Ctrl-Z then Enter on Windows):");
+    const raw = fromLogin ? importAntigravityLogin() : await Bun.stdin.text();
+    const token = provider === "antigravity" ? antigravityCredentials(raw) : oauthCredentials(raw);
+    const file = join(home, `${provider}-oauth-token.json`);
+    rmSync(file, { force: true });
+    writeFileSync(file, token + "\n", { mode: 0o600 });
+    console.log(`saved ${provider} OAuth credentials to ${file}`);
+    return 0;
+  }
   if (process.stdin.isTTY) console.log("Paste the token (line breaks are fine), then press Enter and Ctrl-D:");
   const token = (await Bun.stdin.text()).replace(/\s+/g, "");
-  if (!/^sk-ant-oat01-[A-Za-z0-9_-]+$/.test(token)) fail("that is not a setup-token token (sk-ant-oat01-…); nothing saved");
-  const file = join(home, "claude-oauth-token");
+  if (provider === "codex" && (!token || token.startsWith("sk-"))) fail("Paste a Codex access token, not an API key; nothing saved");
+  if (provider === "claude" && !/^sk-ant-oat01-[A-Za-z0-9_-]+$/.test(token)) fail("that is not a setup-token token (sk-ant-oat01-…); nothing saved");
+  const file = join(home, provider === "codex" ? "codex-access-token" : "claude-oauth-token");
   rmSync(file, { recursive: false, force: true });
   writeFileSync(file, token + "\n", { mode: 0o600 });
   console.log(`saved ${token.length} characters to ${file}`);
@@ -218,22 +237,47 @@ async function lease(q: Queue, once: boolean, stale: () => boolean): Promise<boo
 }
 
 // `work` holds the worktrees and runs: this machine's home, or an attached queue's folder in it.
-function makeCtx(q: Queue, work: string): RunnerCtx {
-  const bin = claudeBin();
-  const keyHelper = join(home, "api-key-helper");
-  const auth = resolveAuth(join(home, "claude-oauth-token"), keyHelper);
-  const model = process.env.AGENTRY_MODEL;
-  return {
-    q, home: work, claudeBin: bin, keyHelper, running: new Set(),
-    agent: claudeAgent({ bin, auth, model }), verifier: claudeVerifier({ bin, auth, model }),
+async function makeCtx(q: Queue, work: string): Promise<RunnerCtx> {
+  const base = { q, home: work, keyHelper: join(home, "api-key-helper"), running: new Set<number>() };
+  // Resolve only the selected binary and credentials, at the start of each run.
+  const selected = async () => {
+    const agent = (await q.settings()).ai_agent ?? "claude";
+    if (agent === "gemini" || agent === "antigravity") {
+      const prefix = agent === "gemini" ? "AGENTRY_GEMINI" : "AGENTRY_ANTIGRAVITY";
+      const command = agent === "gemini" ? "gemini" : "agy";
+      const bin = realpathSync(process.env[`${prefix}_BIN`] ?? Bun.which(command) ?? fail(`${command} is not on PATH (or set ${prefix}_BIN)`));
+      const o = { bin, authFile: process.env[`${prefix}_AUTH_FILE`] ?? join(home, `${agent}-oauth-token.json`), model: process.env[`${prefix}_MODEL`] };
+      const call = agent === "gemini" ? callGemini : callAntigravity;
+      return { ...base, claudeBin: bin,
+        agent: googleAgent((io, prompt, readOnly) => call(o, io, prompt, readOnly)),
+        verifier: googleVerifier((io, prompt, readOnly) => call(o, io, prompt, readOnly)) };
+    }
+    if (agent === "codex") {
+      const bin = realpathSync(process.env.AGENTRY_CODEX_BIN ?? Bun.which("codex") ?? fail("codex is not on PATH (or set AGENTRY_CODEX_BIN)"));
+      const tokenFile = join(home, "codex-access-token");
+      const token = existsSync(tokenFile) ? readFileSync(tokenFile, "utf8").trim() : undefined;
+      const authFile = process.env.AGENTRY_CODEX_AUTH_FILE ?? join(home, "codex", "auth.json");
+      const o = { bin, token, authFile, model: process.env.AGENTRY_CODEX_MODEL };
+      return { ...base, claudeBin: bin, agent: codexAgent(o), verifier: codexVerifier(o) };
+    }
+    if (agent !== "claude") throw new Error("Unsupported AI agent: " + agent);
+    const bin = claudeBin();
+    const auth = resolveAuth(join(home, "claude-oauth-token"), base.keyHelper);
+    if (auth.kind !== "subscription") throw new Error("Claude Code needs subscription token access: run agentry token");
+    const o = { bin, auth, model: process.env.AGENTRY_MODEL };
+    return { ...base, claudeBin: bin, agent: claudeAgent(o), verifier: claudeVerifier(o) };
   };
+  // Recovery needs the queue and run paths but no installed model CLI.
+  return { ...base, selectAgent: selected,
+    agent: { async run() { throw new Error("Agent not selected"); } },
+    verifier: { async verify() { throw new Error("Agent not selected"); } } };
 }
 
 // Holds the lease and heartbeat around `body`; a runner that loses its lease exits at once (D17).
 // "switch": the attach file changed, before the lease was taken or while `body` ran.
 async function withLease(q: Queue, once: boolean, work: string, stale: () => boolean,
   body: (ctx: RunnerCtx) => Promise<"switch" | void>): Promise<number | "switch"> {
-  const ctx = makeCtx(q, work);
+  const ctx = await makeCtx(q, work);
   if (!(await lease(q, once, stale))) return "switch";
   const stop = startHeartbeat(q, () => [...ctx.running], () => { console.error("lease lost: another runner took over"); process.exit(3); });
   try {

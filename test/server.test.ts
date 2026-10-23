@@ -490,6 +490,19 @@ describe("attached files", () => {
 });
 
 describe("settings", () => {
+  test("an owner changes AI agent; invalid selections roll back all settings", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    expect(runnerRow(h.db).ai_agent).toBe("claude");
+    const body = await (await h.call("/settings", { cookie })).text();
+    expect(body).toContain('name="ai_agent"');
+    expect(body).toContain('value="claude" selected');
+    expect((await h.call("/settings", { method: "POST", cookie, form: { workers: "2", ai_agent: "codex" } })).status).toBe(303);
+    expect(runnerRow(h.db).ai_agent).toBe("codex");
+    expect((await h.call("/settings", { method: "POST", cookie, form: { workers: "3", ai_agent: "unknown" } })).status).toBe(400);
+    expect(runnerRow(h.db)).toMatchObject({ workers: 2, ai_agent: "codex" });
+  });
+
   test("an owner sets the worker count; the change is audited with the owner as actor", async () => {
     const h = await setup();
     const { cookie } = await h.signUp();

@@ -155,6 +155,12 @@ export function resume(db: Database): void {
   logEvent(db, null, "resume");
 }
 
+export function setAgent(db: Database, agent: string): void {
+  if (!["claude", "codex", "gemini", "antigravity"].includes(agent)) throw new ActionError("Choose Claude Code, Codex, Gemini CLI or Antigravity CLI.", "invalid");
+  db.query("UPDATE runner SET ai_agent = ? WHERE id = 1").run(agent);
+  logEvent(db, null, "settings", { ai_agent: agent });
+}
+
 export const MAX_WORKERS = 8;
 
 // How many requests the runner works on at once. A running runner picks the change up before it starts the next

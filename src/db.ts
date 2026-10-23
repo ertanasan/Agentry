@@ -5,6 +5,7 @@
 // (eng review D7, D17; two-runners review D1).
 import { Database } from "bun:sqlite";
 import { hostname } from "node:os";
+import type { AgentId } from "./adapters/providers.ts";
 
 export const LEASE_TTL_MS = 60_000;
 export const HEARTBEAT_MS = 15_000;
@@ -132,6 +133,14 @@ export const MIGRATIONS: string[] = [
    ALTER TABLE requests ADD COLUMN holder TEXT;
    UPDATE requests SET holder = 'local' WHERE status = 'running';
    ALTER TABLE projects ADD COLUMN runners TEXT;`,
+  // 9: the selectable coding agent; existing queues continue with Claude Code.
+  "ALTER TABLE runner ADD COLUMN ai_agent TEXT NOT NULL DEFAULT 'claude' CHECK (ai_agent IN ('claude', 'codex'))",
+  // 10: expand the provider constraint without changing migration 9 or resetting the saved selection.
+  `ALTER TABLE runner ADD COLUMN ai_agent_next TEXT NOT NULL DEFAULT 'claude'
+     CHECK (ai_agent_next IN ('claude', 'codex', 'gemini', 'antigravity'));
+   UPDATE runner SET ai_agent_next = ai_agent;
+   ALTER TABLE runner DROP COLUMN ai_agent;
+   ALTER TABLE runner RENAME COLUMN ai_agent_next TO ai_agent;`,
 ];
 
 // Checks run before a migration; a message refuses it and leaves the database as it was.
@@ -174,10 +183,10 @@ function migrate(db: Database): void {
 }
 
 // The queue's settings, shared by all its runners.
-type RunnerRow = { paused: number; pause_reason: string | null; workers: number };
+type RunnerRow = { paused: number; pause_reason: string | null; workers: number; ai_agent: AgentId };
 
 export function runnerRow(db: Database): RunnerRow {
-  return db.query("SELECT paused, pause_reason, workers FROM runner WHERE id = 1").get() as RunnerRow;
+  return db.query("SELECT paused, pause_reason, workers, ai_agent FROM runner WHERE id = 1").get() as RunnerRow;
 }
 
 export type Lease = { holder: string; token: string; pid: number | null; host: string | null; expires_at: number; recipes: string | null };

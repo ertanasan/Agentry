@@ -4,6 +4,7 @@
 // routed to it (routing.ts), writes only to its own runs and requests, and recovers only its own runs. Every write
 // is fenced by the holder's lease token (D17; two-runners review D1-D9).
 import type { Database } from "bun:sqlite";
+import type { AgentId } from "./adapters/providers.ts";
 import { copyForRun, type RunFile } from "./attachments.ts";
 import {
   acquireLease, fenced, HEARTBEAT_MS, LEASE_TTL_MS, LeaseLost, leaseOf, NotYours, releaseLease, renewLease, runnerRow, setRequestStatus,
@@ -27,7 +28,7 @@ export type RecoveryRun = {
   id: number; request_id: number; current_step: string | null; pgid: number | null; base_sha: string | null;
   commit_sha: string | null; push_state: PushState; project: string; recipe: string;
 };
-export type Settings = { paused: number; pause_reason: string | null; workers: number };
+export type Settings = { paused: number; pause_reason: string | null; workers: number; ai_agent?: AgentId };
 // Who holds the lease when this runner can't take it.
 export type Holder = { pid: number | null; host: string | null; until: number };
 export type NewRun = { attempt: number; branch: string; base: string | null; candidate: string | null; commit?: string; pushState?: PushState };
@@ -129,8 +130,8 @@ export function localQueue(db: Database, token: string, home: string, holder = L
     async renew(runIds: number[]) { renewLease(db, token, runIds, Date.now(), holder); },
     async release() { releaseLease(db, token, holder); },
     async settings(): Promise<Settings> {
-      const { paused, pause_reason, workers } = runnerRow(db);
-      return { paused, pause_reason, workers };
+      const { paused, pause_reason, workers, ai_agent } = runnerRow(db);
+      return { paused, pause_reason, workers, ai_agent };
     },
 
     // Taken in the same transaction that checks it, so two runners can't both take it (D5).

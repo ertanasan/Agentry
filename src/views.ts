@@ -3,6 +3,7 @@
 // must never become markup on a page that carries the session cookie (slice 2 review Q1). Actions are plain
 // forms posting to the server; htmx only refreshes the live parts: a running run's page, and the home page's lists.
 import type { User } from "./accounts.ts";
+import { AGENTS, type AgentId } from "./adapters/providers.ts";
 
 export class Html { constructor(readonly s: string) {} toString() { return this.s; } }
 
@@ -510,6 +511,7 @@ ${d.diffStat ? html`<pre class="wide">${d.diffStat.replace(/^\n+/, "")}</pre><de
 }
 
 export type SettingsData = {
+  aiAgent?: AgentId;
   workers: number; maxWorkers: number; suggested: number; cores: number; memoryGb: number; windows: boolean;
   paused: string | null;
   verified: boolean; // the session's passkey was checked recently: owners may change settings
@@ -549,12 +551,18 @@ ${d.attachedTo ? html`<p>Pause and workers are set on ${queueLink(d.attachedTo)}
   : html`<p>Running new requests.</p>${owner ? html`<div class="actions"><form method="post" action="/settings/pause"><button>Pause</button></form></div>
     <p class="hint">Requests already running finish.</p>` : ""}`}
 <form method="post" action="/settings">
+  <label for="ai-agent">AI Agent</label>
+  <select id="ai-agent" name="ai_agent"${runnerOff}>
+    ${Object.entries(AGENTS).map(([id, label]) => html`<option value="${id}" ${(d.aiAgent ?? "claude") === id ? "selected" : ""}>${label}${id === "claude" ? " (default)" : ""}</option>`)}
+  </select>
+  <p class="hint">Applies to new runs, including their verifier. Use subscription or ChatGPT token access configured on each runner.</p>
+  <p class="hint">Gemini CLI uses Google OAuth. Antigravity CLI supports Google Free sign-in on Windows; import that login on each runner with agentry token antigravity --from-login.</p>
   <label for="workers">Workers</label>
   <p class="hint">How many requests the runner works on at once. Pushes and deploys still go one at a time for each deploy group.</p>
   <input type="number" id="workers" name="workers" min="1" max="${d.maxWorkers}" step="1" value="${d.workers}" required${off}>
   <p class="hint">Suggested for this machine: ${d.suggested} (${d.cores} CPU cores, ${d.memoryGb} GB of memory: one worker for every 4 cores and every 8 GB).</p>
   ${d.workers > d.suggested ? html`<p class="warn">${d.workers} workers is more than this machine suits. Builds and tests will slow each other down,
-    and every worker uses the same Claude account, so runs may hit its rate limits.</p>` : ""}
+    and every worker uses the same agent account, so runs may hit its rate limits.</p>` : ""}
   ${d.windows && d.workers > 1 ? html`<p class="warn">On Windows every worker runs as the one AgentrySandbox user, so one request's agent can
     reach the files of the others running at the same time.</p>` : ""}
   ${owner ? html`<div class="actions"><button class="primary"${off}>Save</button></div>` : ""}

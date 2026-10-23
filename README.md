@@ -107,7 +107,7 @@ flowchart LR
    top of a production state it can't explain.
 3. **Worktree.** The run gets a new git worktree on branch `agentry/<request>-<attempt>`, starting at the remote
    head. Agentry never checks out, resets or commits to your own checkout.
-4. **Agent.** Claude Code makes the change inside the sandbox. Its prompt includes the request, the done-when
+4. **Agent.** The selected agent (Claude Code by default, or Codex) makes the change inside the sandbox. Its prompt includes the request, the done-when
    line, your earlier answers, any attached files, and the `CLAUDE.md` / `AGENTS.md` of each selected project.
    If the request is ambiguous, or the change needs code outside its scope, the agent replies `NEEDS_INFO`
    and changes nothing.
@@ -344,9 +344,10 @@ killed with its whole tree on a timeout.
 
 - Claude Code runs headless with an explicit tool list (`Bash, Read, Edit, Write, Glob, Grep` for the agent;
   `Read, Grep` only for the verifier), `--strict-mcp-config`, and no session persistence.
-- With an API key it runs `--bare`: no hooks, plugins, keychain or `CLAUDE.md` discovery. With a subscription
-  token it runs `--safe-mode` and reads settings only from the run's empty config dir, **never from the
+- With a subscription token it runs `--safe-mode` and reads settings only from the run's empty config dir, **never from the
   worktree's agent-writable `.claude/` folder**.
+- Codex uses an isolated `CODEX_HOME`, ignores user config and execution rules, and uses ephemeral JSON output.
+  Coding runs under Agentry's external sandbox; verification additionally uses Codex's read-only mode.
 - The prompt forbids commits, pushes, deploys and edits to build, CI or gate files. The gates enforce those
   rules anyway, so they don't depend on the prompt being followed.
 
@@ -371,9 +372,10 @@ executes code at build time needs a person's approval**: `*.csproj`, `*.props`, 
 
 ### 5. Credentials
 
-- Claude is authenticated with an **API-key helper** script or a **`claude setup-token` subscription token**,
+- Claude is authenticated with a **`claude setup-token` subscription token**,
   saved with mode `600` by `agentry token` (on Windows, in `C:\Agentry\home`, which only `AgentryRunner` and
   administrators can read). Neither touches the keychain.
+- Codex uses a ChatGPT login or a workspace access token. The runner rejects API-key credential files.
 - The tests, build and agent never see your git credentials, SSH keys or cloud credentials. Agentry pushes and
   deploys from outside the sandbox, after the gates.
 
@@ -409,8 +411,8 @@ We'd rather you know where the boundaries are:
 
 - The sandbox **leaves the network open**, because package restores and the agent itself need it. Harden
   services on the runner host that trust local connections.
-- The API key or subscription token is **readable from inside the sandbox**, since the agent needs it. Use a
-  dedicated, revocable key.
+- The agent's authentication tokens are **readable from inside its sandbox**, since the agent needs them.
+  Use dedicated, revocable credentials.
 - Deploy commands, and builds marked `build_unsandboxed`, run with your privileges. That's why the review gates
   above exist.
 - On Windows, the sandbox user **can read whatever Windows lets every user read**, and it can **list the names**
@@ -560,7 +562,7 @@ A screenshot or a spec often explains a change faster than a paragraph does.
   CLI on `PATH`
 - **Windows:** **git** and an elevated Windows PowerShell. The setup script installs Bun and Claude Code, so skip
   to [On Windows](#on-windows).
-- Either an Anthropic **API key** or a **Claude subscription** token from `claude setup-token`
+- A **Claude subscription** token from `claude setup-token`, or Codex with ChatGPT token access (see below).
 
 ### On macOS
 
@@ -589,12 +591,39 @@ Run the script again at any time, for example after `git pull`: it keeps the URL
 you give new ones. `--self-test` runs the sandbox canary against your Mac and checks the UI and the runner, and
 `--uninstall` removes the agents and the command (your data in `~/.agentry` stays).
 
-To use an API key instead of a subscription, write an executable script that prints the key (use a dedicated,
-revocable key):
+### Choose an AI agent
 
-```sh
-printf '#!/bin/sh\necho sk-ant-api03-...\n' > ~/.agentry/api-key-helper && chmod 700 ~/.agentry/api-key-helper
+In **Settings → Runner → AI Agent**, choose **Claude Code** (the default) or **Codex**, then Save.
+The selection applies to the next run and its verifier, including on attached runners. Running requests keep
+their selected agent. Each runner needs the chosen CLI installed and its own credentials. Owner and fresh
+passkey requirements are the same as for the other runner settings.
+
+Both choices use token access; the runner does not fall back to API keys. For Claude Code, run
+`claude setup-token`, then paste its output into `agentry token` (or `agentry token claude`).
+
+For Codex, install the Codex CLI in a location the sandbox account can execute. Use either:
+
+- A ChatGPT workspace access token: run `agentry token codex` and paste the token. It is saved in
+  `$AGENTRY_HOME/codex-access-token`, never in the database or browser. Workspace access tokens require
+  availability and authorization in your ChatGPT workspace.
+- ChatGPT sign-in: run the following as the runner account, pointing `CODEX_HOME` at
+  `$AGENTRY_HOME/codex` (PowerShell example):
+
+```powershell
+$env:CODEX_HOME = Join-Path $env:AGENTRY_HOME 'codex'
+codex login --device-auth -c 'cli_auth_credentials_store="file"'
 ```
+
+On macOS, use `CODEX_HOME="$HOME/.agentry/codex" codex login --device-auth -c 'cli_auth_credentials_store="file"'`.
+Alternatively, set `AGENTRY_CODEX_AUTH_FILE` to a dedicated ChatGPT `auth.json`. API-key credential files are
+rejected. Each call receives an isolated copy of those credentials, with no user config or rules; refreshed
+credentials are not copied back from the sandbox. Sign in again if the saved credentials expire. Access tokens
+can also be replaced by rerunning `agentry token codex`.
+
+Codex's coding step uses Agentry's existing external sandbox. Its verifier additionally uses Codex's read-only
+mode. Codex must be recent enough to support `--ignore-user-config`, `--ignore-rules`, and `--ephemeral`.
+See the official [authentication documentation](https://learn.chatgpt.com/docs/auth) and
+[access token documentation](https://learn.chatgpt.com/docs/enterprise/access-tokens).
 
 ### Register a project and queue a request
 
@@ -706,7 +735,7 @@ agentry redeploy <id> | resolve <id>  blocked_post_push → queue a re-run of th
 agentry reopen <id> <what's wrong>    done → a new linked request (counts one false-done)
 agentry unblock <group>               clear a deploy-group lock no request holds (drift guard)
 agentry resume                        unpause the runner
-agentry token                         save a `claude setup-token` token (paste, then Ctrl-D)
+agentry token [claude|codex]          save a Claude subscription token or Codex access token (paste, then Ctrl-D)
 agentry serve                         the web UI, with nightly backups
 agentry user add <name> [--admin]     create a web UI account, an owner unless --admin; prints a one-time passkey link
 agentry user reset <name>             revoke a user's passkeys and sessions; prints a new link
@@ -727,6 +756,9 @@ agentry detach                        this machine's runner works its own queue 
 | `AGENTRY_BACKUP_DIR` | `$AGENTRY_HOME/backups` | Backup destination. If you set it, the folder must already exist. |
 | `AGENTRY_CLAUDE_BIN` | `claude` on `PATH` | The Claude Code binary |
 | `AGENTRY_MODEL` | Claude Code's default | Model for the agent and the verifier |
+| `AGENTRY_CODEX_BIN` | `codex` on `PATH` | The Codex CLI binary; install somewhere readable by the sandbox account |
+| `AGENTRY_CODEX_MODEL` | Codex's default | Codex model for coding and verification |
+| `AGENTRY_CODEX_AUTH_FILE` | `$AGENTRY_HOME/codex/auth.json` | ChatGPT login credentials; API keys are rejected |
 
 Runner settings (workers, pause, enabled projects) live in the database and are changed on the
 [settings page](#the-web-ui), so they apply without a restart.
