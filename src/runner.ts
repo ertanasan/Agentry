@@ -329,6 +329,7 @@ function clearTestResultFiles(j: Job): void {
 // review flags, never the scope: a change outside the request's projects would ship without their deploy.
 async function gates(j: Job, approved: boolean): Promise<Stop | null> {
   const { req } = j;
+  clearTestResultFiles(j);
   const head = await g.headSha(j.wt);
   await j.ctx.q.saveDiff?.(j.runId, j.wt, j.base, head);
   const found = inspect(await g.changedFiles(j.wt, j.base, head), await g.addedLines(j.wt, j.base, head), j.parts.map((p) => p.recipe), await otherProjects(j));
