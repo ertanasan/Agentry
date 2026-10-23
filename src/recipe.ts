@@ -11,7 +11,7 @@ export type Recipe = {
   remote?: string;              // default "origin"
   branch?: string;              // default "main"
   deploy_group: string;         // projects sharing a deploy target share a group
-  scope_path: string;           // e.g. "VocaTrain_backend/"; changes outside it go to needs_review
+  scope_path: string;           // e.g. "VocaTrain_backend/", or "" for the whole repo; changes outside it go to needs_review
   build_cmd?: string;           // runs before tests, sandboxed (D16)
   build_unsandboxed?: boolean;  // build_cmd runs outside the sandbox on a cleaned worktree, like deploy (D6): for a
                                 // toolchain the sandbox can't host (xcodebuild needs the user's SwiftPM cache)
@@ -49,7 +49,7 @@ export function timeoutMs(r: Recipe, step: StepName): number {
 export function parseRecipe(json: string): Recipe {
   const r = JSON.parse(json) as Recipe;
   for (const key of ["repo", "deploy_group", "scope_path", "test_cmd"] as const) {
-    if (typeof r[key] !== "string" || !r[key]) throw new Error(`recipe: "${key}" is required`);
+    if (typeof r[key] !== "string" || (!r[key] && key !== "scope_path")) throw new Error(`recipe: "${key}" is required`);
   }
   if (r.deploy_cmd && !r.targets?.length) throw new Error("recipe: a deploy_cmd needs targets with live_version_cmd");
   return r;
