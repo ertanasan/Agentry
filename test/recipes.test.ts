@@ -12,6 +12,12 @@ describe("recipes", () => {
     test(`${f} parses`, () => { parseRecipe(readFileSync(join(dir, f), "utf8")); });
   }
 
+  test('scope_path "" is the whole repo; a missing one is still an error', () => {
+    const base = { repo: "/x", deploy_group: "g", test_cmd: "true" };
+    expect(parseRecipe(JSON.stringify({ ...base, scope_path: "" })).scope_path).toBe("");
+    expect(() => parseRecipe(JSON.stringify(base))).toThrow('"scope_path" is required');
+  });
+
   test("vocatrain-backend: TRX path, encoded busy check and VERSION format line up", () => {
     const json = readFileSync(join(dir, "vocatrain-backend.json"), "utf8");
     const r = parseRecipe(json);

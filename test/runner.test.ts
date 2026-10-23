@@ -168,6 +168,14 @@ describe("runner: agent outcomes", () => {
     expect(h.prompts[1]).toContain("do not edit build files");
   });
 
+  test('a whole-repo project (scope_path "") gets no folder limit in the prompt and no out_of_scope flag', async () => {
+    const h = setup({ recipe: { scope_path: "" }, agent: (wt) => { writeFileSync(join(wt, "README.md"), "changed\n"); } });
+    const id = h.add();
+    await runNext(h.ctx);
+    expect(h.req(id).status).toBe("done");
+    expect(h.prompts[0]).toStartWith(`You are working on request #${id}.\nRules:`);
+  });
+
   test("attached files reach the agent: copied into the run's temp dir and named in the prompt", async () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
     let seen = null as Uint8Array | null;

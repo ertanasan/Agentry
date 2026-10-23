@@ -423,10 +423,13 @@ function prompt(j: Job, files: RunFile[], answered: string[]): string {
   const { req } = j;
   const scopes = j.parts.map((p) => p.recipe.scope_path);
   const answers = answered.map((text) => `- ${text}`);
+  const whole = scopes.includes(""); // a whole-repo project: nothing is out of scope
   const parts = [
-    `You are working on request #${req.id}. Change files only under ${scopes.join(", ")}. If the request needs a change`,
-    "anywhere else in the repository (a test in another project, an API the code calls), change nothing and reply with a",
-    "single line `NEEDS_INFO: <what else must change, and where>`: a change outside those folders is never deployed.",
+    `You are working on request #${req.id}.${whole ? "" : ` Change files only under ${scopes.join(", ")}. If the request needs a change`}`,
+    ...(whole ? [] : [
+      "anywhere else in the repository (a test in another project, an API the code calls), change nothing and reply with a",
+      "single line `NEEDS_INFO: <what else must change, and where>`: a change outside those folders is never deployed.",
+    ]),
     "Rules: edit code only. Do not commit, push or deploy, and do not edit build files, CI config or test-gate files.",
     "If the request is ambiguous, reply with a single line `NEEDS_INFO: <question>` and change nothing.",
     `\n# Request: ${req.title}\n\n${req.body}`,
