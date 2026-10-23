@@ -307,11 +307,21 @@ async function gatesWithRepair(j: Job, approved: boolean): Promise<Stop | null> 
   for (let attempt = 0; ; attempt++) {
     const stopped = await gates(j, approved);
     if (!stopped?.repair || attempt >= 2) return stopped;
+    clearTestResultFiles(j);
     const repaired = await agentStep(j, stopped.repair);
     if (repaired) return repaired;
+    // Test reports are generated artifacts, not candidate changes. The test command may have failed after
+    // writing its report, and candidateCommit stages the whole worktree.
+    clearTestResultFiles(j);
     const candidate = await g.candidateCommit(j.wt, `agentry: repair for #${j.req.id}`);
     if (!candidate) return pre("the agent made no changes while fixing the failed gate");
     await j.ctx.q.setRun(j.runId, { candidate_sha: candidate });
+  }
+}
+
+function clearTestResultFiles(j: Job): void {
+  for (const { recipe } of distinct(j.parts, (p) => p.recipe.test_result_file)) {
+    if (recipe.test_result_file) rmSync(join(j.wt, recipe.test_result_file), { force: true });
   }
 }
 
