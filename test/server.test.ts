@@ -94,7 +94,7 @@ describe("sign-up and sign-in", () => {
 
     // The runner settings are the other machine's: shown read-only here, and refused.
     const settings = await (await h.call("/settings", { cookie })).text();
-    expect(settings).toContain(`Pause and workers are set on ${link}`);
+    expect(settings).toContain(`Pause, workers and the default AI agent are set on ${link}`);
     expect(settings).toContain('<a href="https://winhost.example.ts.net/settings">change them there</a>');
     expect(settings).not.toContain('id="workers"');
     const pause = await h.call("/settings/pause", { method: "POST", cookie });
@@ -181,6 +181,23 @@ describe("actions", () => {
     expect(r.status).toBe(303);
     expect(h.db.query("SELECT title, status, done_when FROM requests").get()).toEqual({ title: "Two idioms", status: "queued", done_when: "it shows two" });
     expect(h.db.query("SELECT actor FROM events WHERE type = 'add'").get()).toEqual({ actor: "user:ertan" });
+  });
+
+  test("a request picks its own AI agent or the queue's default; a reopened one keeps it", async () => {
+    const h = await setup();
+    const { cookie } = await h.signUp();
+    const home = await (await h.call("/", { cookie })).text();
+    expect(home).toContain('<option value="">Default: Claude Code</option>');
+    expect((await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "Mine", ai_agent: "codex" } })).status).toBe(303);
+    expect((await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "Default", ai_agent: "" } })).status).toBe(303);
+    const bad = await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "Bad", ai_agent: "unknown" } });
+    expect(bad.status).toBe(400);
+    expect(await bad.text()).toContain('<option value="">Default: Claude Code</option>');
+    expect(h.db.query("SELECT title, ai_agent FROM requests ORDER BY id").all()).toEqual([{ title: "Mine", ai_agent: "codex" }, { title: "Default", ai_agent: null }]);
+    expect(await (await h.call("/", { cookie })).text()).toContain('<span class="num">#1</span><span>vt-web</span>\n    <span>Codex</span>');
+    h.db.query("UPDATE requests SET status = 'done' WHERE id = 1").run();
+    expect((await h.call("/requests/1/reopen", { method: "POST", cookie, form: { text: "still broken" } })).status).toBe(303);
+    expect(h.db.query("SELECT ai_agent FROM requests WHERE reopened_from = 1").get()).toEqual({ ai_agent: "codex" });
   });
 
   test("a request can name several projects of one repo, never projects of different repos or none", async () => {

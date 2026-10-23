@@ -15,6 +15,7 @@ import { LOCAL, missingRecipes, routeOf } from "./routing.ts";
 export type ReqRow = {
   id: number; project_id: number; title: string; body: string; done_when: string | null; done_when_test: string | null;
   attempts: number; resume_run: number | null; status: RequestStatus; status_reason: string | null;
+  ai_agent?: AgentId | null; // its own agent; none takes the queue's (absent from a queue that predates it)
 };
 export type RunRow = {
   id: number; attempt: number; branch: string; base_sha: string | null; candidate_sha: string | null;
@@ -89,7 +90,7 @@ export interface Queue {
 // A queue on another machine could not be reached; the runner retries what it can.
 export class Unreachable extends Error {}
 
-const REQ_COLUMNS = "r.id, r.project_id, r.title, r.body, r.done_when, r.done_when_test, r.attempts, r.resume_run, r.status, r.status_reason";
+const REQ_COLUMNS = "r.id, r.project_id, r.title, r.body, r.done_when, r.done_when_test, r.attempts, r.resume_run, r.status, r.status_reason, r.ai_agent";
 const RUN_COLUMNS = `ru.id, ru.request_id, ru.current_step, ru.pgid, ru.base_sha, ru.commit_sha, ru.push_state,
   p.name AS project, p.recipe`;
 const RUN_JOIN = "FROM runs ru JOIN requests r ON r.id = ru.request_id JOIN projects p ON p.id = r.project_id";

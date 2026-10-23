@@ -18,7 +18,7 @@ import * as A from "./actions.ts";
 import { codexAgent, codexVerifier } from "./adapters/codex.ts";
 import { callGemini, googleAgent, googleVerifier, oauthCredentials } from "./adapters/google.ts";
 import { antigravityCredentials, callAntigravity, importAntigravityLogin } from "./adapters/antigravity.ts";
-import { isAgent } from "./adapters/providers.ts";
+import { isAgent, type AgentId } from "./adapters/providers.ts";
 import { claudeAgent, resolveAuth } from "./adapters/claude.ts";
 import { asActor, LeaseLost, openDb, runnerRow } from "./db.ts";
 import { addUser, AuthError, removeUser, resetUser } from "./accounts.ts";
@@ -40,6 +40,7 @@ const USAGE = `usage: agentry <command>
   project add <name> <recipe.json> [--runner R,...]   register or update a project; --runner: the runners that
                                      may run it, home first ("local": this machine's; others: runner key names)
   add <project>[,<project>...] <title> [--body B] [--done-when D] [--done-when-test T] [--priority N]
+                                     --agent claude|codex|gemini|antigravity: its agent (else the queue's)
   list [--all]
   run [--once]                       work the queue (--once: stop when idle or paused and nothing runs)
   answer <id> <text>                 needs_info → queued
@@ -78,7 +79,7 @@ function main(argv: string[]): Promise<number> | number {
       body: { type: "string" }, "done-when": { type: "string" }, "done-when-test": { type: "string" },
       priority: { type: "string" }, once: { type: "boolean" }, all: { type: "boolean" }, help: { type: "boolean", short: "h" },
       owner: { type: "boolean" }, admin: { type: "boolean" }, runner: { type: "string" },
-      "from-login": { type: "boolean" },
+      "from-login": { type: "boolean" }, agent: { type: "string" },
     },
   });
   if (!cmd || o.help) { console.log(USAGE); return cmd ? 0 : 1; }
@@ -155,10 +156,10 @@ function projectAdd(db: Database, args: string[], runners: string | undefined): 
 
 function add(db: Database, args: string[], o: Record<string, string | boolean | undefined>): number {
   const [project, ...title] = args;
-  if (!project || !title.length) fail("usage: agentry add <project>[,<project>...] <title> [--body B] [--done-when D] [--done-when-test T]");
+  if (!project || !title.length) fail("usage: agentry add <project>[,<project>...] <title> [--body B] [--done-when D] [--done-when-test T] [--agent A]");
   const id = A.addRequest(db, {
     projects: project.split(","), title: title.join(" "), body: o.body as string | undefined, doneWhen: o["done-when"] as string | undefined,
-    doneWhenTest: o["done-when-test"] as string | undefined, priority: Number(o.priority ?? 0),
+    doneWhenTest: o["done-when-test"] as string | undefined, priority: Number(o.priority ?? 0), agent: o.agent as string | undefined,
   });
   console.log(`#${id} queued`);
   return 0;
@@ -240,8 +241,8 @@ async function lease(q: Queue, once: boolean, stale: () => boolean): Promise<boo
 async function makeCtx(q: Queue, work: string): Promise<RunnerCtx> {
   const base = { q, home: work, keyHelper: join(home, "api-key-helper"), running: new Set<number>() };
   // Resolve only the selected binary and credentials, at the start of each run.
-  const selected = async () => {
-    const agent = (await q.settings()).ai_agent ?? "claude";
+  const selected = async (requested?: AgentId | null) => {
+    const agent = requested ?? (await q.settings()).ai_agent ?? "claude";
     if (agent === "gemini" || agent === "antigravity") {
       const prefix = agent === "gemini" ? "AGENTRY_GEMINI" : "AGENTRY_ANTIGRAVITY";
       const command = agent === "gemini" ? "gemini" : "agy";

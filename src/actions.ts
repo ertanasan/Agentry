@@ -2,6 +2,7 @@
 // the web UI calls the same functions, so a state rule lives in one place (slice 2 review D3). Each action runs
 // in one transaction and refuses a request that is not in a state it acts on.
 import type { Database } from "bun:sqlite";
+import { AGENTS, isAgent } from "./adapters/providers.ts";
 import { logEvent, setRequestStatus, type RequestStatus } from "./db.ts";
 import { eligible, runnersOf } from "./routing.ts";
 
@@ -29,13 +30,16 @@ function move(db: Database, id: number, from: RequestStatus[], to: RequestStatus
   })();
 }
 
-// `projects`: one or more, all in one repo; the runner deploys each of them.
-export type NewRequest = { projects: string[]; title: string; body?: string; doneWhen?: string | null; doneWhenTest?: string | null; priority?: number };
+// `projects`: one or more, all in one repo; the runner deploys each of them. `agent`: none takes the queue's.
+export type NewRequest = {
+  projects: string[]; title: string; body?: string; doneWhen?: string | null; doneWhenTest?: string | null; priority?: number; agent?: string | null;
+};
 
 export function addRequest(db: Database, r: NewRequest): number {
   if (!r.title.trim()) throw new ActionError("a request needs a title", "invalid");
   const names = [...new Set(r.projects.map((n) => n.trim()).filter(Boolean))];
   if (!names.length) throw new ActionError("a request needs a project", "invalid");
+  if (r.agent && !isAgent(r.agent)) throw new ActionError(`no AI agent "${r.agent}": choose ${Object.keys(AGENTS).join(", ")}`, "invalid");
   const ps = names.map((name) => {
     const p = db.query("SELECT id, repo_id, runners FROM projects WHERE name = ?").get(name) as { id: number; repo_id: number; runners: string | null } | null;
     if (!p) throw new ActionError(`no project "${name}"`, "not_found");
@@ -48,9 +52,9 @@ export function addRequest(db: Database, r: NewRequest): number {
   }
   const now = Date.now();
   return db.transaction(() => {
-    const id = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, priority, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(ps[0].id, r.title.trim(), r.body ?? "", r.doneWhen ?? null, r.doneWhenTest ?? null, r.priority ?? 0, now, now)
-      .lastInsertRowid);
+    const id = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, priority, ai_agent, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(ps[0].id, r.title.trim(), r.body ?? "", r.doneWhen ?? null, r.doneWhenTest ?? null, r.priority ?? 0,
+      r.agent || null, now, now).lastInsertRowid);
     for (const p of ps.slice(1)) db.query("INSERT INTO request_projects (request_id, project_id) VALUES (?, ?)").run(id, p.id);
     logEvent(db, id, "add");
     return id;
@@ -120,9 +124,9 @@ export function reopen(db: Database, id: number, what: string): number {
     if (orig.status !== "done") throw new ActionError(`#${id} is ${orig.status}; reopen needs done`);
     logEvent(db, id, "reopen", { text: what });
     const now = Date.now();
-    const added = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, reopened_from, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(orig.project_id, `Reopened #${id}: ${orig.title}`,
-      `${what}\n\nOriginal request:\n${orig.body}`, orig.done_when, orig.done_when_test, id, now, now).lastInsertRowid);
+    const added = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, reopened_from, ai_agent, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, (SELECT ai_agent FROM requests WHERE id = ?), ?, ?)`).run(orig.project_id, `Reopened #${id}: ${orig.title}`,
+      `${what}\n\nOriginal request:\n${orig.body}`, orig.done_when, orig.done_when_test, id, id, now, now).lastInsertRowid);
     db.query("INSERT OR IGNORE INTO request_projects (request_id, project_id) SELECT ?, project_id FROM request_projects WHERE request_id = ?").run(added, id);
     return added;
   })();

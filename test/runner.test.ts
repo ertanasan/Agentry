@@ -93,6 +93,18 @@ describe("runner: through to done", () => {
     expect(await runNext(h.ctx)).toEqual({ kind: "idle" });
   });
 
+  test("each run selects its request's own agent, or the queue's when it has none", async () => {
+    const h = setup();
+    const asked: (string | null | undefined)[] = [];
+    const ctx: RunnerCtx = { ...h.ctx, selectAgent: async (agent) => { asked.push(agent); return h.ctx; } };
+    const own = h.add();
+    h.db.query("UPDATE requests SET ai_agent = 'codex' WHERE id = ?").run(own);
+    await runNext(ctx);
+    h.add();
+    await runNext(ctx);
+    expect(asked).toEqual(["codex", null]);
+  });
+
   test("without a deploy_cmd the request ends as built", async () => {
     const h = setup({ recipe: { deploy_cmd: undefined, targets: undefined } });
     const id = h.add();

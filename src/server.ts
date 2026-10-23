@@ -214,7 +214,7 @@ export function startServer(o: ServerOptions) {
           db.transaction(() => {
             const id = A.addRequest(db, {
               projects: form.getAll("project").filter((v): v is string => typeof v === "string"), title: field("title") ?? "", body: field("body") ?? "",
-              doneWhen: optional("done_when"), doneWhenTest: optional("done_when_test"),
+              doneWhen: optional("done_when"), doneWhenTest: optional("done_when_test"), agent: optional("ai_agent"),
             });
             saveUploads(db, o.home, id, uploads, types);
             Object.assign(done, { verb: "added", id });
@@ -253,7 +253,7 @@ export function startServer(o: ServerOptions) {
         const data = homeData();
         const draft: Draft = {
           projects: form.getAll("project").filter((v): v is string => typeof v === "string"), title: field("title") ?? "", body: field("body") ?? "",
-          done_when: field("done_when") ?? "", done_when_test: field("done_when_test") ?? "", hadFiles: uploads.length > 0,
+          done_when: field("done_when") ?? "", done_when_test: field("done_when_test") ?? "", ai_agent: field("ai_agent") ?? "", hadFiles: uploads.length > 0,
         };
         return htmlRes(status, homePage(data, user, data.attachedTo ? { flash: { kind: "bad", text: e.message } } : { draft, error: e.message }));
       }
@@ -327,7 +327,7 @@ export function startServer(o: ServerOptions) {
   // Requests as the pages show them, with what their actions need: the last commit made, the deploy groups, the
   // runner that has it and the check flags of its latest run.
   const rows = (where: string, order = "r.id", ...args: number[]) => db.query(`SELECT r.id, ${PROJECT_NAMES} AS project, r.title, r.status,
-    r.status_reason, r.updated_at, r.body, r.done_when, r.holder, (SELECT MAX(id) FROM runs WHERE request_id = r.id) AS last_run,
+    r.status_reason, r.updated_at, r.body, r.done_when, r.holder, r.ai_agent, (SELECT MAX(id) FROM runs WHERE request_id = r.id) AS last_run,
     (SELECT json_group_array(json_object('id', id, 'name', name, 'mime', mime)) FROM (SELECT id, name, mime FROM attachments WHERE request_id = r.id ORDER BY id)) AS files,
     (SELECT commit_sha FROM runs WHERE request_id = r.id AND commit_sha IS NOT NULL ORDER BY id DESC LIMIT 1) AS commit_sha,
     (SELECT group_concat(DISTINCT g.name) FROM request_projects rp JOIN projects p ON p.id = rp.project_id
@@ -385,7 +385,7 @@ export function startServer(o: ServerOptions) {
       queue,
       recent: rows("r.status IN ('done', 'done_manual', 'canceled')", "r.updated_at DESC LIMIT 10"),
       groupLocks: db.query("SELECT name, lock_reason FROM deploy_groups WHERE lock = 'blocked' AND locked_by_request IS NULL").all() as GroupLock[],
-      paused: runner.paused ? runner.pause_reason ?? "paused" : null,
+      paused: runner.paused ? runner.pause_reason ?? "paused" : null, aiAgent: runner.ai_agent,
       runners: runners(waitingFor),
       runnerAlerts,
       backupAgeMs: last === null ? null : Date.now() - last,

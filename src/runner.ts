@@ -42,12 +42,13 @@ import type { PartRow, Queue, ReqRow } from "./queue.ts";
 import { parseRecipe, timeoutMs, type Recipe, type StepName, type Target } from "./recipe.ts";
 import { namedTestPassed, parseTrx, type TestRun } from "./results/trx.ts";
 import { sandbox } from "./sandbox.ts";
+import type { AgentId } from "./adapters/providers.ts";
 import type { Agent, Sandbox, Verifier } from "./adapters/types.ts";
 
 export type RunnerCtx = {
   q: Queue;                 // the queue, through this runner's lease
   home: string;             // ~/.agentry: worktrees/, runs/<id>/ (logs, temp), cache/
-  selectAgent?: () => Promise<RunnerCtx>;
+  selectAgent?: (agent?: AgentId | null) => Promise<RunnerCtx>; // the context for a run with `agent`, or the queue's
   agent: Agent;
   verifier: Verifier;
   claudeBin?: string;
@@ -127,7 +128,7 @@ export async function startNext(ctx: RunnerCtx): Promise<Started> {
   try {
     const resume = req.resume_run ? await q.run(req.resume_run) : null;
     const attempt = resume ? resume.attempt : req.attempts + 1;
-    const selected = ctx.selectAgent ? await ctx.selectAgent() : ctx;
+    const selected = ctx.selectAgent ? await ctx.selectAgent(req.ai_agent) : ctx;
     j = await startRun(selected, req, {
       attempt, branch: resume?.branch ?? `agentry/${req.id}-${attempt}`, base: resume?.base_sha ?? null, candidate: resume?.candidate_sha ?? null,
     });

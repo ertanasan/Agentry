@@ -218,6 +218,7 @@ export type Project = { name: string };
 export type ReqRow = {
   id: number; project: string; title: string; status: string; status_reason: string | null; updated_at: number; last_run: number | null;
   body: string; done_when: string | null; files: string; // the attachments, a JSON array of FileRef
+  ai_agent?: AgentId | null;                             // its own agent; none: the queue's
   commit_sha: string | null; groups: string | null;     // the last commit made for it, and its deploy groups
   waiting?: string | null;                               // a queued request whose runner can't take it now: why
   runner?: string | null;                                // a running request: the runner working on it
@@ -232,10 +233,11 @@ export type RunnerInfo = {
 export type GroupLock = { name: string; lock_reason: string | null };
 export type Flash = { kind: "ok" | "bad"; text: string };
 // What was typed into the new-request form when the server refused it, to show again.
-export type Draft = { projects: string[]; title: string; body: string; done_when: string; done_when_test: string; hadFiles: boolean };
+export type Draft = { projects: string[]; title: string; body: string; done_when: string; done_when_test: string; ai_agent: string; hadFiles: boolean };
 export type HomeData = {
   projects: Project[]; needs: ReqRow[]; queue: ReqRow[]; recent: ReqRow[]; groupLocks: GroupLock[];
   paused: string | null; runners: RunnerInfo[]; backupAgeMs: number | null; backupStale: boolean;
+  aiAgent: AgentId;           // the queue's agent, for requests that don't choose one
   runnerAlerts: string[];     // runner problems that hold queued requests: offline, a missing recipe, no runner at all
   attachedTo: string | null;  // the queue this machine's runner works instead of this one (agentry attach)
 };
@@ -281,7 +283,7 @@ function reqLine(r: ReqRow): Html {
   const flags = r.flag_count ?? 0;
   return html`<div class="req">${r.last_run ? html`<a class="title" href="/runs/${r.last_run}">${r.title}</a>` : html`<span class="title">${r.title}</span>`}
   <div class="meta">${stateOf(r.status, r.status_reason)}<span class="num">#${r.id}</span><span>${r.project}</span>
-    ${r.runner ? html`<span>on ${r.runner}</span>` : ""}
+    ${r.ai_agent ? html`<span>${AGENTS[r.ai_agent]}</span>` : ""}${r.runner ? html`<span>on ${r.runner}</span>` : ""}
     ${flags ? html`<span class="st attn"><i aria-hidden="true"></i>${flags} check flag${flags > 1 ? "s" : ""}</span>` : ""}</div>
   ${r.waiting ? html`<p class="why wait"><span class="st attn"><i aria-hidden="true"></i></span>${r.waiting}</p>` : why ? html`<p class="why">${why}</p>` : ""}
   ${thumbs(r.files)}</div>`;
@@ -335,7 +337,7 @@ function needsCard(r: ReqRow): Html {
 }
 
 function newRequestForm(d: HomeData, draft?: Draft, error?: string): Html {
-  const v = draft ?? { projects: [], title: "", body: "", done_when: "", done_when_test: "", hadFiles: false };
+  const v = draft ?? { projects: [], title: "", body: "", done_when: "", done_when_test: "", ai_agent: "", hadFiles: false };
   return html`<details class="new"${draft ? html` open` : ""}><summary>New request</summary>
 <form method="post" action="/requests" enctype="multipart/form-data">
   <fieldset><legend>Projects</legend><div class="picks">
@@ -347,6 +349,11 @@ function newRequestForm(d: HomeData, draft?: Draft, error?: string): Html {
   <input type="text" id="done_when" name="done_when" value="${v.done_when}" placeholder="e.g. the word list keeps its scroll position">
   <label for="done_when_test">Test that must pass <span class="opt">(optional)</span></label>
   <input type="text" id="done_when_test" name="done_when_test" value="${v.done_when_test}" placeholder="e.g. WordListTests.Paging_KeepsScrollPosition">
+  <label for="ai_agent">AI agent</label>
+  <select id="ai_agent" name="ai_agent">
+    <option value="">Default: ${AGENTS[d.aiAgent]}</option>
+    ${Object.entries(AGENTS).map(([id, label]) => html`<option value="${id}"${v.ai_agent === id ? html` selected` : ""}>${label}</option>`)}
+  </select>
   ${filePicker("files-new")}
   ${error ? html`<p class="field-error message" role="alert">${error}${/[.!?]$/.test(error) ? "" : "."}${v.hadFiles ? " Attach the files again." : ""}</p>` : ""}
   <div class="actions"><button class="primary">Queue it</button></div>
@@ -545,17 +552,17 @@ ${link ? html`<div class="card"><p class="ok">Open this link on the device that 
 
 <h2>Runner</h2>
 <div class="settings-section">
-${d.attachedTo ? html`<p>Pause and workers are set on ${queueLink(d.attachedTo)}: <a href="${d.attachedTo}/settings">change them there</a>.</p></div>`
+${d.attachedTo ? html`<p>Pause, workers and the default AI agent are set on ${queueLink(d.attachedTo)}: <a href="${d.attachedTo}/settings">change them there</a>.</p></div>`
   : html`${d.paused
   ? html`<p class="warn"><strong>Paused:</strong> ${d.paused}</p><div class="actions"><form method="post" action="/runner/resume"><button class="primary">Resume</button></form></div>`
   : html`<p>Running new requests.</p>${owner ? html`<div class="actions"><form method="post" action="/settings/pause"><button>Pause</button></form></div>
     <p class="hint">Requests already running finish.</p>` : ""}`}
 <form method="post" action="/settings">
-  <label for="ai-agent">AI Agent</label>
+  <label for="ai-agent">Default AI agent</label>
   <select id="ai-agent" name="ai_agent"${off}>
-    ${Object.entries(AGENTS).map(([id, label]) => html`<option value="${id}" ${(d.aiAgent ?? "claude") === id ? "selected" : ""}>${label}${id === "claude" ? " (default)" : ""}</option>`)}
+    ${Object.entries(AGENTS).map(([id, label]) => html`<option value="${id}" ${(d.aiAgent ?? "claude") === id ? "selected" : ""}>${label}</option>`)}
   </select>
-  <p class="hint">Applies to new runs, including their verifier. Use subscription or ChatGPT token access configured on each runner.</p>
+  <p class="hint">For requests that don't choose an agent of their own. Applies to new runs, including their verifier. Use subscription or ChatGPT token access configured on each runner.</p>
   <p class="hint">Gemini CLI uses Google OAuth. Antigravity CLI supports Google Free sign-in on Windows; import that login on each runner with agentry token antigravity --from-login.</p>
   <label for="workers">Workers</label>
   <p class="hint">How many requests the runner works on at once. Pushes and deploys still go one at a time for each deploy group.</p>
