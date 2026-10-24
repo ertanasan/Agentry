@@ -49,7 +49,7 @@ export function googleReply(log: string, exitCode: number | null, provider: "gem
 }
 
 export function googleEnvironment(env: Record<string, string>, home: string): Record<string, string> {
-  const clean = { ...env, HOME: home, USERPROFILE: home };
+  const clean: Record<string, string> = { ...env, HOME: home, USERPROFILE: home };
   for (const key of ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_GENAI_USE_VERTEXAI", "GEMINI_CLI_USE_VERTEXAI", "AGY_ADC_AUTH", "GOOGLE_GEMINI_BASE_URL", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_QUOTA_PROJECT", "GOOGLE_CLOUD_LOCATION", "GEMINI_API_BASE_URL"]) delete clean[key];
   return clean;
 }

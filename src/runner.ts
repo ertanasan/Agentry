@@ -354,7 +354,7 @@ async function gates(j: Job, approved: boolean): Promise<Stop | null> {
   }
 
   const runs: TestRun[] = [];
-  let t: StepResult | null = null;
+  let t: (StepResult & { logPath: string }) | null = null;
   for (const { recipe } of distinct(j.parts, (p) => p.recipe.test_cmd)) {
     const resultFile = recipe.test_result_file ? join(j.wt, recipe.test_result_file) : null;
     if (resultFile) rmSync(resultFile, { force: true });
