@@ -82,10 +82,10 @@ export function reject(db: Database, id: number): void {
 
 export type RetryEdits = { body?: string; doneWhen?: string | null; doneWhenTest?: string | null };
 
-// blocked_pre_push → queued: a new attempt on a new branch, optionally with an edited body or done-when.
+// blocked_pre_push or needs_review → queued: a new attempt on a new branch, optionally with an edited body or done-when.
 export function retry(db: Database, id: number, edits: RetryEdits = {}): void {
   db.transaction(() => {
-    const req = move(db, id, ["blocked_pre_push"], "queued", null, "retry");
+    const req = move(db, id, ["blocked_pre_push", "needs_review"], "queued", null, "retry");
     db.query("UPDATE requests SET body = ?, done_when = ?, done_when_test = ? WHERE id = ?")
       .run(edits.body ?? req.body, edits.doneWhen ?? req.done_when, edits.doneWhenTest ?? req.done_when_test, req.id);
   })();

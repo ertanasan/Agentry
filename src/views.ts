@@ -298,6 +298,17 @@ const confirm = (id: number, name: string, label: string, question: string, tone
   html`<details class="confirm ${tone}"><summary class="btn${tone === "danger" ? " danger" : ""}">${label}…</summary><div class="confirm-body"><p>${question}</p>
   <div class="actions">${post(id, name, `${label} #${id}`, tone === "danger" ? "danger" : "primary")}</div></div></details>`;
 
+// Edit the request's details and queue it for a fresh attempt.
+const reviseForm = (r: ReqRow): Html => html`<details class="more"><summary>Retry with changes</summary><form method="post" action="/requests/${r.id}/retry">
+  <label for="retry-body-${r.id}">Details</label><textarea id="retry-body-${r.id}" name="body">${r.body}</textarea>
+  <label for="retry-done-${r.id}">Done when <span class="opt">(optional)</span></label>
+  <input type="text" id="retry-done-${r.id}" name="done_when" value="${r.done_when ?? ""}">
+  <div class="actions"><button class="primary">Retry with these changes</button></div></form></details>`;
+
+// The request as written, so a run's page shows what was asked.
+const detailsPanel = (r: ReqRow): Html => r.body || r.done_when ? html`<details class="more panel" open><summary>Request details</summary>
+  ${r.body ? html`<p style="white-space:pre-wrap">${r.body}</p>` : ""}${r.done_when ? html`<p><strong>Done when:</strong> ${r.done_when}</p>` : ""}</details>` : html``;
+
 // The actions of a request that needs a person, by its state; the same on the home page and its run page.
 function actionsFor(r: ReqRow): Html {
   const fid = `files-${r.id}`;
@@ -312,15 +323,10 @@ function actionsFor(r: ReqRow): Html {
     case "needs_review":
       return html`<div class="actions">${r.last_run ? html`<a class="btn primary" href="/runs/${r.last_run}#diff">Review the diff</a>` : ""}
         ${confirm(r.id, "approve", "Approve", `Approve #${r.id}? Its changes, including those outside the request's scope, go on to build and tests, then are pushed${r.groups ? ` and deployed (${r.groups.replace(/,/g, ", ")})` : ""}.`, "go")}
-        ${confirm(r.id, "reject", "Reject", "Reject this change? The request is canceled.")}</div>`;
+        ${confirm(r.id, "reject", "Reject", "Reject this change? The request is canceled.")}</div>${reviseForm(r)}`;
     case "blocked_pre_push":
       return html`<div class="actions">${post(r.id, "retry", "Retry", "primary")}
-        ${confirm(r.id, "cancel", "Cancel", "Cancel this request? It leaves the queue for good.")}</div>
-        <details class="more"><summary>Retry with changes</summary><form method="post" action="/requests/${r.id}/retry">
-        <label for="retry-body-${r.id}">Details</label><textarea id="retry-body-${r.id}" name="body">${r.body}</textarea>
-        <label for="retry-done-${r.id}">Done when <span class="opt">(optional)</span></label>
-        <input type="text" id="retry-done-${r.id}" name="done_when" value="${r.done_when ?? ""}">
-        <div class="actions"><button class="primary">Retry with these changes</button></div></form></details>`;
+        ${confirm(r.id, "cancel", "Cancel", "Cancel this request? It leaves the queue for good.")}</div>${reviseForm(r)}`;
     case "blocked_post_push": {
       const what = r.commit_sha ? `Re-run deploy of ${r.commit_sha.slice(0, 7)}${r.groups ? ` to ${r.groups.replace(/,/g, ", ")}` : ""}` : "Re-run deploy";
       return html`<div class="actions">${post(r.id, "redeploy", what, "primary")}${post(r.id, "resolve", "Mark resolved")}</div>
@@ -479,6 +485,7 @@ export function liveBlock(d: RunData): Html {
 <div class="req"><div class="meta">${stateOf(d.req.status, d.req.status_reason)}<span class="num">#${d.req.id}</span><span>${d.req.project}</span>
   ${live ? html`<span class="live">${d.remoteHost ? `Running on ${d.remoteHost} · log every 15 s` : "Live"}</span>` : ""}</div>
   ${why ? html`<p class="why">${why}</p>` : ""}${thumbs(d.req.files)}</div>
+${detailsPanel(d.req)}
 ${flagsBox(d.run.flags)}
 ${actionsFor(d.req)}
 ${pipeline(d)}
