@@ -739,6 +739,7 @@ agentry token [claude|codex]          save a Claude subscription token or Codex 
 agentry serve                         the web UI, with nightly backups
 agentry user add <name> [--admin]     create a web UI account, an owner unless --admin; prints a one-time passkey link
 agentry user reset <name>             revoke a user's passkeys and sessions; prints a new link
+agentry user passkey <name>           a link for one more passkey (another device); keeps the others
 agentry user remove <name>            delete a web UI account with its passkeys and sessions (not the last owner)
 agentry backup                        back up now
 agentry runner-key add <name> | remove <name>   a key for another machine's runner to work this queue

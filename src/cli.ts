@@ -21,7 +21,7 @@ import { antigravityCredentials, callAntigravity, importAntigravityLogin } from 
 import { isAgent, type AgentId } from "./adapters/providers.ts";
 import { claudeAgent, resolveAuth } from "./adapters/claude.ts";
 import { asActor, LeaseLost, openDb, runnerRow } from "./db.ts";
-import { addUser, AuthError, removeUser, resetUser } from "./accounts.ts";
+import { addUser, AuthError, passkeyLink, removeUser, resetUser } from "./accounts.ts";
 import { backupIfDue, runBackup } from "./backup.ts";
 import { DEFAULT_PORT, startServer } from "./server.ts";
 import { parseRecipe } from "./recipe.ts";
@@ -57,6 +57,7 @@ const USAGE = `usage: agentry <command>
   user add <name> [--admin]          create a web UI account, an owner (--admin: one that can't change settings);
                                      prints a one-time passkey link (30 min)
   user reset <name>                  revoke a user's passkeys and sessions; prints a new link
+  user passkey <name>                a link for one more passkey (another device); keeps the others
   user remove <name>                 delete a web UI account with its passkeys and sessions
   backup                            back up the database and agentry/* branches now
   runner-key add <name> | remove <name>   a key for a runner on another machine to work this queue beside this one's
@@ -471,8 +472,8 @@ async function serve(db: Database): Promise<number> {
 
 function userCmd(db: Database, args: string[], owner: boolean): number {
   const [sub, name] = args;
-  if (!name || !["add", "reset", "remove"].includes(sub)) {
-    fail("usage: agentry user add <name> [--admin] | agentry user reset <name> | agentry user remove <name>");
+  if (!name || !["add", "reset", "passkey", "remove"].includes(sub)) {
+    fail("usage: agentry user add <name> [--admin] | agentry user reset <name> | agentry user passkey <name> | agentry user remove <name>");
   }
   try {
     if (sub === "remove") {
@@ -480,7 +481,7 @@ function userCmd(db: Database, args: string[], owner: boolean): number {
       console.log(`removed ${name}`);
       return 0;
     }
-    const code = sub === "add" ? addUser(db, name, owner ? "owner" : "admin") : resetUser(db, name);
+    const code = sub === "add" ? addUser(db, name, owner ? "owner" : "admin") : sub === "passkey" ? passkeyLink(db, name) : resetUser(db, name);
     console.log(`Open this on the device that will hold ${name}'s passkey (valid 30 minutes, once):\n${publicUrl()}/register/${code}`);
   } catch (e) {
     if (e instanceof AuthError) fail(e.message);

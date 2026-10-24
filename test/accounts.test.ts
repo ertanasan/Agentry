@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   addUser, AuthError, finishLogin, finishRegistration, LoginThrottle, loginOptions, REGISTRATION_TTL_MS, registrationOptions,
-  relyingParty, removeUser, resetUser, SESSION_TTL_MS, sessionUser,
+  passkeyLink, relyingParty, removeUser, resetUser, SESSION_TTL_MS, sessionUser,
 } from "../src/accounts.ts";
 import { openDb } from "../src/db.ts";
 import { SoftPasskey } from "./helpers/passkey.ts";
@@ -118,6 +118,24 @@ describe("reset (lost device)", () => {
     const first = addUser(db, "ertan", "admin");
     resetUser(db, "ertan");
     await expect(registrationOptions(db, rp, first)).rejects.toThrow("invalid, used or expired");
+  });
+});
+
+describe("another passkey", () => {
+  test("a passkey link adds a passkey and keeps the user's others, their sessions and open links", async () => {
+    const { db, key, session } = await registered();
+    const pending = passkeyLink(db, "ertan");
+    const code = passkeyLink(db, "ertan");
+    const mac = await SoftPasskey.create();
+    await finishRegistration(db, rp, code, await mac.register(await registrationOptions(db, rp, code), rp.origin), "Mac");
+    expect(sessionUser(db, session)?.name).toBe("ertan");
+    expect((await signIn(db, key)).user.name).toBe("ertan");
+    expect((await signIn(db, mac)).user.name).toBe("ertan");
+    expect(await registrationOptions(db, rp, pending)).toBeDefined();
+  });
+
+  test("a passkey link needs an existing user", () => {
+    expect(() => passkeyLink(openDb(":memory:"), "nobody")).toThrow("no user nobody");
   });
 });
 

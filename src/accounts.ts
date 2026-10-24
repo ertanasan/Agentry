@@ -73,6 +73,13 @@ export function removeUser(db: Database, name: string, now = Date.now()): void {
   })();
 }
 
+// A new one-time registration code for one more passkey of the user (another device); keeps their passkeys and sessions.
+export function passkeyLink(db: Database, name: string, now = Date.now()): string {
+  const user = db.query("SELECT id FROM users WHERE name = ?").get(name) as { id: number } | null;
+  if (!user) throw new AuthError(`no user ${name}`);
+  return issueRegistration(db, user.id, now);
+}
+
 function issueRegistration(db: Database, userId: number, now: number): string {
   const code = token();
   db.query("INSERT INTO registrations (code_hash, user_id, expires_at) VALUES (?, ?, ?)").run(hash(code), userId, now + REGISTRATION_TTL_MS);
