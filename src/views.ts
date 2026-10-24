@@ -2,6 +2,7 @@
 // unless it is itself the output of `html`: request text, logs and diffs are written by people and agents, and
 // must never become markup on a page that carries the session cookie (slice 2 review Q1). Actions are plain
 // forms posting to the server; htmx only refreshes the live parts: a running run's page, and the home page's lists.
+import { createHash } from "node:crypto";
 import type { User } from "./accounts.ts";
 import { AGENTS, type AgentId } from "./adapters/providers.ts";
 
@@ -199,7 +200,8 @@ export function page(title: string, body: Html, user?: User | null, extraHead: H
   return html`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title} · Agentry</title><link rel="icon" href="/static/icon.png" type="image/png">
-<link rel="apple-touch-icon" href="/static/apple-touch-icon.png"><meta name="apple-mobile-web-app-title" content="Agentry"><style>${new Html(CSS)}</style>${extraHead}</head>
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png"><meta name="apple-mobile-web-app-title" content="Agentry"><style>${new Html(CSS)}</style>
+<script src="/static/offline.js" defer></script>${extraHead}</head>
 <body><main>
 <header class="top"><a class="brand" href="/"><img src="/static/icon.png" alt="">Agentry</a>${user ? html`<nav class="top" aria-label="Main">
   <a href="/"${here("home")}>Home</a><a href="/settings"${here("settings")}>Settings</a>
@@ -408,26 +410,40 @@ ${board(d)}
 `, user, html`<script src="/static/htmx.js"></script><script src="/static/home.js" defer></script>`, { nav: "home", attachedTo: d.attachedTo });
 }
 
-// The home page's status line; `oob`: sent with the lists from /live, it replaces the one on the page too.
-function statusBar(d: HomeData, oob = false): Html {
+// A part of the home page that refreshes itself every 5 s. `h` is a hash of what it shows, sent back with each poll:
+// the server answers 204 when the part would show the same, and htmx swaps nothing, so nothing flickers.
+export class Live extends Html { constructor(s: string, readonly h: string) { super(s); } }
+const hashOf = (s: string) => createHash("sha1").update(s).digest("base64url").slice(0, 12);
+
+// The home page's status line, refreshing from /live/status.
+export function statusBar(d: HomeData): Live {
   const running = d.queue.filter((r) => r.status === "running").length;
   const waiting = d.queue.length - running;
-  return html`<p class="statusbar" id="statusbar" role="status"${oob ? html` hx-swap-oob="true"` : ""}>${d.attachedTo ? "" : html`${runnerState(d)}<span>${running} running, ${waiting} queued</span>`}
-  <span>Backup ${d.backupAgeMs === null ? "never ran" : ago(d.backupAgeMs)}</span></p>`;
+  const inner = html`${d.attachedTo ? "" : html`${runnerState(d)}<span>${running} running, ${waiting} queued</span>`}
+  <span>Backup ${d.backupAgeMs === null ? "never ran" : ago(d.backupAgeMs)}</span>`;
+  const h = hashOf(inner.s);
+  return new Live(html`<p class="statusbar" id="statusbar" role="status" hx-get="/live/status?h=${h}" hx-trigger="every 5s" hx-swap="outerHTML">${inner}</p>`.s, h);
 }
 
-// What /live sends the home page every 5 s: its lists, and the status line counting them.
-export const homeLive = (d: HomeData): Html => html`${statusBar(d, true)}${board(d)}`;
+// A queued or running request's line, refreshing from /requests/<id>/line.
+export function queueLine(r: ReqRow): Live {
+  const line = reqLine(r);
+  const h = hashOf(line.s);
+  return new Live(html`<li id="req-${r.id}" hx-get="/requests/${r.id}/line?h=${h}" hx-trigger="every 5s" hx-swap="outerHTML">${line}</li>`.s, h);
+}
 
-// The home page's lists. They refresh themselves every 5 s, except while you use them (home.js).
-function board(d: HomeData): Html {
+// The home page's lists, refreshing from /live. Only a change in which requests they hold redraws them (a request
+// filed, started elsewhere, finished, or needing you anew); a queued or running one's own changes redraw just its
+// line. They wait while you use them (home.js).
+export function board(d: HomeData): Live {
   const own = d.attachedTo ? "This machine's own " : "";
-  return html`<div id="board" hx-get="/live" hx-trigger="every 5s" hx-swap="outerHTML">
+  const h = hashOf(JSON.stringify([d.needs.map((r) => [r.id, r.updated_at]), d.queue.map((r) => r.id), d.recent.map((r) => [r.id, r.updated_at]), d.attachedTo]));
+  return new Live(html`<div id="board" hx-get="/live?h=${h}" hx-trigger="every 5s" hx-swap="outerHTML">
 <h2>${d.attachedTo ? "Needs you here" : "Needs you"} <span class="count num">${d.needs.length}</span></h2>
 ${d.needs.length ? html`<ul class="cards">${d.needs.map(needsCard)}</ul>` : html`<p class="empty">Nothing needs you.</p>`}
 
 <h2>${own ? `${own}queue` : "Queue"} <span class="count num">${d.queue.length}</span></h2>
-${d.queue.length ? html`<ul class="list">${d.queue.map((r) => html`<li>${reqLine(r)}</li>`)}</ul>`
+${d.queue.length ? html`<ul class="list">${d.queue.map(queueLine)}</ul>`
   : html`<p class="empty">${d.attachedTo ? "Nothing waiting here. While attached, requests here don't run." : "Nothing queued."}</p>`}
 
 <h2>Recently finished</h2>
@@ -435,7 +451,7 @@ ${d.recent.length ? html`<ul class="list">${d.recent.map((r) => html`<li>${reqLi
   <form method="post" action="/requests/${r.id}/reopen"><label for="reopen-${r.id}">What's wrong?</label><textarea id="reopen-${r.id}" name="text" required></textarea>
   <div class="actions"><button class="primary">Reopen #${r.id}</button></div></form></details>` : ""}</li>`)}</ul>`
   : html`<p class="empty">Nothing finished yet.</p>`}
-</div>`;
+</div>`.s, h);
 }
 
 export type StepRow = { n: number; step: string; exit_code: number | null; started_at: number; ended_at: number | null };
@@ -626,6 +642,17 @@ export function registerPage(code: string, name: string): string {
 <script src="/static/webauthn.js"></script><script src="/static/app.js"></script>`);
 }
 
+// What the service worker shows when this device can't reach the server (SW_JS), naming the site by its machine.
+export function offlinePage(host: string): string {
+  const site = host.split(".")[0].split(":")[0];
+  return page(`Can't reach ${site}`, html`<h1>Can't reach ${site}</h1>
+<p class="message">This device can't reach Agentry at <strong>${host}</strong>.</p>
+<p>Most likely Tailscale on this device is off or not connected. Open the Tailscale app: check that it's on and shows no
+  warnings, or turn it off and on again.</p>
+<p>If Tailscale looks fine, ${site} may be asleep, off or restarting.</p>
+<div class="actions"><a class="btn" href="">Try again</a></div>`);
+}
+
 export function messagePage(title: string, message: string, user?: User | null): string {
   return page(title, html`<h1>${title}</h1><p class="message">${message}</p><div class="actions"><a class="btn" href="/">Back to home</a></div>`, user);
 }
@@ -668,7 +695,14 @@ async function agentryPost(url, body) {
   if (!r.ok) throw new Error(text || r.statusText);
   return text ? JSON.parse(text) : {};
 }
-function agentryShow(e) { document.getElementById("msg").textContent = e.message || String(e); }
+// The browser's own passkey errors, in words that say what to do; the server's come as they are.
+function agentryShow(e) {
+  document.getElementById("msg").textContent = e.code === "ERROR_AUTHENTICATOR_PREVIOUSLY_REGISTERED"
+    ? "This device already has a passkey for this account on this site: sign in with it instead."
+    : e.name === "NotAllowedError"
+    ? "No passkey was used: the prompt was closed or timed out, or this device has no passkey for this site. Try again, or use another device's passkey (your phone, for example)."
+    : e.message || String(e);
+}
 async function agentryLogin() {
   try {
     const options = await agentryPost("/login/options");
@@ -700,5 +734,22 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("step-up")?.addEventListener("click", agentryStepUp);
   const reg = document.getElementById("register");
   reg?.addEventListener("click", () => agentryRegister(reg.dataset.code));
+});
+`;
+
+// Every page's script (served as /static/offline.js): it installs the service worker.
+export const OFFLINE_JS = `if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});`;
+
+// The service worker (served as /sw.js, so it covers every page): a page that can't load because this device can't
+// reach the server gets the /offline page cached at install, instead of the browser's own error. Only page loads and
+// the icon that page shows are handled; every other request goes to the network as if there were no worker.
+export const SW_JS = `
+const CACHE = "agentry-offline";
+self.addEventListener("install", (e) => {
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll([new Request("/offline", { cache: "reload" }), "/static/icon.png"])).then(() => self.skipWaiting()));
+});
+self.addEventListener("fetch", (e) => {
+  const fallback = e.request.mode === "navigate" ? "/offline" : new URL(e.request.url).pathname === "/static/icon.png" ? "/static/icon.png" : null;
+  if (fallback) e.respondWith(fetch(e.request).catch(() => caches.match(fallback)));
 });
 `;

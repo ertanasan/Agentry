@@ -129,6 +129,15 @@ describe("sign-up and sign-in", () => {
     expect((await h.call("/login/options", { method: "POST", json: {} })).status).toBe(429);
   });
 
+  test("a failed sign-in says why in plain words and is logged with the reason and device", async () => {
+    const h = await setup();
+    await h.signUp();
+    const r = await h.signIn(await SoftPasskey.create());
+    expect(await r.text()).toContain("this site doesn't have the passkey this device offered");
+    const ev = h.db.query("SELECT payload FROM events WHERE type = 'login_failed'").get() as { payload: string };
+    expect(JSON.parse(ev.payload)).toMatchObject({ reason: expect.stringContaining("unknown passkey"), device: expect.any(String) });
+  });
+
   test("an unknown registration link shows an error page", async () => {
     const h = await setup();
     expect((await h.call(`/register/${"x".repeat(43)}`)).status).toBe(404);
@@ -369,21 +378,45 @@ describe("escaping (slice 2 review Q1)", () => {
     expect(body).toContain('hx-trigger="every 2s"'); // still running → keeps polling
   });
 
-  test("the home page's lists refresh from /live with the status line, never the new-request form", async () => {
+  test("the home page's parts refresh themselves, and a poll that would change nothing gets 204", async () => {
     const h = await setup();
     const { cookie } = await h.signUp();
+    const poll = (html: string, path: string) => html.match(new RegExp(`hx-get="(${path}\\?h=[\\w-]+)"`))![1];
     const home = await (await h.call("/", { cookie })).text();
-    expect(home).toContain('<div id="board" hx-get="/live" hx-trigger="every 5s" hx-swap="outerHTML">');
     expect(home).toContain('<script src="/static/htmx.js"></script>');
+    const empty = poll(home, "/live");
+    expect((await h.call(empty, { cookie })).status).toBe(204);
 
     await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "<b>moved on</b>" } });
-    const live = await (await h.call("/live", { cookie })).text();
-    expect(live).toContain('id="statusbar" role="status" hx-swap-oob="true"');
-    expect(live).toContain("0 running, 1 queued");
-    expect(live).toContain('<div id="board" hx-get="/live"');
+    const live = await (await h.call(empty, { cookie })).text(); // a request filed: the lists redraw
+    expect(live).toContain('<div id="board" hx-get="/live?h=');
     expect(live).toContain("&lt;b&gt;moved on&lt;/b&gt;");
     expect(live).not.toContain('action="/requests"');
-    expect((await h.call("/live")).status).toBe(303); // signed in only
+    expect((await h.call(poll(live, "/live"), { cookie })).status).toBe(204);
+
+    const line = poll(live, "/requests/1/line"); // the queued request's own line
+    expect((await h.call(line, { cookie })).status).toBe(204);
+    h.db.query("UPDATE requests SET status = 'running' WHERE id = 1").run();
+    expect(await (await h.call(line, { cookie })).text()).toContain("Running");
+    expect((await h.call(poll(live, "/live"), { cookie })).status).toBe(204); // still in the queue: no redraw
+
+    const bar = poll(home, "/live/status");
+    expect(await (await h.call(bar, { cookie })).text()).toContain("1 running, 0 queued");
+    h.db.query("UPDATE requests SET status = 'done' WHERE id = 1").run();
+    expect((await h.call(line, { cookie })).status).toBe(204); // left the queue
+    expect(await (await h.call(poll(live, "/live"), { cookie })).text()).toContain("Recently finished");
+    for (const path of ["/live", "/live/status", "/requests/1/line"]) expect((await h.call(path)).status).toBe(303); // signed in only
+  });
+
+  test("the offline page names the site, needs no sign-in, and every page installs the worker that shows it", async () => {
+    const h = await setup();
+    const host = new URL(h.url).host;
+    const offline = await h.call("/offline");
+    expect(offline.status).toBe(200);
+    expect(await offline.text()).toContain(`This device can't reach Agentry at <strong>${host}</strong>`);
+    expect(await (await h.call("/sw.js")).text()).toContain('"/offline"');
+    expect(await (await h.call("/login")).text()).toContain('<script src="/static/offline.js" defer></script>');
+    expect(await (await h.call("/static/offline.js")).text()).toContain('register("/sw.js")');
   });
 });
 

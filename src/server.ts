@@ -18,7 +18,7 @@ import {
   registrationOptions, registrationUser, relyingParty, removeUser, resetUser, SESSION_TTL_MS, sessionUser, stepUpOptions, type User,
 } from "./accounts.ts";
 import { lastBackupAt, STALE_AFTER_MS } from "./backup.ts";
-import { asActor, runnerRow } from "./db.ts";
+import { asActor, logEvent, runnerRow } from "./db.ts";
 import * as g from "./git.ts";
 import { suggestedWorkers } from "./platform.ts";
 import { readTail } from "./proc.ts";
@@ -27,8 +27,8 @@ import { readAttached, runnerApi, storedDiff } from "./remote.ts";
 import { LOCAL, waitOf, waitText, type Wait } from "./routing.ts";
 import { MAX_DIFF_CHARS } from "./verifier.ts";
 import {
-  APP_JS, HOME_JS, homeLive, homePage, liveBlock, loginPage, messagePage, registerPage, RUN_JS, runPage, settingsPage, type Draft, type Flash, type GroupLock,
-  type ReqRow, type RunnerInfo, type StepRow,
+  APP_JS, board, HOME_JS, homePage, liveBlock, loginPage, messagePage, offlinePage, OFFLINE_JS, queueLine, registerPage, RUN_JS, runPage,
+  settingsPage, statusBar, SW_JS, type Draft, type Flash, type GroupLock, type Live, type ReqRow, type RunnerInfo, type StepRow,
 } from "./views.ts";
 
 export const DEFAULT_PORT = 4747;
@@ -49,6 +49,8 @@ const STATIC: Record<string, { path?: string; body?: string; type: string }> = {
   "/static/app.js": { body: APP_JS, type: "text/javascript" },
   "/static/home.js": { body: HOME_JS, type: "text/javascript" },
   "/static/run.js": { body: RUN_JS, type: "text/javascript" },
+  "/static/offline.js": { body: OFFLINE_JS, type: "text/javascript" },
+  "/sw.js": { body: SW_JS, type: "text/javascript" },
   "/static/icon.png": { path: join(assets, "icon.png"), type: "image/png" },
   "/static/apple-touch-icon.png": { path: join(assets, "apple-touch-icon.png"), type: "image/png" },  // iOS home screen
 };
@@ -103,8 +105,9 @@ export function startServer(o: ServerOptions) {
     const client = req.headers.get("x-forwarded-for")?.split(",")[0].trim() || "local";
     const device = (req.headers.get("user-agent") ?? "unknown device").slice(0, 200);
 
-    // Sign-in and registration: the only routes without a session.
+    // Sign-in, registration and the offline page: the only routes without a session.
     if (url.pathname === "/login" && req.method === "GET") return htmlRes(200, loginPage());
+    if (url.pathname === "/offline" && req.method === "GET") return htmlRes(200, offlinePage(new URL(publicUrl).host));
     if (url.pathname === "/login/options" && req.method === "POST") {
       if (throttle.blocked(client)) return text(429, "too many failed sign-ins; wait a few minutes");
       const { options, challengeId } = await loginOptions(db, rp);
@@ -117,6 +120,7 @@ export function startServer(o: ServerOptions) {
         return json({}, { "set-cookie": cookie(SESSION_COOKIE, token, SESSION_TTL_MS / 1000) });
       } catch (e) {
         if (!(e instanceof AuthError)) throw e;
+        logEvent(db, null, "login_failed", { reason: e.message, device }); // so a failed sign-in can be looked into later
         throttle.failed(client);
         return text(401, e.message);
       }
@@ -146,7 +150,15 @@ export function startServer(o: ServerOptions) {
       return redirect("/login", { "set-cookie": cookie(SESSION_COOKIE, "", 0) });
     }
     if (url.pathname === "/" && req.method === "GET") return htmlRes(200, homePage(homeData(), user, { flash: doneFlash(url.searchParams) }));
-    if (url.pathname === "/live" && req.method === "GET") return htmlRes(200, homeLive(homeData()).s); // the home page's lists, refreshing
+    // The home page's live parts (views.ts Live): each poll sends the hash of what its part shows; 204 when unchanged.
+    const part = (p: Live) => p.h === url.searchParams.get("h") ? new Response(null, { status: 204, headers: SECURITY_HEADERS }) : htmlRes(200, p.s);
+    if (url.pathname === "/live" && req.method === "GET") return part(board(homeData()));
+    if (url.pathname === "/live/status" && req.method === "GET") return part(statusBar(homeData()));
+    const line = url.pathname.match(/^\/requests\/(\d+)\/line$/);
+    if (line && req.method === "GET") {
+      const r = homeData().queue.find((q) => q.id === Number(line[1]));
+      return r ? part(queueLine(r)) : new Response(null, { status: 204, headers: SECURITY_HEADERS }); // left the queue: /live redraws the lists
+    }
     const verified = recentlyVerified(db, cookies[SESSION_COOKIE]);
     if (url.pathname === "/settings" && req.method === "GET") return htmlRes(200, settingsPage(settingsData(verified), user));
 
@@ -162,6 +174,7 @@ export function startServer(o: ServerOptions) {
         return json({});
       } catch (e) {
         if (!(e instanceof AuthError)) throw e;
+        logEvent(db, null, "step_up_failed", { user: user.name, reason: e.message, device });
         throttle.failed(client);
         return text(401, e.message);
       }

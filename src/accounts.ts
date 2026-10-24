@@ -161,7 +161,10 @@ async function verifyAssertion(db: Database, rp: RelyingParty, challengeId: stri
   if (!ch) throw new AuthError("sign-in expired; try again");
   const cred = db.query(`SELECT c.id, c.public_key, c.counter, c.transports, u.id AS user_id, u.name, u.role FROM credentials c
     JOIN users u ON u.id = c.user_id WHERE c.id = ? AND u.disabled = 0`).get(response.id) as Cred | null;
-  if (!cred) throw new AuthError("unknown passkey");
+  if (!cred) {
+    throw new AuthError("this site doesn't have the passkey this device offered (unknown passkey), probably one a reset removed: "
+      + "choose another passkey, or get a new link with `agentry user passkey <name>` on the server");
+  }
   const result = await verifyAuthenticationResponse({
     response, expectedChallenge: ch.challenge, expectedOrigin: rp.origin, expectedRPID: rp.rpID, requireUserVerification: true,
     credential: { id: cred.id, publicKey: new Uint8Array(cred.public_key), counter: cred.counter, transports: cred.transports ? JSON.parse(cred.transports) : undefined },
