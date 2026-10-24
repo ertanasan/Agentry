@@ -339,7 +339,7 @@ function actionsFor(r: ReqRow): Html {
 function needsCard(r: ReqRow): Html {
   const asks = r.status === "needs_info" && r.status_reason;
   return html`<li class="card">${reqLine(asks ? { ...r, status_reason: null } : r)}
-    ${asks ? html`<p class="ask">${r.status_reason}</p>` : ""}${actionsFor(r)}</li>`;
+    ${asks ? html`<p class="ask">${r.status_reason}</p>` : ""}${detailsPanel(r)}${actionsFor(r)}</li>`;
 }
 
 function newRequestForm(d: HomeData, draft?: Draft, error?: string): Html {
