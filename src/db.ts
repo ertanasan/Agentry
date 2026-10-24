@@ -143,6 +143,8 @@ export const MIGRATIONS: string[] = [
    ALTER TABLE runner RENAME COLUMN ai_agent_next TO ai_agent;`,
   // 11: a request's own coding agent; NULL takes the queue's (runner.ai_agent) when its run starts.
   "ALTER TABLE requests ADD COLUMN ai_agent TEXT CHECK (ai_agent IN ('claude', 'codex', 'gemini', 'antigravity'))",
+  // 12: a request that deploys its project's main as it is, without a change (actions.deployMain).
+  "ALTER TABLE requests ADD COLUMN deploy_only INTEGER NOT NULL DEFAULT 0",
 ];
 
 // Checks run before a migration; a message refuses it and leaves the database as it was.

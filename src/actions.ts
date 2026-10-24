@@ -31,8 +31,10 @@ function move(db: Database, id: number, from: RequestStatus[], to: RequestStatus
 }
 
 // `projects`: one or more, all in one repo; the runner deploys each of them. `agent`: none takes the queue's.
+// `deployOnly`: no change; the runner deploys main as it is (deployMain).
 export type NewRequest = {
   projects: string[]; title: string; body?: string; doneWhen?: string | null; doneWhenTest?: string | null; priority?: number; agent?: string | null;
+  deployOnly?: boolean;
 };
 
 export function addRequest(db: Database, r: NewRequest): number {
@@ -52,13 +54,19 @@ export function addRequest(db: Database, r: NewRequest): number {
   }
   const now = Date.now();
   return db.transaction(() => {
-    const id = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, priority, ai_agent, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(ps[0].id, r.title.trim(), r.body ?? "", r.doneWhen ?? null, r.doneWhenTest ?? null, r.priority ?? 0,
-      r.agent || null, now, now).lastInsertRowid);
+    const id = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, priority, ai_agent, deploy_only, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(ps[0].id, r.title.trim(), r.body ?? "", r.doneWhen ?? null, r.doneWhenTest ?? null, r.priority ?? 0,
+      r.agent || null, r.deployOnly ? 1 : 0, now, now).lastInsertRowid);
     for (const p of ps.slice(1)) db.query("INSERT INTO request_projects (request_id, project_id) VALUES (?, ?)").run(id, p.id);
     logEvent(db, id, "add");
     return id;
   })();
+}
+
+// A deploy of `project`'s main as it is, without a change: for commits made outside Agentry, a target to bring
+// back, or a fresh TestFlight build. The runner builds and tests origin's main, with no agent, then deploys it.
+export function deployMain(db: Database, project: string): number {
+  return addRequest(db, { projects: [project], title: "Deploy main", deployOnly: true });
 }
 
 // needs_info → queued; the answer reaches the next attempt's prompt.

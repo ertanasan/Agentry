@@ -635,6 +635,22 @@ describe("settings", () => {
     expect((await h.call("/settings/projects/nope/enable", { method: "POST", cookie })).status).toBe(404);
   });
 
+  test("Deploy main queues a deploy without a change: owners only, after a recent passkey check", async () => {
+    const h = await setup();
+    const { cookie, key } = await h.signUp();
+    const admin = await h.signUp("helper", "admin");
+    expect(await (await h.call("/settings", { cookie })).text()).toContain('action="/settings/projects/vt-web/deploy"');
+    expect((await h.call("/settings/projects/vt-web/deploy", { method: "POST", cookie: admin.cookie })).status).toBe(403);
+    stale(h);
+    expect((await h.call("/settings/projects/vt-web/deploy", { method: "POST", cookie })).status).toBe(403);
+    await stepUp(h, cookie, key);
+    const r = await h.call("/settings/projects/vt-web/deploy", { method: "POST", cookie });
+    expect(r.status).toBe(303);
+    expect(r.headers.get("location")).toBe("/?done=added&id=1");
+    expect(h.db.query("SELECT title, status, deploy_only FROM requests").all()).toEqual([{ title: "Deploy main", status: "queued", deploy_only: 1 }]);
+    expect((await h.call("/settings/projects/nope/deploy", { method: "POST", cookie })).status).toBe(404);
+  });
+
   test("an owner adds, resets and removes users, but not their own account", async () => {
     const h = await setup();
     const { cookie } = await h.signUp();

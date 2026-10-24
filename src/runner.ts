@@ -23,6 +23,9 @@
 //
 //  * A recipe with build_unsandboxed builds outside the sandbox on a cleaned worktree, as deploy does (D6).
 //
+//  A deploy-only request (Deploy main) skips the agent: origin's main as it is goes through build and tests, then
+//  deploys if main hasn't moved meanwhile (deployAsIs).
+//
 // The runner may work on several requests at once (the settings page's worker count). Agent, build, tests and
 // verifier of different requests run side by side; the drift guard, and everything from the last fetch before
 // the push to the end of the deploy, hold the request's deploy groups, so one group never sees two pushes or
@@ -258,6 +261,7 @@ async function pipeline(j: Job, resumed: boolean): Promise<Stop> {
     keyHelper: j.ctx.keyHelper, pkgCache: join(j.ctx.home, "cache", "nuget"),
     userTemp: j.parts.some((p) => p.recipe.sandbox_user_temp),
   });
+  if (j.req.deploy_only) return deployAsIs(j);
 
   if (!resumed) {
     const stopped = (await agentStep(j)) ?? tampered(j, "agent");
@@ -295,6 +299,25 @@ async function deliver(j: Job, approved: boolean): Promise<Stop> {
       if (round >= 1) return pre("push rejected twice");
     }
     return deploy(j, sha);
+  });
+}
+
+// Deploy main without a change: build and tests on origin's main, with no agent and so no repair, then the deploy.
+// Main must not have moved since it was built: a target may already run the newer commit, and this older one
+// would roll it back.
+async function deployAsIs(j: Job): Promise<Stop> {
+  const stopped = await gates(j, true);
+  if (stopped) return stopped;
+  return holdGroups(groupsOf(j.parts), async () => {
+    const blocked = await j.ctx.q.blockedGroup(groupsOf(j.parts));
+    if (blocked) return pre(`deploy group ${blocked} was blocked while this request ran; retry once it is free`);
+    const f = await g.fetch(j.repo, j.remote);
+    if (f.code !== 0) return infra(fetchFailed(f));
+    const head = await g.remoteHead(j.repo, j.remote, j.branch);
+    if (head !== j.base) return pre(`${j.remote}/${j.branch} moved to ${head.slice(0, 7)} while ${j.base.slice(0, 7)} was built; retry to deploy it`);
+    // Origin has the commit already: recorded as pushed, so a failed deploy can be re-run like any other.
+    await j.ctx.q.setRun(j.runId, { commit_sha: j.base, push_state: "pushed" });
+    return deploy(j, j.base);
   });
 }
 

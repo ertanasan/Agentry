@@ -600,9 +600,13 @@ ${d.attachedTo ? html`<p>Pause, workers and the default AI agent are set on ${qu
 
 <h2>Projects</h2>
 <div class="settings-section"><p class="hint">A disabled project's requests wait in the queue until it is enabled again.</p>
+${d.attachedTo ? "" : html`<p class="hint">Deploy main builds and tests the project's main as it is, without an AI agent or a change, then runs
+  its deploy step: for commits made outside Agentry, or a fresh build. A project whose recipe has no deploy step ends as built.</p>`}
 <table><thead><tr><th>Project</th><th>Deploy group</th><th><span class="sr">Action</span></th></tr></thead><tbody>
 ${d.projects.map((p) => html`<tr><td>${p.name}${p.enabled ? "" : html` <span class="warn">(disabled)</span>`}</td><td class="nw">${p.deploy_group}</td>
-  <td class="t">${owner ? change(`/settings/projects/${encodeURIComponent(p.name)}/${p.enabled ? "disable" : "enable"}`, p.enabled ? "Disable" : "Enable") : ""}</td></tr>`)}
+  <td class="t">${owner ? html`${change(`/settings/projects/${encodeURIComponent(p.name)}/${p.enabled ? "disable" : "enable"}`, p.enabled ? "Disable" : "Enable")}
+    ${d.attachedTo ? "" : ask(`/settings/projects/${encodeURIComponent(p.name)}/deploy`, "Deploy main",
+      `Deploy ${p.name}'s main as it is? The runner builds and tests it, then runs its deploy step. Nothing is changed or committed.`)}` : ""}</td></tr>`)}
 </tbody></table></div>
 
 <h2>Users</h2>

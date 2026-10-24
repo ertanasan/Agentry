@@ -291,7 +291,8 @@ export function startServer(o: ServerOptions) {
   }
 
   // The settings page's changes: owners only, and all but a pause after a recent passkey check. Adding a user or
-  // resetting one shows the new one-time registration link; everything else goes back to the page.
+  // resetting one shows the new one-time registration link; Deploy main goes to the home page with the new request;
+  // everything else goes back to the page.
   function changeSettings(path: string, field: (k: string) => string | undefined, user: User, verified: boolean): Response | void {
     if (user.role !== "owner") throw new A.ActionError("Only an owner can change settings.", "forbidden");
     const attached = readAttached(o.home);
@@ -304,7 +305,11 @@ export function startServer(o: ServerOptions) {
       A.setWorkers(db, Number(field("workers")));
       if (field("ai_agent") !== undefined) A.setAgent(db, field("ai_agent")!);
     })();
-    const project = path.match(/^\/settings\/projects\/([^/]+)\/(enable|disable)$/);
+    const project = path.match(/^\/settings\/projects\/([^/]+)\/(enable|disable|deploy)$/);
+    if (project?.[2] === "deploy") {
+      if (attached) throw new A.ActionError(`This machine's runner works the queue at ${attached.url}: deploy from there.`);
+      return redirect(`/?done=added&id=${A.deployMain(db, decodeURIComponent(project[1]))}`);
+    }
     if (project) return A.setProjectEnabled(db, decodeURIComponent(project[1]), project[2] === "enable");
     const linkFor = (name: string, code: string): Response =>
       htmlRes(200, settingsPage(settingsData(verified), user, { name, url: `${publicUrl}/register/${code}` }), { "cache-control": "no-store" });

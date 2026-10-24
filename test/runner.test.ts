@@ -8,7 +8,7 @@ import * as g from "../src/git.ts";
 import type { Recipe } from "../src/recipe.ts";
 import type { AgentResult, Verdict } from "../src/adapters/types.ts";
 import { checkDeployable, parseVersion, redeploy, runNext, startNext, type RunnerCtx, type RunOutcome, type Started } from "../src/runner.ts";
-import { requestRedeploy, resolve } from "../src/actions.ts";
+import { deployMain, requestRedeploy, resolve } from "../src/actions.ts";
 import { saveUploads } from "../src/attachments.ts";
 import { localQueue, unresolvedPushes } from "../src/queue.ts";
 import { recover } from "../src/recovery.ts";
@@ -549,6 +549,50 @@ describe("runner: deploy", () => {
     await runNext(h.ctx);
     const sha = h.lastRun(id).commit_sha;
     expect(h.req(id)).toMatchObject({ status: "blocked_post_push", status_reason: `prod runs ${h.initial.slice(0, 7)}, expected ${sha.slice(0, 7)}` });
+  });
+});
+
+describe("runner: deploy main without a change", () => {
+  test("origin's main is built, tested and deployed as it is: no agent, no new commit", async () => {
+    const h = setup();
+    h.pushFromUser("app/main.txt", "v2 by hand\n");
+    const main = h.originHead();
+    const id = deployMain(h.db, "p1");
+    expect(await runNext(h.ctx)).toEqual({ kind: "ran", requestId: id, status: "done" });
+    expect(h.req(id)).toMatchObject({ status: "done", status_reason: "deployed" });
+    expect(h.prompts).toEqual([]);
+    expect(h.originHead()).toBe(main);
+    expect(h.lastRun(id)).toMatchObject({ commit_sha: main, push_state: "pushed", status: "passed" });
+    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith(main.slice(0, 7));
+    expect(h.db.query("SELECT step FROM steps ORDER BY id").all().map((r: any) => r.step)).not.toContain("agent");
+  });
+
+  test("failing tests stop it before the deploy, and no agent is asked to repair them", async () => {
+    const h = setup({ recipe: { test_cmd: "test -f app/missing.txt" } });
+    const id = deployMain(h.db, "p1");
+    await runNext(h.ctx);
+    expect(h.req(id)).toMatchObject({ status: "blocked_pre_push", status_reason: "tests failed (exit 1)" });
+    expect(h.prompts).toEqual([]);
+    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith(h.initial.slice(0, 7));
+  });
+
+  test("main moved while it was built → stops; the older commit is never deployed", async () => {
+    const h = setup();
+    const q = h.ctx.q;
+    const ctx: RunnerCtx = { ...h.ctx, q: { ...q, blockedGroup: async (groups) => { h.pushFromUser("other.txt", "x\n"); return q.blockedGroup(groups); } } };
+    const id = deployMain(h.db, "p1");
+    await runNext(ctx);
+    expect(h.req(id).status).toBe("blocked_pre_push");
+    expect(h.req(id).status_reason).toContain("moved to");
+    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith(h.initial.slice(0, 7));
+  });
+
+  test("a project without a deploy_cmd ends as built", async () => {
+    const h = setup({ recipe: { deploy_cmd: undefined, targets: undefined } });
+    const id = deployMain(h.db, "p1");
+    await runNext(h.ctx);
+    expect(h.req(id)).toMatchObject({ status: "done", status_reason: "built" });
+    expect(h.originHead()).toBe(h.initial);
   });
 });
 
