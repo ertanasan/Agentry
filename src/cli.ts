@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, join } from "node:path";
+import { createInterface } from "node:readline";
 import { parseArgs } from "node:util";
 import * as A from "./actions.ts";
 import { codexAgent, codexVerifier } from "./adapters/codex.ts";
@@ -201,8 +202,8 @@ async function saveToken(provider = "claude", fromLogin = false): Promise<number
     console.log(`saved ${provider} OAuth credentials to ${file}`);
     return 0;
   }
-  if (process.stdin.isTTY) console.log(`Paste the token (line breaks are fine), then press Enter and ${process.platform === "win32" ? "Ctrl-Z then Enter" : "Ctrl-D"}:`);
-  const token = (await Bun.stdin.text()).replace(/\s+/g, "");
+  if (process.stdin.isTTY) console.log("Paste the token (line breaks are fine), then press Enter on an empty line:");
+  const token = (process.stdin.isTTY ? await readUntilBlankLine() : await Bun.stdin.text()).replace(/\s+/g, "");
   if (provider === "codex" && (!token || token.startsWith("sk-"))) fail("Paste a Codex access token, not an API key; nothing saved");
   if (provider === "claude" && !/^sk-ant-oat01-[A-Za-z0-9_-]+$/.test(token)) fail("that is not a setup-token token (sk-ant-oat01-...); nothing saved");
   const file = join(home, provider === "codex" ? "codex-access-token" : "claude-oauth-token");
@@ -210,6 +211,19 @@ async function saveToken(provider = "claude", fromLogin = false): Promise<number
   writeFileSync(file, token + "\n", { mode: 0o600 });
   console.log(`saved ${token.length} characters to ${file}`);
   return 0;
+}
+
+// A typed paste ends at the first empty line after some text, so nobody needs the platform's end-of-input key
+// (Ctrl-D, or Ctrl-Z then Enter on Windows), which a console can swallow. End of input still ends it too.
+async function readUntilBlankLine(): Promise<string> {
+  const rl = createInterface({ input: process.stdin, terminal: false });
+  let text = "";
+  for await (const line of rl) {
+    if (!line.trim()) { if (text) break; continue; }
+    text += line;
+  }
+  rl.close();
+  return text;
 }
 
 function claudeBin(): string {
