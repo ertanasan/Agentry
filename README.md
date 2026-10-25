@@ -735,7 +735,7 @@ agentry redeploy <id> | resolve <id>  blocked_post_push → queue a re-run of th
 agentry reopen <id> <what's wrong>    done → a new linked request (counts one false-done)
 agentry unblock <group>               clear a deploy-group lock no request holds (drift guard)
 agentry resume                        unpause the runner
-agentry token [claude|codex]          save a Claude subscription token or Codex access token (paste, then Ctrl-D)
+agentry token [claude|codex]          save a Claude subscription token or Codex access token (paste, then Ctrl-D; on Windows Ctrl-Z, Enter)
 agentry serve                         the web UI, with nightly backups
 agentry user add <name> [--admin]     create a web UI account, an owner unless --admin; prints a one-time passkey link
 agentry user reset <name>             revoke a user's passkeys and sessions; prints a new link

@@ -201,10 +201,10 @@ async function saveToken(provider = "claude", fromLogin = false): Promise<number
     console.log(`saved ${provider} OAuth credentials to ${file}`);
     return 0;
   }
-  if (process.stdin.isTTY) console.log("Paste the token (line breaks are fine), then press Enter and Ctrl-D:");
+  if (process.stdin.isTTY) console.log(`Paste the token (line breaks are fine), then press Enter and ${process.platform === "win32" ? "Ctrl-Z then Enter" : "Ctrl-D"}:`);
   const token = (await Bun.stdin.text()).replace(/\s+/g, "");
   if (provider === "codex" && (!token || token.startsWith("sk-"))) fail("Paste a Codex access token, not an API key; nothing saved");
-  if (provider === "claude" && !/^sk-ant-oat01-[A-Za-z0-9_-]+$/.test(token)) fail("that is not a setup-token token (sk-ant-oat01-…); nothing saved");
+  if (provider === "claude" && !/^sk-ant-oat01-[A-Za-z0-9_-]+$/.test(token)) fail("that is not a setup-token token (sk-ant-oat01-...); nothing saved");
   const file = join(home, provider === "codex" ? "codex-access-token" : "claude-oauth-token");
   rmSync(file, { recursive: false, force: true });
   writeFileSync(file, token + "\n", { mode: 0o600 });
