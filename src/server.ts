@@ -19,7 +19,7 @@ import {
 } from "./accounts.ts";
 import { lastBackupAt, STALE_AFTER_MS } from "./backup.ts";
 import { asActor, logEvent, runnerRow } from "./db.ts";
-import { choicesFor, merge } from "./devices.ts";
+import { choicesByProject, choicesFor } from "./devices.ts";
 import * as g from "./git.ts";
 import { suggestedWorkers } from "./platform.ts";
 import { readTail } from "./proc.ts";
@@ -408,7 +408,7 @@ export function startServer(o: ServerOptions) {
     const runnerAlerts = [...problems].map(([text, n]) => `${text}: ${n} request${n > 1 ? "s wait" : " waits"}.`);
     const projects = db.query("SELECT name FROM projects WHERE enabled = 1 ORDER BY name").all() as { name: string }[];
     return {
-      projects, deployTo: merge(projects.map((p) => choicesFor(db, [p.name]))),
+      projects, deployTo: choicesByProject(db, projects.map((p) => p.name)),
       needs: rows("r.status IN ('needs_info', 'needs_review', 'blocked_pre_push', 'blocked_post_push')", "r.updated_at"),
       queue,
       recent: rows("r.status IN ('done', 'done_manual', 'canceled')", "r.updated_at DESC LIMIT 10"),

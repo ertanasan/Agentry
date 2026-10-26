@@ -705,7 +705,8 @@ A recipe is a JSON file that describes one project. It's the contract between Ag
 | `test_cmd` | ✓ | Runs sandboxed. |
 | `test_result_file` | | TRX file, relative to the worktree. Enables test counts, count-regression checks and `done_when_test`. |
 | `deploy_cmd` | | Runs unsandboxed from a clean worktree at the pushed commit. If absent, requests end as `built`. |
-| `device_deploy_cmd` | | Installs on a device instead of `deploy_cmd`, for a request whose Deploy to names one. The runner's machine lists its paired iPhones and iPads (`xcrun devicectl list devices`); the new-request form and Deploy main offer them after the project's own deploy, which stays the default. Runs like `deploy_cmd`, with the device's UDID in `AGENTRY_DEVICE`; no target is read back. |
+| `device_deploy_cmd` | with `devices` | Installs on one of `devices` instead of running `deploy_cmd`, for a request whose Deploy to picks it. Runs like `deploy_cmd`, with the device's UDID in `AGENTRY_DEVICE`; no target is read back. |
+| `devices` | with `device_deploy_cmd` | The real devices the project installs on: `{ id, name, model }`, where `id` is the UDID from `xcrun devicectl list devices`. The new-request form offers them while a project with devices is selected, after the project's own deploy (its `targets`, e.g. TestFlight), which stays the default; Deploy main offers them too. |
 | `deploy_order` | | Lowest deploys first within a multi-project request. Default `0`. |
 | `targets` | with `deploy_cmd` | `{ name, live_version_cmd }`, read by the drift guard and the post-deploy check. |
 | `remote_busy_cmd` | | Exit `0` = busy, `1` = free, anything else = unknown (stops the deploy). |

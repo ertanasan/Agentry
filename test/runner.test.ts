@@ -603,7 +603,7 @@ describe("runner: install on a device", () => {
     const h = setup();
     const installed = () => join(h.prod, "installed");
     const device_deploy_cmd = cmd ?? `printf '%s %s\\n' "$AGENTRY_DEVICE" "$(git rev-parse --short HEAD)" > '${installed()}'`;
-    h.db.query("UPDATE projects SET recipe = ? WHERE name = 'p1'").run(JSON.stringify({ ...h.recipe, device_deploy_cmd }));
+    h.db.query("UPDATE projects SET recipe = ? WHERE name = 'p1'").run(JSON.stringify({ ...h.recipe, device_deploy_cmd, devices: [phone] }));
     await h.ctx.q.setDevices({ p1: { usual: "prod", devices: [phone] } });
     return { ...h, installed };
   };
@@ -639,7 +639,7 @@ describe("runner: install on a device", () => {
   test("a device its runner didn't report is refused", async () => {
     const h = await withPhone();
     expect(() => deployMain(h.db, "p1", "00000000-0000000000000002")).toThrow("p1 can't be installed on that device");
-    h.project("p2", { ...h.recipe, device_deploy_cmd: undefined, deploy_group: "g2" });
+    h.project("p2", { ...h.recipe, deploy_group: "g2" });
     expect(() => deployMain(h.db, "p2", phone.id)).toThrow("p2 can't be installed on that device");
   });
 });

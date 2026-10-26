@@ -25,7 +25,7 @@ import { asActor, LeaseLost, openDb, runnerRow } from "./db.ts";
 import { addUser, AuthError, passkeyLink, removeUser, resetUser } from "./accounts.ts";
 import { backupIfDue, runBackup } from "./backup.ts";
 import { DEFAULT_PORT, startServer } from "./server.ts";
-import { deployChoices, listDevices } from "./devices.ts";
+import { deployChoices } from "./devices.ts";
 import { parseRecipe, type Recipe } from "./recipe.ts";
 import { localQueue, startHeartbeat, Unreachable, type Queue } from "./queue.ts";
 import { addRunnerKey, readAttached, remoteQueue, removeRunnerKey, workDir } from "./remote.ts";
@@ -413,12 +413,12 @@ function runQueue(db: Database, once: boolean): Promise<number | "switch"> {
   });
 }
 
-// The devices this machine's projects can install on, for the queue's pages (devices.ts). A queue that predates
-// them refuses the call, and its pages list no devices.
+// The devices this machine's recipes install their projects on, for the queue's pages (devices.ts); read again each
+// minute, so `agentry project add` shows without a restart. A queue that predates them refuses the call, and its
+// pages list no devices.
 async function reportDevices(q: Queue): Promise<void> {
   const recipes = (await q.projects()).map((p): [string, Recipe] => [p.name, parseRecipe(p.recipe)]);
-  const devices = recipes.some(([, r]) => r.device_deploy_cmd) ? await listDevices() : [];
-  await q.setDevices(deployChoices(recipes, devices)).catch((e) => { if (e instanceof Unreachable) throw e; });
+  await q.setDevices(deployChoices(recipes)).catch((e) => { if (e instanceof Unreachable) throw e; });
 }
 
 // This machine's recipes by project name, for the projects of an attached queue.

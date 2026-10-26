@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import type { User } from "./accounts.ts";
 import { AGENTS, type AgentId } from "./adapters/providers.ts";
-import { deviceLabel, type Choices } from "./devices.ts";
+import { deviceLabel, type Choices, type DeployChoices, type Device } from "./devices.ts";
 
 export class Html { constructor(readonly s: string) {} toString() { return this.s; } }
 
@@ -326,7 +326,7 @@ export type HomeData = {
   projects: Project[]; needs: ReqRow[]; queue: ReqRow[]; recent: ReqRow[]; groupLocks: GroupLock[];
   paused: string | null; runners: RunnerInfo[]; backupAgeMs: number | null; backupStale: boolean;
   aiAgent: AgentId;           // the queue's agent, for requests that don't choose one
-  deployTo: Choices;          // the devices the projects can install on instead of their own deploy (devices.ts)
+  deployTo: DeployChoices;    // by project, the devices it can install on instead of its own deploy (devices.ts)
   runnerAlerts: string[];     // runner problems that hold queued requests: offline, a missing recipe, no runner at all
   attachedTo: string | null;  // the queue this machine's runner works instead of this one (agentry attach)
 };
@@ -486,23 +486,40 @@ function newRequestForm(d: HomeData, draft?: Draft, error?: string): Html {
     <option value="">Default: ${AGENTS[d.aiAgent]}</option>
     ${Object.entries(AGENTS).map(([id, label]) => html`<option value="${id}"${v.ai_agent === id ? html` selected` : ""}>${label}</option>`)}
   </select>
-  ${deployToPicker("deploy_to", d.deployTo, v.deploy_to)}
+  ${requestDeployTo(d.deployTo, v)}
   ${filePicker("files-new")}
   ${error ? html`<p class="field-error message" role="alert">${error}${/[.!?]$/.test(error) ? "" : "."}${v.hadFiles ? " Attach the files again." : ""}</p>` : ""}
   <div class="actions"><button class="primary">Queue it</button></div>
 </form></details>`;
 }
 
-// One list of where a request deploys: its projects' own deploy (e.g. TestFlight), the default, then each device
-// they can install on instead. Nothing when there is no device.
-function deployToPicker(id: string, c: Choices, chosen = "", disabled = html``): Html {
-  if (!c.devices.length) return html``;
+// A new request's Deploy to list, for the projects selected whose recipe defines devices: their own deploy (e.g.
+// TestFlight), the default, then their devices. It shows only while such a project is selected, and offers only the
+// devices of the projects selected (home.js; data-usual and data-projects say whose each entry is).
+function requestDeployTo(c: DeployChoices, v: Draft): Html {
+  const names = Object.keys(c);
+  if (!names.length) return html``;
+  const devices = new Map<string, { d: Device; projects: string[] }>();
+  for (const n of names) for (const d of c[n].devices) (devices.get(d.id) ?? devices.set(d.id, { d, projects: [] }).get(d.id)!).projects.push(n);
+  const picked = v.projects.filter((p) => c[p]);
+  const usual = Object.fromEntries(names.map((n) => [n, c[n].usual]));
+  return html`<div class="deploy-to" data-usual="${JSON.stringify(usual)}"${picked.length ? "" : html` hidden`}>
+  <label for="deploy_to">Deploy to</label>
+  <select id="deploy_to" name="deploy_to"${picked.length ? "" : html` disabled`}>
+    <option value="">${[...new Set(picked.map((p) => usual[p]))].join(" / ")}</option>
+    ${[...devices.values()].map(({ d, projects }) => html`<option value="${d.id}" data-projects="${projects.join(" ")}"${v.deploy_to === d.id ? html` selected` : ""}>${deviceLabel(d)}</option>`)}
+  </select>
+  <p class="hint">A device gets a Debug build installed instead; the other projects deploy as usual.</p></div>`;
+}
+
+// Deploy main's list for one project: its own deploy, the default, then its devices.
+function deployToPicker(id: string, c: Choices, disabled = html``): Html {
   return html`<label for="${id}">Deploy to</label>
   <select id="${id}" name="deploy_to"${disabled}>
     <option value="">${c.usual.join(" / ")}</option>
-    ${c.devices.map((dv) => html`<option value="${dv.id}"${chosen === dv.id ? html` selected` : ""}>${deviceLabel(dv)}</option>`)}
+    ${c.devices.map((dv) => html`<option value="${dv.id}">${deviceLabel(dv)}</option>`)}
   </select>
-  <p class="hint">A device gets a Debug build of ${c.projects.join(", ")} installed instead; other projects deploy as usual.</p>`;
+  <p class="hint">A device gets a Debug build installed instead.</p>`;
 }
 
 // The runners as plates: attached elsewhere, or each one with its state, what it works on and its worker slots.
@@ -721,7 +738,7 @@ export function settingsPage(d: SettingsData, user: User, link?: NewLink): strin
     const question = `Deploy ${p.name}'s main as it is? The runner builds and tests it, then ${devices ? "deploys it where you pick" : "runs its deploy step"}. Nothing is changed or committed.`;
     if (!devices) return ask(action, "Deploy main", question);
     // Before the passkey check the list shows too, disabled like the button, so the targets are visible.
-    if (!(owner && d.verified)) return html`${deployToPicker(`deploy-to-${p.name}`, devices, "", html` disabled`)}<button class="danger" disabled>Deploy main</button>`;
+    if (!(owner && d.verified)) return html`${deployToPicker(`deploy-to-${p.name}`, devices, html` disabled`)}<button class="danger" disabled>Deploy main</button>`;
     return html`<details class="confirm danger"><summary class="btn danger">Deploy main…</summary><div class="confirm-body"><p>${question}</p>
       <form method="post" action="${action}">${deployToPicker(`deploy-to-${p.name}`, devices)}<div class="actions"><button class="danger">Deploy main</button></div></form></div></details>`;
   };
@@ -832,6 +849,22 @@ for (const form of document.querySelectorAll("form[action='/requests']")) {
   form.addEventListener("submit", (e) => {
     if (picks && !picks.querySelector("input:checked")) { e.preventDefault(); picks.querySelector("input")?.focus(); }
   });
+  // Deploy to follows the projects checked: shown while one of them has devices, with only their devices. The options
+  // are rebuilt, not hidden, since Safari shows hidden options.
+  const box = form.querySelector(".deploy-to");
+  if (!box) continue;
+  const select = box.querySelector("select"), usual = JSON.parse(box.dataset.usual);
+  const [first, ...devices] = select.options;
+  const follow = () => {
+    const picked = [...form.querySelectorAll("input[name=project]:checked")].map((i) => i.value).filter((p) => p in usual);
+    const keep = select.value;
+    box.hidden = select.disabled = !picked.length;
+    first.textContent = [...new Set(picked.map((p) => usual[p]))].join(" / ");
+    select.replaceChildren(first, ...devices.filter((o) => o.dataset.projects.split(" ").some((p) => picked.includes(p))));
+    select.value = [...select.options].some((o) => o.value === keep) ? keep : "";
+  };
+  form.addEventListener("change", (e) => { if (e.target.name === "project") follow(); });
+  follow();
 }
 document.addEventListener("htmx:beforeRequest", (e) => {
   const board = document.getElementById("board");

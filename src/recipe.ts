@@ -6,6 +6,9 @@ export type Target = {
   live_version_cmd: string;
 };
 
+// A real device the project installs on, as Xcode knows it (`xcrun devicectl list devices`).
+export type Device = { id: string; name: string; model?: string };  // id: its UDID, which xcodebuild and devicectl take
+
 export type Recipe = {
   repo: string;                 // absolute path of the user's checkout (only used for git metadata and worktrees)
   remote?: string;              // default "origin"
@@ -19,8 +22,9 @@ export type Recipe = {
   test_cmd: string;             // runs sandboxed
   test_result_file?: string;    // TRX file path relative to the worktree, e.g. "TestResults/agentry.trx"
   deploy_cmd?: string;          // runs unsandboxed from the worktree (D6); absent = "built", not deployed
-  device_deploy_cmd?: string;   // instead of deploy_cmd for a request that picked a device of this machine (devices.ts):
-                                // installs on $AGENTRY_DEVICE (its UDID); no targets are read back
+  device_deploy_cmd?: string;   // instead of deploy_cmd for a request that picked one of `devices` (devices.ts): installs
+                                // on $AGENTRY_DEVICE (its UDID); no targets are read back
+  devices?: Device[];           // with device_deploy_cmd: offered after the project's own deploy (its targets, e.g. TestFlight)
   deploy_order?: number;        // a request with several projects deploys them lowest first; default 0
   targets?: Target[];           // live-version reads for the drift guard and the post-deploy check
   remote_busy_cmd?: string;     // exit 0 = an earlier install is still running remotely, 1 = free, else unknown (D18)
@@ -54,5 +58,9 @@ export function parseRecipe(json: string): Recipe {
     if (typeof r[key] !== "string" || (!r[key] && key !== "scope_path")) throw new Error(`recipe: "${key}" is required`);
   }
   if (r.deploy_cmd && !r.targets?.length) throw new Error("recipe: a deploy_cmd needs targets with live_version_cmd");
+  if (!r.device_deploy_cmd !== !r.devices?.length) throw new Error("recipe: device_deploy_cmd and devices go together");
+  if (r.devices?.some((d) => typeof d?.id !== "string" || !d.id || typeof d.name !== "string" || !d.name)) {
+    throw new Error("recipe: each device needs an id (its UDID) and a name");
+  }
   return r;
 }

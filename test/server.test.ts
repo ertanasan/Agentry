@@ -666,27 +666,35 @@ describe("settings", () => {
     expect((await h.call("/settings/projects/nope/deploy", { method: "POST", cookie })).status).toBe(404);
   });
 
-  test("a project that can install on a device offers one Deploy to list, its own deploy first and chosen", async () => {
+  test("a project whose recipe defines devices offers one Deploy to list, its own deploy first and chosen", async () => {
     const h = await setup();
     const { cookie, key } = await h.signUp();
+    h.db.query("INSERT INTO projects (name, repo_id, deploy_group_id, recipe) SELECT 'vt-ios', 1, 1, recipe FROM projects WHERE name = 'vt-web'").run();
     expect(await (await h.call("/", { cookie })).text()).not.toContain('name="deploy_to"'); // no runner reported a device
     const phone = { id: "00000000-0000000000000001", name: "Test phone", model: "iPhone 18 Pro" };
     h.db.query("INSERT INTO leases (holder, token, expires_at, devices) VALUES ('local', 'tok', ?, ?)")
-      .run(Date.now() + 60_000, JSON.stringify({ "vt-web": { usual: "TestFlight · team TEAM123456", devices: [phone] } }));
-    const list = '<select id="deploy_to" name="deploy_to">\n    <option value="">TestFlight · team TEAM123456</option>\n    ' +
-      `<option value="${phone.id}">Test phone · iPhone 18 Pro</option>`;
-    expect(await (await h.call("/", { cookie })).text()).toContain(list);
-    expect((await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "On my phone", deploy_to: phone.id } })).status).toBe(303);
-    expect((await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "As usual", deploy_to: "" } })).status).toBe(303);
-    const refused = await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "Elsewhere", deploy_to: "00000000-0000000000000009" } });
-    expect(refused.status).toBe(400);
-    expect(await refused.text()).toContain("vt-web can&#39;t be installed on that device");
+      .run(Date.now() + 60_000, JSON.stringify({ "vt-ios": { usual: "TestFlight · team TEAM123456", devices: [phone] } }));
+    // Hidden until a project with devices is checked (home.js), and naming whose each entry is.
+    expect(await (await h.call("/", { cookie })).text()).toContain('<div class="deploy-to" data-usual="{&quot;vt-ios&quot;:&quot;TestFlight · team TEAM123456&quot;}" hidden>' +
+      '\n  <label for="deploy_to">Deploy to</label>\n  <select id="deploy_to" name="deploy_to" disabled>\n    <option value=""></option>\n    ' +
+      `<option value="${phone.id}" data-projects="vt-ios">Test phone · iPhone 18 Pro</option>`);
+    expect((await h.call("/requests", { method: "POST", cookie, form: { project: "vt-ios", title: "On my phone", deploy_to: phone.id } })).status).toBe(303);
+    expect((await h.call("/requests", { method: "POST", cookie, form: { project: "vt-ios", title: "As usual", deploy_to: "" } })).status).toBe(303);
+    const web = await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "Web on a phone", deploy_to: phone.id } });
+    expect(web.status).toBe(400);
+    expect(await web.text()).toContain("vt-web can&#39;t be installed on that device");
+    // A refused request comes back with its project checked: the list shows, TestFlight first.
+    const refused = await (await h.call("/requests", { method: "POST", cookie, form: { project: "vt-ios", title: "Elsewhere", deploy_to: "00000000-0000000000000009" } })).text();
+    expect(refused).toContain("vt-ios can&#39;t be installed on that device");
+    expect(refused).toContain('&quot;}">\n  <label for="deploy_to">Deploy to</label>\n  <select id="deploy_to" name="deploy_to">\n    <option value="">TestFlight · team TEAM123456</option>');
 
     stale(h);
-    expect(await (await h.call("/settings", { cookie })).text()).toContain('<select id="deploy-to-vt-web" name="deploy_to" disabled>'); // seen before the passkey check
+    const settings = await (await h.call("/settings", { cookie })).text();
+    expect(settings).toContain('<select id="deploy-to-vt-ios" name="deploy_to" disabled>'); // seen before the passkey check
+    expect(settings).not.toContain("deploy-to-vt-web");
     await stepUp(h, cookie, key);
-    expect(await (await h.call("/settings", { cookie })).text()).toContain('<select id="deploy-to-vt-web" name="deploy_to">');
-    expect((await h.call("/settings/projects/vt-web/deploy", { method: "POST", cookie, form: { deploy_to: phone.id } })).status).toBe(303);
+    expect(await (await h.call("/settings", { cookie })).text()).toContain('<select id="deploy-to-vt-ios" name="deploy_to">');
+    expect((await h.call("/settings/projects/vt-ios/deploy", { method: "POST", cookie, form: { deploy_to: phone.id } })).status).toBe(303);
     expect(h.db.query("SELECT title, device, device_name FROM requests ORDER BY id").all()).toEqual([
       { title: "On my phone", device: phone.id, device_name: "Test phone · iPhone 18 Pro" },
       { title: "As usual", device: null, device_name: null },
