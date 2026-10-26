@@ -19,6 +19,7 @@ import {
 } from "./accounts.ts";
 import { lastBackupAt, STALE_AFTER_MS } from "./backup.ts";
 import { asActor, logEvent, runnerRow } from "./db.ts";
+import { choicesFor, merge } from "./devices.ts";
 import * as g from "./git.ts";
 import { suggestedWorkers } from "./platform.ts";
 import { readTail } from "./proc.ts";
@@ -231,7 +232,7 @@ export function startServer(o: ServerOptions) {
           db.transaction(() => {
             const id = A.addRequest(db, {
               projects: form.getAll("project").filter((v): v is string => typeof v === "string"), title: field("title") ?? "", body: field("body") ?? "",
-              doneWhen: optional("done_when"), doneWhenTest: optional("done_when_test"), agent: optional("ai_agent"),
+              doneWhen: optional("done_when"), doneWhenTest: optional("done_when_test"), agent: optional("ai_agent"), device: optional("deploy_to"),
             });
             saveUploads(db, o.home, id, uploads, types);
             Object.assign(done, { verb: "added", id });
@@ -270,7 +271,7 @@ export function startServer(o: ServerOptions) {
         const data = homeData();
         const draft: Draft = {
           projects: form.getAll("project").filter((v): v is string => typeof v === "string"), title: field("title") ?? "", body: field("body") ?? "",
-          done_when: field("done_when") ?? "", done_when_test: field("done_when_test") ?? "", ai_agent: field("ai_agent") ?? "", hadFiles: uploads.length > 0,
+          done_when: field("done_when") ?? "", done_when_test: field("done_when_test") ?? "", ai_agent: field("ai_agent") ?? "", deploy_to: field("deploy_to") ?? "", hadFiles: uploads.length > 0,
         };
         return htmlRes(status, homePage(data, user, data.attachedTo ? { flash: { kind: "bad", text: e.message } } : { draft, error: e.message }));
       }
@@ -312,7 +313,7 @@ export function startServer(o: ServerOptions) {
     const project = path.match(/^\/settings\/projects\/([^/]+)\/(enable|disable|deploy)$/);
     if (project?.[2] === "deploy") {
       if (attached) throw new A.ActionError(`This machine's runner works the queue at ${attached.url}: deploy from there.`);
-      return redirect(`/?done=added&id=${A.deployMain(db, decodeURIComponent(project[1]))}`);
+      return redirect(`/?done=added&id=${A.deployMain(db, decodeURIComponent(project[1]), field("deploy_to") || null)}`);
     }
     if (project) return A.setProjectEnabled(db, decodeURIComponent(project[1]), project[2] === "enable");
     const linkFor = (name: string, code: string): Response =>
@@ -337,8 +338,8 @@ export function startServer(o: ServerOptions) {
       aiAgent: runner.ai_agent, workers: runner.workers, maxWorkers: A.MAX_WORKERS, suggested: suggestedWorkers(cores, memory), cores,
       memoryGb: Math.round(memory / 2 ** 30), windows: process.platform === "win32",
       paused: runner.paused ? runner.pause_reason ?? "paused" : null, verified,
-      projects: db.query(`SELECT p.name, g.name AS deploy_group, p.enabled FROM projects p JOIN deploy_groups g ON g.id = p.deploy_group_id
-        ORDER BY p.name`).all() as { name: string; deploy_group: string; enabled: number }[],
+      projects: (db.query(`SELECT p.name, g.name AS deploy_group, p.enabled FROM projects p JOIN deploy_groups g ON g.id = p.deploy_group_id
+        ORDER BY p.name`).all() as { name: string; deploy_group: string; enabled: number }[]).map((p) => ({ ...p, deployTo: choicesFor(db, [p.name]) })),
       users: db.query(`SELECT u.name, u.role, COUNT(c.id) AS passkeys, MAX(c.last_used_at) AS last_used FROM users u
         LEFT JOIN credentials c ON c.user_id = u.id GROUP BY u.id ORDER BY u.name`).all() as
         { name: string; role: string; passkeys: number; last_used: number | null }[],
@@ -349,7 +350,7 @@ export function startServer(o: ServerOptions) {
   // Requests as the pages show them, with what their actions need: the last commit made, the deploy groups, the
   // runner that has it and the check flags of its latest run.
   const rows = (where: string, order = "r.id", ...args: number[]) => db.query(`SELECT r.id, ${PROJECT_NAMES} AS project, r.title, r.status,
-    r.status_reason, r.updated_at, r.body, r.done_when, r.holder, r.ai_agent, (SELECT MAX(id) FROM runs WHERE request_id = r.id) AS last_run,
+    r.status_reason, r.updated_at, r.body, r.done_when, r.holder, r.ai_agent, r.device_name, (SELECT MAX(id) FROM runs WHERE request_id = r.id) AS last_run,
     (SELECT json_group_array(json_object('id', id, 'name', name, 'mime', mime)) FROM (SELECT id, name, mime FROM attachments WHERE request_id = r.id ORDER BY id)) AS files,
     (SELECT commit_sha FROM runs WHERE request_id = r.id AND commit_sha IS NOT NULL ORDER BY id DESC LIMIT 1) AS commit_sha,
     (SELECT group_concat(DISTINCT g.name) FROM request_projects rp JOIN projects p ON p.id = rp.project_id
@@ -405,8 +406,9 @@ export function startServer(o: ServerOptions) {
       problems.set(text, (problems.get(text) ?? 0) + 1);
     }
     const runnerAlerts = [...problems].map(([text, n]) => `${text}: ${n} request${n > 1 ? "s wait" : " waits"}.`);
+    const projects = db.query("SELECT name FROM projects WHERE enabled = 1 ORDER BY name").all() as { name: string }[];
     return {
-      projects: db.query("SELECT name FROM projects WHERE enabled = 1 ORDER BY name").all() as { name: string }[],
+      projects, deployTo: merge(projects.map((p) => choicesFor(db, [p.name]))),
       needs: rows("r.status IN ('needs_info', 'needs_review', 'blocked_pre_push', 'blocked_post_push')", "r.updated_at"),
       queue,
       recent: rows("r.status IN ('done', 'done_manual', 'canceled')", "r.updated_at DESC LIMIT 10"),

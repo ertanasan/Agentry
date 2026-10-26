@@ -19,6 +19,8 @@ export type Recipe = {
   test_cmd: string;             // runs sandboxed
   test_result_file?: string;    // TRX file path relative to the worktree, e.g. "TestResults/agentry.trx"
   deploy_cmd?: string;          // runs unsandboxed from the worktree (D6); absent = "built", not deployed
+  device_deploy_cmd?: string;   // instead of deploy_cmd for a request that picked a device of this machine (devices.ts):
+                                // installs on $AGENTRY_DEVICE (its UDID); no targets are read back
   deploy_order?: number;        // a request with several projects deploys them lowest first; default 0
   targets?: Target[];           // live-version reads for the drift guard and the post-deploy check
   remote_busy_cmd?: string;     // exit 0 = an earlier install is still running remotely, 1 = free, else unknown (D18)

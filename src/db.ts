@@ -145,6 +145,11 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE requests ADD COLUMN ai_agent TEXT CHECK (ai_agent IN ('claude', 'codex', 'gemini', 'antigravity'))",
   // 12: a request that deploys its project's main as it is, without a change (actions.deployMain).
   "ALTER TABLE requests ADD COLUMN deploy_only INTEGER NOT NULL DEFAULT 0",
+  // 13: the devices a runner can install its projects on (devices.ts DeployChoices, JSON), and the one a request
+  // installs on instead of its projects' own deploy: its UDID, and its name and model as filed.
+  `ALTER TABLE leases ADD COLUMN devices TEXT;
+   ALTER TABLE requests ADD COLUMN device TEXT;
+   ALTER TABLE requests ADD COLUMN device_name TEXT;`,
 ];
 
 // Checks run before a migration; a message refuses it and leaves the database as it was.

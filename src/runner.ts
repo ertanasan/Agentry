@@ -95,6 +95,11 @@ function partsOf(rows: PartRow[]): Part[] {
 
 const groupsOf = (parts: Part[]) => [...new Set(parts.map((p) => p.groupId))];
 
+// A request that picked a device installs each project that can on it, instead of the project's own deploy
+// (devices.ts). Nothing reads back what a device runs, so its targets are neither guarded nor checked.
+const onDevice = (j: Job, r: Recipe) => !!(j.req.device && r.device_deploy_cmd);
+const deployCmdOf = (j: Job, r: Recipe) => onDevice(j, r) ? r.device_deploy_cmd : r.deploy_cmd;
+
 // The first item for each key, in order.
 function distinct<T>(items: T[], key: (item: T) => unknown): T[] {
   const seen = new Set<unknown>();
@@ -536,17 +541,19 @@ async function deploy(j: Job, sha: string, redeploy = false): Promise<Stop> {
   let later = false;
   let checkedOut = !redeploy;
   for (const [i, { name, recipe }] of j.parts.entries()) {
-    if (!recipe.deploy_cmd || done.has(recipe.deploy_cmd)) continue;
-    done.add(recipe.deploy_cmd);
-    const fail = (reason: string) => post(j.parts.length > 1 ? `${name}: ${reason}` : reason, sha, groupsOf(j.parts.slice(i).filter((p) => p.recipe.deploy_cmd)));
-    if (redeploy) {
+    const cmd = deployCmdOf(j, recipe);
+    if (!cmd || done.has(cmd)) continue;
+    done.add(cmd);
+    const device = onDevice(j, recipe);
+    const fail = (reason: string) => post(j.parts.length > 1 ? `${name}: ${reason}` : reason, sha, groupsOf(j.parts.slice(i).filter((p) => deployCmdOf(j, p.recipe))));
+    if (redeploy && !device) {
       const plan = await redeployPlan(j, recipe, sha);
       if (typeof plan === "object") return fail(plan.error);
       if (plan !== "deploy") { later ||= plan === "later"; continue; }
-      if (!checkedOut) await g.detachedWorktree(j.repo, j.wt, sha);
-      checkedOut = true;
     }
-    if (recipe.remote_busy_cmd) {
+    if (redeploy && !checkedOut) await g.detachedWorktree(j.repo, j.wt, sha);
+    checkedOut = true;
+    if (recipe.remote_busy_cmd && !device) {
       const busy = await command(j, "remote_busy", recipe.remote_busy_cmd, { cwd: j.dir, timeout: "version", recipe });
       if (busy.exitCode === 0) return fail("previous install still running on the target");
       if (busy.exitCode !== 1) return fail(`could not check for a running install (exit ${busy.exitCode})`);
@@ -555,10 +562,11 @@ async function deploy(j: Job, sha: string, redeploy = false): Promise<Stop> {
     await g.cleanUntracked(j.wt);
     const refused = await checkDeployable(j.wt, sha);
     if (refused) return fail(refused);
-    const d = await command(j, "deploy", recipe.deploy_cmd, { recipe });
+    const env = device ? { ...process.env as Record<string, string>, AGENTRY_DEVICE: j.req.device!, AGENTRY_DEVICE_NAME: j.req.device_name ?? "" } : undefined;
+    const d = await command(j, "deploy", cmd, { recipe, env });
     if (d.timedOut) return fail("deploy timed out: remote state unknown");
-    if (d.exitCode !== 0) return fail(`deploy failed (exit ${d.exitCode})`);
-    for (const t of recipe.targets ?? []) {
+    if (d.exitCode !== 0) return fail(device ? `install on ${j.req.device_name} failed (exit ${d.exitCode})` : `deploy failed (exit ${d.exitCode})`);
+    for (const t of device ? [] : recipe.targets ?? []) {
       const live = await liveVersion(j, recipe, t);
       if ("error" in live) return fail(`${t.name}: ${live.error}`);
       if (live.sha !== sha || live.uncommitted) return fail(`${t.name} runs ${live.short}${live.uncommitted ? "+uncommitted" : ""}, expected ${sha.slice(0, 7)}`);
@@ -600,7 +608,7 @@ export async function checkDeployable(wt: string, sha: string): Promise<string |
 async function driftGuard(j: Job): Promise<{ reason: string; group: number } | null> {
   const tracking = `${j.remote}/${j.branch}`;
   for (const { recipe, groupId } of distinct(j.parts, (p) => p.recipe.deploy_cmd)) {
-    if (!recipe.deploy_cmd) continue;
+    if (!recipe.deploy_cmd || onDevice(j, recipe)) continue;
     for (const t of recipe.targets ?? []) {
       const live = await liveVersion(j, recipe, t);
       const reason = "error" in live ? `can't read live version of ${t.name}: ${live.error}`
@@ -661,12 +669,14 @@ function longest(j: Job, step: StepName): number {
 }
 
 // `recipe`: the project whose command this is, for its timeout; default the longest of the request's.
-async function command(j: Job, name: string, cmd: string, o: { sandboxed?: boolean; cwd?: string; timeout?: StepName; recipe?: Recipe }): Promise<StepResult & { logPath: string }> {
+// `env`: an unsandboxed step's whole environment; default the runner's.
+async function command(j: Job, name: string, cmd: string,
+  o: { sandboxed?: boolean; cwd?: string; timeout?: StepName; recipe?: Recipe; env?: Record<string, string> }): Promise<StepResult & { logPath: string }> {
   const s = await begin(j, name);
   const step = o.timeout ?? (name as StepName);
   const r = await runStep(cmd, {
     cwd: o.cwd ?? j.wt, logPath: s.logPath, timeoutMs: o.recipe ? timeoutMs(o.recipe, step) : longest(j, step),
-    wrap: o.sandboxed ? j.sbx!.wrap : undefined, env: o.sandboxed ? j.sbx!.env : undefined, onStart: s.onStart,
+    wrap: o.sandboxed ? j.sbx!.wrap : undefined, env: o.sandboxed ? j.sbx!.env : o.env, onStart: s.onStart,
   });
   await s.end(r.exitCode);
   return { ...r, logPath: s.logPath };

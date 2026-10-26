@@ -25,7 +25,8 @@ import { asActor, LeaseLost, openDb, runnerRow } from "./db.ts";
 import { addUser, AuthError, passkeyLink, removeUser, resetUser } from "./accounts.ts";
 import { backupIfDue, runBackup } from "./backup.ts";
 import { DEFAULT_PORT, startServer } from "./server.ts";
-import { parseRecipe } from "./recipe.ts";
+import { deployChoices, listDevices } from "./devices.ts";
+import { parseRecipe, type Recipe } from "./recipe.ts";
 import { localQueue, startHeartbeat, Unreachable, type Queue } from "./queue.ts";
 import { addRunnerKey, readAttached, remoteQueue, removeRunnerKey, workDir } from "./remote.ts";
 import { recover, recoverExpired, resolvePushUnknown } from "./recovery.ts";
@@ -36,6 +37,7 @@ import { claudeVerifier } from "./verifier.ts";
 
 const POLL_MS = 5_000;
 const RESOLVE_EVERY_MS = 60_000;
+const DEVICES_EVERY_MS = 60_000;
 
 const USAGE = `usage: agentry <command>
   project add <name> <recipe.json> [--runner R,...]   register or update a project; --runner: the runners that
@@ -279,7 +281,6 @@ async function makeCtx(q: Queue, work: string): Promise<RunnerCtx> {
     if (agent !== "claude") throw new Error("Unsupported AI agent: " + agent);
     const bin = claudeBin();
     const auth = resolveAuth(join(home, "claude-oauth-token"), base.keyHelper);
-    if (auth.kind !== "subscription") throw new Error("Claude Code needs subscription token access: run agentry token");
     const o = { bin, auth, model: process.env.AGENTRY_MODEL };
     return { ...base, claudeBin: bin, agent: claudeAgent(o), verifier: claudeVerifier(o) };
   };
@@ -346,6 +347,7 @@ function runQueue(db: Database, once: boolean): Promise<number | "switch"> {
     process.on("SIGINT", onSignal);
     process.on("SIGTERM", onSignal);
     let lastResolve = Date.now();
+    let lastDevices = 0;
     let saidPaused = false;
     let failure: unknown = null;
     // The requests in progress; each removes itself when its run ends.
@@ -388,6 +390,10 @@ function runQueue(db: Database, once: boolean): Promise<number | "switch"> {
           if (res !== "unknown") console.log(`run ${runId}: push ${res}`);
         }
       }
+      if (Date.now() - lastDevices >= DEVICES_EVERY_MS) {
+        lastDevices = Date.now();
+        await reportDevices(q);
+      }
       // Runs handed to this runner by `agentry runner-key remove` (two-runners review D8).
       for (const r of await recoverExpired(ctx)) console.log(`recovery: #${r.requestId} was interrupted → ${r.status}`);
       // Start requests until every worker is busy; read each time, so a change on the settings page applies at once.
@@ -405,6 +411,14 @@ function runQueue(db: Database, once: boolean): Promise<number | "switch"> {
       return next;
     }
   });
+}
+
+// The devices this machine's projects can install on, for the queue's pages (devices.ts). A queue that predates
+// them refuses the call, and its pages list no devices.
+async function reportDevices(q: Queue): Promise<void> {
+  const recipes = (await q.projects()).map((p): [string, Recipe] => [p.name, parseRecipe(p.recipe)]);
+  const devices = recipes.some(([, r]) => r.device_deploy_cmd) ? await listDevices() : [];
+  await q.setDevices(deployChoices(recipes, devices)).catch((e) => { if (e instanceof Unreachable) throw e; });
 }
 
 // This machine's recipes by project name, for the projects of an attached queue.

@@ -596,6 +596,54 @@ describe("runner: deploy main without a change", () => {
   });
 });
 
+describe("runner: install on a device", () => {
+  const phone = { id: "00000000-0000000000000001", name: "Test phone", model: "iPhone 18 Pro" };
+  // A project that can install on `phone`, which its runner reported; the install writes what it installed to `installed`.
+  const withPhone = async (cmd?: string) => {
+    const h = setup();
+    const installed = () => join(h.prod, "installed");
+    const device_deploy_cmd = cmd ?? `printf '%s %s\\n' "$AGENTRY_DEVICE" "$(git rev-parse --short HEAD)" > '${installed()}'`;
+    h.db.query("UPDATE projects SET recipe = ? WHERE name = 'p1'").run(JSON.stringify({ ...h.recipe, device_deploy_cmd }));
+    await h.ctx.q.setDevices({ p1: { usual: "prod", devices: [phone] } });
+    return { ...h, installed };
+  };
+
+  test("Deploy main to a device installs it there instead of the project's deploy; no target is read back", async () => {
+    const h = await withPhone();
+    writeFileSync(join(h.prod, "VERSION"), "deadbeef 2026-10-17 12:00\n"); // a target the drift guard would refuse
+    const id = deployMain(h.db, "p1", phone.id);
+    expect(h.req(id)).toMatchObject({ device: phone.id, device_name: "Test phone · iPhone 18 Pro" });
+    expect(await runNext(h.ctx)).toEqual({ kind: "ran", requestId: id, status: "done" });
+    expect(h.req(id)).toMatchObject({ status: "done", status_reason: "deployed" });
+    expect(readFileSync(h.installed(), "utf8")).toBe(`${phone.id} ${h.initial.slice(0, 7)}\n`);
+    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith("deadbeef"); // the project's own deploy didn't run
+    expect(h.db.query("SELECT step FROM steps ORDER BY id").all().map((r: any) => r.step)).not.toContain("version");
+  });
+
+  test("without a device, the project deploys as usual", async () => {
+    const h = await withPhone();
+    const id = deployMain(h.db, "p1");
+    await runNext(h.ctx);
+    expect(h.req(id)).toMatchObject({ status: "done", status_reason: "deployed", device: null });
+    expect(existsSync(h.installed())).toBe(false);
+    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith(h.initial.slice(0, 7));
+  });
+
+  test("a failed install blocks the group, naming the device", async () => {
+    const h = await withPhone("exit 3");
+    const id = deployMain(h.db, "p1", phone.id);
+    await runNext(h.ctx);
+    expect(h.req(id)).toMatchObject({ status: "blocked_post_push", status_reason: "install on Test phone · iPhone 18 Pro failed (exit 3)" });
+  });
+
+  test("a device its runner didn't report is refused", async () => {
+    const h = await withPhone();
+    expect(() => deployMain(h.db, "p1", "00000000-0000000000000002")).toThrow("p1 can't be installed on that device");
+    h.project("p2", { ...h.recipe, device_deploy_cmd: undefined, deploy_group: "g2" });
+    expect(() => deployMain(h.db, "p2", phone.id)).toThrow("p2 can't be installed on that device");
+  });
+});
+
 describe("runner: drift guard (D5, D10, C1)", () => {
   const cases: [string, (h: ReturnType<typeof setup>) => string, string][] = [
     ["an unknown commit", () => "deadbeef 2026-10-17 12:00", "can't read live version of prod: unknown or ambiguous commit deadbeef"],

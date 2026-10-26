@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto";
 import type { User } from "./accounts.ts";
 import { AGENTS, type AgentId } from "./adapters/providers.ts";
+import { deviceLabel, type Choices } from "./devices.ts";
 
 export class Html { constructor(readonly s: string) {} toString() { return this.s; } }
 
@@ -301,6 +302,7 @@ export type ReqRow = {
   id: number; project: string; title: string; status: string; status_reason: string | null; updated_at: number; last_run: number | null;
   body: string; done_when: string | null; files: string; // the attachments, a JSON array of FileRef
   ai_agent?: AgentId | null;                             // its own agent; none: the queue's
+  device_name?: string | null;                           // the device it installs on instead of its projects' own deploy
   commit_sha: string | null; groups: string | null;     // the last commit made for it, and its deploy groups
   waiting?: string | null;                               // a queued request whose runner can't take it now: why
   runner?: string | null;                                // a running request: the runner working on it
@@ -317,11 +319,14 @@ export type RunnerInfo = {
 export type GroupLock = { name: string; lock_reason: string | null };
 export type Flash = { kind: "ok" | "bad"; text: string };
 // What was typed into the new-request form when the server refused it, to show again.
-export type Draft = { projects: string[]; title: string; body: string; done_when: string; done_when_test: string; ai_agent: string; hadFiles: boolean };
+export type Draft = {
+  projects: string[]; title: string; body: string; done_when: string; done_when_test: string; ai_agent: string; deploy_to: string; hadFiles: boolean;
+};
 export type HomeData = {
   projects: Project[]; needs: ReqRow[]; queue: ReqRow[]; recent: ReqRow[]; groupLocks: GroupLock[];
   paused: string | null; runners: RunnerInfo[]; backupAgeMs: number | null; backupStale: boolean;
   aiAgent: AgentId;           // the queue's agent, for requests that don't choose one
+  deployTo: Choices;          // the devices the projects can install on instead of their own deploy (devices.ts)
   runnerAlerts: string[];     // runner problems that hold queued requests: offline, a missing recipe, no runner at all
   attachedTo: string | null;  // the queue this machine's runner works instead of this one (agentry attach)
 };
@@ -402,7 +407,7 @@ function reqLine(r: ReqRow, card = false): Html {
   const shipped = r.status === "done" && r.status_reason === "deployed" && r.commit_sha;
   return html`<div class="req">${routing(r.id)}<div class="body">${r.last_run ? html`<a class="title" href="/runs/${r.last_run}">${r.title}</a>` : html`<span class="title">${r.title}</span>`}
   <div class="meta">${stateOf(r.status, r.status_reason)}<span>${r.project}</span>
-    ${r.ai_agent ? html`<span>${AGENTS[r.ai_agent]}</span>` : ""}${r.runner ? html`<span>on ${r.runner}</span>` : ""}
+    ${r.ai_agent ? html`<span>${AGENTS[r.ai_agent]}</span>` : ""}${r.device_name ? html`<span>to ${r.device_name}</span>` : ""}${r.runner ? html`<span>on ${r.runner}</span>` : ""}
     ${shipped ? html`<span class="mono">${r.commit_sha!.slice(0, 7)}</span>` : ""}
     ${flags ? html`<span class="st attn"><i aria-hidden="true"></i>${flags} check flag${flags > 1 ? "s" : ""}</span>` : ""}</div>
   ${r.waiting ? html`<p class="why wait"><span class="st attn"><i aria-hidden="true"></i></span>${r.waiting}</p>` : why ? html`<p class="why">${why}</p>` : ""}
@@ -464,7 +469,7 @@ function needsCard(r: ReqRow): Html {
 }
 
 function newRequestForm(d: HomeData, draft?: Draft, error?: string): Html {
-  const v = draft ?? { projects: [], title: "", body: "", done_when: "", done_when_test: "", ai_agent: "", hadFiles: false };
+  const v = draft ?? { projects: [], title: "", body: "", done_when: "", done_when_test: "", ai_agent: "", deploy_to: "", hadFiles: false };
   return html`<details class="new"${draft ? html` open` : ""}><summary>New request</summary>
 <form method="post" action="/requests" enctype="multipart/form-data">
   <fieldset><legend>Projects</legend><div class="picks">
@@ -481,10 +486,23 @@ function newRequestForm(d: HomeData, draft?: Draft, error?: string): Html {
     <option value="">Default: ${AGENTS[d.aiAgent]}</option>
     ${Object.entries(AGENTS).map(([id, label]) => html`<option value="${id}"${v.ai_agent === id ? html` selected` : ""}>${label}</option>`)}
   </select>
+  ${deployToPicker("deploy_to", d.deployTo, v.deploy_to)}
   ${filePicker("files-new")}
   ${error ? html`<p class="field-error message" role="alert">${error}${/[.!?]$/.test(error) ? "" : "."}${v.hadFiles ? " Attach the files again." : ""}</p>` : ""}
   <div class="actions"><button class="primary">Queue it</button></div>
 </form></details>`;
+}
+
+// One list of where a request deploys: its projects' own deploy (e.g. TestFlight), the default, then each device
+// they can install on instead. Nothing when there is no device.
+function deployToPicker(id: string, c: Choices, chosen = "", disabled = html``): Html {
+  if (!c.devices.length) return html``;
+  return html`<label for="${id}">Deploy to</label>
+  <select id="${id}" name="deploy_to"${disabled}>
+    <option value="">${c.usual.join(" / ")}</option>
+    ${c.devices.map((dv) => html`<option value="${dv.id}"${chosen === dv.id ? html` selected` : ""}>${deviceLabel(dv)}</option>`)}
+  </select>
+  <p class="hint">A device gets a Debug build of ${c.projects.join(", ")} installed instead; other projects deploy as usual.</p>`;
 }
 
 // The runners as plates: attached elsewhere, or each one with its state, what it works on and its worker slots.
@@ -678,7 +696,7 @@ export type SettingsData = {
   workers: number; maxWorkers: number; suggested: number; cores: number; memoryGb: number; windows: boolean;
   paused: string | null;
   verified: boolean; // the session's passkey was checked recently: owners may change settings
-  projects: { name: string; deploy_group: string; enabled: number }[];
+  projects: { name: string; deploy_group: string; enabled: number; deployTo?: Choices }[];
   users: { name: string; role: string; passkeys: number; last_used: number | null }[];
   attachedTo?: string | null; // the queue this machine's runner works: its owner's runner settings apply, not these
 };
@@ -696,6 +714,16 @@ export function settingsPage(d: SettingsData, user: User, link?: NewLink): strin
     : html`<button class="danger" disabled>${label}</button>`;
   const change = (action: string, label: string, cls = "") =>
     html`<form method="post" action="${action}"><button class="${cls}"${off}>${label}</button></form>`;
+  // Deploy main, with the Deploy to list for a project that can install on a device.
+  const deployMain = (p: SettingsData["projects"][number]) => {
+    const action = `/settings/projects/${encodeURIComponent(p.name)}/deploy`;
+    const devices = p.deployTo?.devices.length ? p.deployTo : null;
+    const question = `Deploy ${p.name}'s main as it is? The runner builds and tests it, then ${devices ? "deploys it where you pick" : "runs its deploy step"}. Nothing is changed or committed.`;
+    if (!devices) return ask(action, "Deploy main", question);
+    if (!(owner && d.verified)) return html`<button class="danger" disabled>Deploy main</button>`;
+    return html`<details class="confirm danger"><summary class="btn danger">Deploy main…</summary><div class="confirm-body"><p>${question}</p>
+      <form method="post" action="${action}">${deployToPicker(`deploy-to-${p.name}`, devices)}<div class="actions"><button class="danger">Deploy main</button></div></form></div></details>`;
+  };
   const userPath = (name: string, verb: string) => `/settings/users/${encodeURIComponent(name)}/${verb}`;
   return page("Settings", html`
 <h1>Settings</h1>
@@ -738,8 +766,7 @@ ${d.attachedTo ? "" : html`<p class="hint">Deploy main builds and tests the proj
 <table><thead><tr><th>Project</th><th>Deploy group</th><th><span class="sr">Action</span></th></tr></thead><tbody>
 ${d.projects.map((p) => html`<tr><td>${p.name}${p.enabled ? "" : html` <span class="warn">(disabled)</span>`}</td><td class="nw">${p.deploy_group}</td>
   <td class="t">${owner ? html`${change(`/settings/projects/${encodeURIComponent(p.name)}/${p.enabled ? "disable" : "enable"}`, p.enabled ? "Disable" : "Enable")}
-    ${d.attachedTo ? "" : ask(`/settings/projects/${encodeURIComponent(p.name)}/deploy`, "Deploy main",
-      `Deploy ${p.name}'s main as it is? The runner builds and tests it, then runs its deploy step. Nothing is changed or committed.`)}` : ""}</td></tr>`)}
+    ${d.attachedTo ? "" : deployMain(p)}` : ""}</td></tr>`)}
 </tbody></table></div>
 
 <h2>Users</h2>

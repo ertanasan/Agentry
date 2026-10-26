@@ -4,6 +4,7 @@
 import type { Database } from "bun:sqlite";
 import { AGENTS, isAgent } from "./adapters/providers.ts";
 import { logEvent, setRequestStatus, type RequestStatus } from "./db.ts";
+import { choicesFor, deviceLabel } from "./devices.ts";
 import { eligible, runnersOf } from "./routing.ts";
 
 // A refused action: wrong state, unknown request or project, or a user whose role may not take it. The CLI exits
@@ -31,10 +32,11 @@ function move(db: Database, id: number, from: RequestStatus[], to: RequestStatus
 }
 
 // `projects`: one or more, all in one repo; the runner deploys each of them. `agent`: none takes the queue's.
-// `deployOnly`: no change; the runner deploys main as it is (deployMain).
+// `deployOnly`: no change; the runner deploys main as it is (deployMain). `device`: the UDID of a device its runner
+// reported (devices.ts), which its projects install on instead of their own deploy.
 export type NewRequest = {
   projects: string[]; title: string; body?: string; doneWhen?: string | null; doneWhenTest?: string | null; priority?: number; agent?: string | null;
-  deployOnly?: boolean;
+  deployOnly?: boolean; device?: string | null;
 };
 
 export function addRequest(db: Database, r: NewRequest): number {
@@ -52,11 +54,13 @@ export function addRequest(db: Database, r: NewRequest): number {
   if (!eligible(ps).length) {
     throw new ActionError(`no runner may run all of these projects: ${names.map((n, i) => `${n} runs on ${runnersOf(ps[i].runners).join(" or ")}`).join("; ")}`, "invalid");
   }
+  const device = r.device ? choicesFor(db, names).devices.find((d) => d.id === r.device) : undefined;
+  if (r.device && !device) throw new ActionError(`${names.join(", ")} can't be installed on that device: pick one from the list`, "invalid");
   const now = Date.now();
   return db.transaction(() => {
-    const id = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, priority, ai_agent, deploy_only, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(ps[0].id, r.title.trim(), r.body ?? "", r.doneWhen ?? null, r.doneWhenTest ?? null, r.priority ?? 0,
-      r.agent || null, r.deployOnly ? 1 : 0, now, now).lastInsertRowid);
+    const id = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, priority, ai_agent, deploy_only, device, device_name,
+      created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(ps[0].id, r.title.trim(), r.body ?? "", r.doneWhen ?? null, r.doneWhenTest ?? null,
+      r.priority ?? 0, r.agent || null, r.deployOnly ? 1 : 0, device?.id ?? null, device ? deviceLabel(device) : null, now, now).lastInsertRowid);
     for (const p of ps.slice(1)) db.query("INSERT INTO request_projects (request_id, project_id) VALUES (?, ?)").run(id, p.id);
     logEvent(db, id, "add");
     return id;
@@ -64,9 +68,10 @@ export function addRequest(db: Database, r: NewRequest): number {
 }
 
 // A deploy of `project`'s main as it is, without a change: for commits made outside Agentry, a target to bring
-// back, or a fresh TestFlight build. The runner builds and tests origin's main, with no agent, then deploys it.
-export function deployMain(db: Database, project: string): number {
-  return addRequest(db, { projects: [project], title: "Deploy main", deployOnly: true });
+// back, or a fresh TestFlight build. The runner builds and tests origin's main, with no agent, then deploys it, or
+// installs it on `device`.
+export function deployMain(db: Database, project: string, device?: string | null): number {
+  return addRequest(db, { projects: [project], title: "Deploy main", deployOnly: true, device });
 }
 
 // needs_info → queued; the answer reaches the next attempt's prompt.
@@ -132,9 +137,9 @@ export function reopen(db: Database, id: number, what: string): number {
     if (orig.status !== "done") throw new ActionError(`#${id} is ${orig.status}; reopen needs done`);
     logEvent(db, id, "reopen", { text: what });
     const now = Date.now();
-    const added = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, reopened_from, ai_agent, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, (SELECT ai_agent FROM requests WHERE id = ?), ?, ?)`).run(orig.project_id, `Reopened #${id}: ${orig.title}`,
-      `${what}\n\nOriginal request:\n${orig.body}`, orig.done_when, orig.done_when_test, id, id, now, now).lastInsertRowid);
+    const added = Number(db.query(`INSERT INTO requests (project_id, title, body, done_when, done_when_test, reopened_from, ai_agent, device, device_name,
+      created_at, updated_at) SELECT ?, ?, ?, ?, ?, ?, ai_agent, device, device_name, ?, ? FROM requests WHERE id = ?`).run(orig.project_id,
+      `Reopened #${id}: ${orig.title}`, `${what}\n\nOriginal request:\n${orig.body}`, orig.done_when, orig.done_when_test, id, now, now, id).lastInsertRowid);
     db.query("INSERT OR IGNORE INTO request_projects (request_id, project_id) SELECT ?, project_id FROM request_projects WHERE request_id = ?").run(added, id);
     return added;
   })();
