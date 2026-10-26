@@ -8,7 +8,7 @@ import { addUser } from "../src/accounts.ts";
 import { openDb, runnerRow } from "../src/db.ts";
 import { suggestedWorkers } from "../src/platform.ts";
 import { startServer } from "../src/server.ts";
-import { settingsPage } from "../src/views.ts";
+import { settingsPage, SW_JS } from "../src/views.ts";
 import { makeFixture } from "./fixture.ts";
 import { SoftPasskey } from "./helpers/passkey.ts";
 
@@ -417,6 +417,21 @@ describe("escaping (slice 2 review Q1)", () => {
     expect(await (await h.call("/sw.js")).text()).toContain('"/offline"');
     expect(await (await h.call("/login")).text()).toContain('<script src="/static/offline.js" defer></script>');
     expect(await (await h.call("/static/offline.js")).text()).toContain('register("/sw.js")');
+  });
+
+  // iOS WebKit truncates a form's files when the worker re-sends the POST, so the server can't parse it.
+  test("the worker answers page loads but leaves form posts to the browser", () => {
+    const on: Record<string, (e: unknown) => void> = {};
+    new Function("self", "caches", "fetch", SW_JS)({ addEventListener: (t: string, f: (e: unknown) => void) => (on[t] = f) }, {}, () => new Promise(() => {}));
+    const answered = (method: string) => {
+      const request = new Request("https://agentry.example/requests", { method });
+      Object.defineProperty(request, "mode", { value: "navigate" }); // what a page load or form submit is
+      let used = false;
+      on.fetch({ request, respondWith: () => (used = true) });
+      return used;
+    };
+    expect(answered("GET")).toBe(true);
+    expect(answered("POST")).toBe(false);
   });
 });
 

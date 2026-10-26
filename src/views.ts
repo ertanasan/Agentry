@@ -753,6 +753,7 @@ self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll([new Request("/offline", { cache: "reload" }), "/static/icon.png"])).then(() => self.skipWaiting()));
 });
 self.addEventListener("fetch", (e) => {
+  if (e.request.method !== "GET") return; // a form post goes straight out: iOS WebKit truncates its files when re-sent
   const fallback = e.request.mode === "navigate" ? "/offline" : new URL(e.request.url).pathname === "/static/icon.png" ? "/static/icon.png" : null;
   if (fallback) e.respondWith(fetch(e.request).catch(() => caches.match(fallback)));
 });
