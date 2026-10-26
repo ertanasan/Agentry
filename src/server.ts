@@ -24,12 +24,14 @@ import * as g from "./git.ts";
 import { suggestedWorkers } from "./platform.ts";
 import { readTail } from "./proc.ts";
 import { parseRecipe } from "./recipe.ts";
+import { saveRecipe, type RecipeText } from "./recipes.ts";
 import { readAttached, runnerApi, storedDiff } from "./remote.ts";
-import { LOCAL, waitOf, waitText, type Wait } from "./routing.ts";
+import { LOCAL, runnersOf, waitOf, waitText, type Wait } from "./routing.ts";
 import { MAX_DIFF_CHARS } from "./verifier.ts";
 import {
-  APP_JS, board, HOME_JS, homePage, liveBlock, loginPage, messagePage, offlinePage, OFFLINE_JS, queueLine, registerPage, RUN_JS, runPage,
-  settingsPage, statusBar, SW_JS, type Draft, type Flash, type GroupLock, type Live, type ReqRow, type RunnerInfo, type StepRow,
+  APP_JS, board, HOME_JS, homePage, liveBlock, loginPage, messagePage, offlinePage, OFFLINE_JS, queueLine, recipesPage, registerPage, RUN_JS,
+  runPage, settingsPage, statusBar, SW_JS, type Draft, type Flash, type GroupLock, type Live, type RecipesData, type ReqRow, type RunnerInfo,
+  type StepRow,
 } from "./views.ts";
 
 export const DEFAULT_PORT = 4747;
@@ -166,6 +168,7 @@ export function startServer(o: ServerOptions) {
     }
     const verified = recentlyVerified(db, cookies[SESSION_COOKIE]);
     if (url.pathname === "/settings" && req.method === "GET") return htmlRes(200, settingsPage(settingsData(verified), user));
+    if (url.pathname === "/recipes" && req.method === "GET") return htmlRes(200, recipesPage(recipesData(verified), user, { saved: savedFlash(url.searchParams) }));
 
     // Step-up: a fresh passkey check of the signed-in user, which settings changes need (accounts.ts).
     if (url.pathname === "/step-up/options" && req.method === "POST") {
@@ -239,6 +242,8 @@ export function startServer(o: ServerOptions) {
           })();
           return;
         }
+        const rec = path.match(/^\/recipes\/([^/]+)\/([^/]+)$/);
+        if (rec) return editRecipe(decodeURIComponent(rec[1]), decodeURIComponent(rec[2]), field("recipe") ?? "", user, verified);
         if (path === "/runner/resume") { A.resume(db); done.verb = "resumed"; return; }
         if (path === "/settings" || path.startsWith("/settings/")) return changeSettings(path, field, deployPicks(form), user, verified);
         const grp = path.match(/^\/groups\/([^/]+)\/unblock$/);
@@ -275,6 +280,12 @@ export function startServer(o: ServerOptions) {
         };
         return htmlRes(status, homePage(data, user, data.attachedTo ? { flash: { kind: "bad", text: e.message } } : { draft, error: e.message }));
       }
+      // A refused recipe comes back in its editor with the reason, as typed.
+      const rec = path.match(/^\/recipes\/([^/]+)\/([^/]+)$/);
+      if (rec) {
+        const refused = { project: decodeURIComponent(rec[1]), runner: decodeURIComponent(rec[2]), text: field("recipe") ?? "", message: e.message };
+        return htmlRes(status, recipesPage(recipesData(verified), user, { refused }));
+      }
       return htmlRes(status, messagePage("Not done", e.message, user));
     }
     if (path.startsWith("/settings")) return redirect("/settings");
@@ -293,6 +304,54 @@ export function startServer(o: ServerOptions) {
     const verb = q.get("done") ?? "";
     if (!Object.hasOwn(said, verb) || !Number.isInteger(id) || !Number.isInteger(from)) return undefined;
     return { kind: "ok", text: said[verb] };
+  }
+
+  // A recipe edited on the Recipes tab: owners only, after a recent passkey check, since a recipe's commands run
+  // outside the sandbox. This machine's runner's is saved at once; an attached runner's waits for it (recipes.ts).
+  function editRecipe(project: string, holder: string, json: string, user: User, verified: boolean): Response {
+    if (user.role !== "owner") throw new A.ActionError("Only an owner can edit recipes.", "forbidden");
+    if (!verified) throw new A.ActionError("Confirm with your passkey first: the button at the top of the recipes page.", "forbidden");
+    const p = db.query("SELECT runners FROM projects WHERE name = ?").get(project) as { runners: string | null } | null;
+    if (!p) throw new A.ActionError(`no project "${project}"`, "not_found");
+    if (!runnersOf(p.runners).includes(holder)) throw new A.ActionError(`${project} doesn't run on ${holder}`, "not_found");
+    try { parseRecipe(json); } catch (e) { throw new A.ActionError(e instanceof Error ? e.message : String(e), "invalid"); }
+    if (holder === LOCAL) saveRecipe(db, o.home, project, json);
+    else db.transaction(() => {
+      db.query("DELETE FROM recipe_edits WHERE holder = ? AND project = ? AND done_at IS NULL").run(holder, project); // superseded
+      db.query("INSERT INTO recipe_edits (holder, project, recipe, by_user, created_at) VALUES (?, ?, ?, ?, ?)").run(holder, project, json, user.name, Date.now());
+    })();
+    logEvent(db, null, "recipe_edit", { project, runner: holder, user: user.name });
+    return redirect(`/recipes?saved=${encodeURIComponent(project)}&runner=${encodeURIComponent(holder)}`);
+  }
+
+  // The confirmation for `?saved=<project>&runner=<holder>`: fixed sentences about a known project and runner.
+  function savedFlash(q: URLSearchParams): Flash | undefined {
+    const project = q.get("saved") ?? "", holder = q.get("runner") ?? "";
+    const p = db.query("SELECT runners FROM projects WHERE name = ?").get(project) as { runners: string | null } | null;
+    if (!p || !runnersOf(p.runners).includes(holder)) return undefined;
+    return { kind: "ok", text: holder === LOCAL ? `${project}'s recipe on ${nameOf(holder)} is saved.`
+      : `${project}'s recipe is saved for ${nameOf(holder)}, which applies it when it next checks in, within a minute.` };
+  }
+
+  // Every project's recipe as each runner that may run it has it, with its edit waiting or refused (recipes.ts).
+  function recipesData(verified: boolean): RecipesData {
+    const leases = leaseHosts();
+    const reports = new Map((db.query("SELECT holder, recipes_report FROM leases").all() as { holder: string; recipes_report: string | null }[])
+      .map((l) => [l.holder, l.recipes_report ? JSON.parse(l.recipes_report) as Record<string, RecipeText> : null]));
+    const lastEdit = (holder: string, project: string) => db.query(`SELECT recipe, by_user, created_at, done_at, error FROM recipe_edits
+      WHERE holder = ? AND project = ? ORDER BY id DESC LIMIT 1`).get(holder, project) as
+      { recipe: string; by_user: string; created_at: number; done_at: number | null; error: string | null } | null;
+    const projects = db.query("SELECT name, runners, recipe, recipe_file FROM projects ORDER BY name").all() as
+      { name: string; runners: string | null; recipe: string; recipe_file: string | null }[];
+    return {
+      verified,
+      projects: projects.map((p) => ({ name: p.name, runners: runnersOf(p.runners).map((holder) => {
+        const text = holder === LOCAL ? { json: p.recipe, file: p.recipe_file } : reports.get(holder)?.[p.name] ?? null;
+        const edit = holder === LOCAL ? null : lastEdit(holder, p.name);
+        return { holder, name: nameOf(holder, leases), text, waiting: edit && !edit.done_at ? { recipe: edit.recipe, by: edit.by_user, at: edit.created_at } : null,
+          refused: edit?.error ?? null };
+      }) })),
+    };
   }
 
   // The settings page's changes: owners only, and all but a pause after a recent passkey check. Adding a user or

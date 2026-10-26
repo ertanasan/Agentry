@@ -160,6 +160,12 @@ export const MIGRATIONS: string[] = [
    ALTER TABLE requests DROP COLUMN device_name;
    ALTER TABLE leases RENAME COLUMN devices TO deploy_choices;
    UPDATE leases SET deploy_choices = NULL;`,
+  // 15: the Recipes tab (recipes.ts). The file a project's recipe lives in; the recipes an attached runner reports
+  // (JSON, by project: RecipeText); and edits of them that wait for that runner to apply them.
+  `ALTER TABLE projects ADD COLUMN recipe_file TEXT;
+   ALTER TABLE leases ADD COLUMN recipes_report TEXT;
+   CREATE TABLE recipe_edits (id INTEGER PRIMARY KEY, holder TEXT NOT NULL, project TEXT NOT NULL, recipe TEXT NOT NULL,
+     by_user TEXT NOT NULL, created_at INTEGER NOT NULL, done_at INTEGER, error TEXT);`,
 ];
 
 // Checks run before a migration; a message refuses it and leaves the database as it was.

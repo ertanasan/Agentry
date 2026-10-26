@@ -2,7 +2,7 @@
 // Host / Origin / session guards, actions through actions.ts with the user as actor, escaping of request text
 // and logs, the bounded log tail, sign-in throttling and the security headers.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { addUser } from "../src/accounts.ts";
 import { openDb, runnerRow } from "../src/db.ts";
@@ -719,6 +719,48 @@ describe("settings", () => {
       { title: "Deploy main", deploy_to: phoneOnly },
     ]);
     expect(await (await h.call("/", { cookie })).text()).toContain("<span>to TestFlight · team TEAM123456, Test phone · iPhone 18 Pro</span>");
+  });
+
+  test("the Recipes tab shows each runner's recipe; an owner edits it after a passkey check", async () => {
+    const h = await setup();
+    const { cookie, key } = await h.signUp();
+    const admin = await h.signUp("helper", "admin");
+    const original = (h.db.query("SELECT recipe FROM projects WHERE name = 'vt-web'").get() as { recipe: string }).recipe;
+    h.db.query("INSERT INTO projects (name, repo_id, deploy_group_id, recipe, runners) SELECT 'vt-ios', 1, 1, recipe, 'macea' FROM projects WHERE name = 'vt-web'").run();
+    const page = async (c: string) => (await h.call("/recipes", { cookie: c })).text();
+
+    const seen = await page(admin.cookie);
+    expect(seen).toContain('<a href="/recipes" aria-current="page">Recipes</a>');
+    expect(seen).toContain("Only an owner can edit recipes.");
+    expect(seen).toContain(`<pre class="wide">${original.replace(/"/g, "&quot;")}</pre>`);
+    expect(seen).toContain("macea hasn't reported its recipes yet."); // the attached runner's own isn't known yet
+    expect((await h.call("/recipes/vt-web/local", { method: "POST", cookie: admin.cookie, form: { recipe: original } })).status).toBe(403);
+    stale(h);
+    expect(await page(cookie)).toContain('id="step-up"');
+    expect((await h.call("/recipes/vt-web/local", { method: "POST", cookie, form: { recipe: original } })).status).toBe(403);
+
+    await stepUp(h, cookie, key);
+    expect(await page(cookie)).toContain('<textarea class="code" id="recipe-vt-web-local-json" name="recipe"');
+    const edited = JSON.stringify({ ...JSON.parse(original), test_cmd: "make test" }, null, 2);
+    const saved = await h.call("/recipes/vt-web/local", { method: "POST", cookie, form: { recipe: edited } });
+    expect(saved.headers.get("location")).toBe("/recipes?saved=vt-web&runner=local");
+    expect(h.db.query("SELECT recipe, recipe_file FROM projects WHERE name = 'vt-web'").get()).toEqual({ recipe: edited, recipe_file: join(h.home, "recipes", "vt-web.json") });
+    expect(readFileSync(join(h.home, "recipes", "vt-web.json"), "utf8")).toBe(edited + "\n");
+    expect(await (await h.call(saved.headers.get("location")!, { cookie })).text()).toContain("vt-web&#39;s recipe on ");
+
+    const refused = await h.call("/recipes/vt-web/local", { method: "POST", cookie, form: { recipe: '{"repo": "/r"}' } });
+    expect(refused.status).toBe(400);
+    const back = await refused.text();
+    expect(back).toContain('Not saved: recipe: &quot;deploy_group&quot; is required');
+    expect(back).toContain("{&quot;repo&quot;: &quot;/r&quot;}</textarea>"); // as typed
+    expect((h.db.query("SELECT recipe FROM projects WHERE name = 'vt-web'").get() as { recipe: string }).recipe).toBe(edited);
+
+    // An attached runner's recipe: the edit waits for it.
+    expect((await h.call("/recipes/vt-ios/macea", { method: "POST", cookie, form: { recipe: edited } })).status).toBe(303);
+    expect(h.db.query("SELECT holder, project, recipe, by_user, done_at FROM recipe_edits").all())
+      .toEqual([{ holder: "macea", project: "vt-ios", recipe: edited, by_user: "ertan", done_at: null }]);
+    expect(await page(cookie)).toContain("macea applies it when it next checks in, within a minute.");
+    expect((await h.call("/recipes/vt-ios/local", { method: "POST", cookie, form: { recipe: edited } })).status).toBe(404); // vt-ios doesn't run here
   });
 
   test("an owner adds, resets and removes users, but not their own account", async () => {

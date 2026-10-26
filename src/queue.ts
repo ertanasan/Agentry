@@ -7,6 +7,7 @@ import type { Database } from "bun:sqlite";
 import type { AgentId } from "./adapters/providers.ts";
 import { copyForRun, type RunFile } from "./attachments.ts";
 import type { DeployChoices } from "./devices.ts";
+import type { RecipeEdit, RecipeText } from "./recipes.ts";
 import {
   acquireLease, fenced, HEARTBEAT_MS, LEASE_TTL_MS, LeaseLost, leaseOf, NotYours, releaseLease, renewLease, runnerRow, setRequestStatus,
   type PushState, type RequestStatus,
@@ -55,6 +56,8 @@ export interface Queue {
   release(): Promise<void>;
   settings(): Promise<Settings>;
   setDeployChoices(choices: DeployChoices): Promise<void>;  // where this runner's projects can deploy, for the pages
+  syncRecipes(texts: Record<string, RecipeText>): Promise<RecipeEdit[]>;  // reports this runner's recipes; the edits it is to apply
+  recipeEdited(id: number, error: string | null): Promise<void>;          // an edit applied, or why not
 
   takeRedeploy(): Promise<number | null>;  // a queued Re-run deploy, now no longer queued and this runner's
   claim(): Promise<ReqRow | null>;         // the next request for this runner, now running and this runner's
@@ -140,6 +143,15 @@ export function localQueue(db: Database, token: string, home: string, holder = L
     },
     async setDeployChoices(choices: DeployChoices) {
       w(() => db.query("UPDATE leases SET deploy_choices = ? WHERE holder = ?").run(JSON.stringify(choices), holder));
+    },
+    async syncRecipes(texts: Record<string, RecipeText>): Promise<RecipeEdit[]> {
+      return w(() => {
+        db.query("UPDATE leases SET recipes_report = ? WHERE holder = ?").run(JSON.stringify(texts), holder);
+        return db.query("SELECT id, project, recipe FROM recipe_edits WHERE holder = ? AND done_at IS NULL ORDER BY id").all(holder) as RecipeEdit[];
+      });
+    },
+    async recipeEdited(id: number, error: string | null) {
+      w(() => db.query("UPDATE recipe_edits SET done_at = ?, error = ? WHERE id = ? AND holder = ?").run(Date.now(), error, id, holder));
     },
 
     // Taken in the same transaction that checks it, so two runners can't both take it (D5).

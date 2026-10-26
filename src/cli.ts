@@ -12,7 +12,7 @@ import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline";
 import { parseArgs } from "node:util";
 import * as A from "./actions.ts";
@@ -29,6 +29,7 @@ import { deployChoices } from "./devices.ts";
 import { parseRecipe, type Recipe } from "./recipe.ts";
 import { localQueue, startHeartbeat, Unreachable, type Queue } from "./queue.ts";
 import { addRunnerKey, readAttached, remoteQueue, removeRunnerKey, workDir } from "./remote.ts";
+import { storeRecipe, syncRecipes } from "./recipes.ts";
 import { recover, recoverExpired, resolvePushUnknown } from "./recovery.ts";
 import { LOCAL, runnersOf } from "./routing.ts";
 import { startNext, type RunnerCtx, type RunOutcome } from "./runner.ts";
@@ -136,7 +137,6 @@ function projectAdd(db: Database, args: string[], runners: string | undefined): 
   if (args[0] !== "add" || args.length !== 3) fail("usage: agentry project add <name> <recipe.json> [--runner local,<runner key name>...]");
   const [, name, file] = args;
   const json = readFileSync(file, "utf8");
-  const recipe = parseRecipe(json);
   const list = runners === undefined ? null : runnersOf(runners);
   if (list) {
     if (!list.length) fail("--runner needs at least one runner");
@@ -144,15 +144,9 @@ function projectAdd(db: Database, args: string[], runners: string | undefined): 
     const unknown = list.filter((r) => !known.has(r));
     if (unknown.length) fail(`no runner key named ${unknown.join(", ")} (agentry runner-key add <name>; this machine's runner is "${LOCAL}")`);
   }
-  db.transaction(() => {
-    db.query("INSERT OR IGNORE INTO repos (name, path) VALUES (?, ?)").run(recipe.repo, recipe.repo);
-    db.query("INSERT OR IGNORE INTO deploy_groups (name) VALUES (?)").run(recipe.deploy_group);
-    db.query(`INSERT INTO projects (name, repo_id, deploy_group_id, recipe)
-      VALUES (?, (SELECT id FROM repos WHERE path = ?), (SELECT id FROM deploy_groups WHERE name = ?), ?)
-      ON CONFLICT(name) DO UPDATE SET repo_id = excluded.repo_id, deploy_group_id = excluded.deploy_group_id, recipe = excluded.recipe`)
-      .run(name, recipe.repo, recipe.deploy_group, json);
-    if (list) db.query("UPDATE projects SET runners = ? WHERE name = ?").run(list.join(","), name);
-  })();
+  const recipe = parseRecipe(json);
+  storeRecipe(db, name, json, resolvePath(file));
+  if (list) db.query("UPDATE projects SET runners = ? WHERE name = ?").run(list.join(","), name);
   const set = (db.query("SELECT runners FROM projects WHERE name = ?").get(name) as { runners: string | null }).runners;
   console.log(`project ${name}: ${basename(recipe.repo)}, group ${recipe.deploy_group}, runs on ${runnersOf(set).join(", ")}`);
   return 0;
@@ -329,7 +323,8 @@ function runQueue(db: Database, once: boolean): Promise<number | "switch"> {
   const attached = readAttached(home);
   const work = attached ? workDir(home, attached) : home;
   mkdirSync(work, { recursive: true });
-  const q = attached ? remoteQueue({ ...attached, token, recipes: localRecipes(db), work }) : localQueue(db, token, home);
+  const recipes = attached ? localRecipes(db) : null;
+  const q = attached ? remoteQueue({ ...attached, token, recipes: recipes!, work }) : localQueue(db, token, home);
   console.log(attached ? `working the queue at ${attached.url} (agentry detach: this machine's own)` : "working this machine's queue");
   return withLease(q, once, work, stale, async (ctx) => {
     const rep = await recover(ctx);
@@ -392,6 +387,7 @@ function runQueue(db: Database, once: boolean): Promise<number | "switch"> {
       }
       if (Date.now() - lastChoices >= CHOICES_EVERY_MS) {
         lastChoices = Date.now();
+        await syncQueueRecipes(db, q, recipes);
         await reportDeployChoices(q);
       }
       // Runs handed to this runner by `agentry runner-key remove` (two-runners review D8).
@@ -419,6 +415,18 @@ function runQueue(db: Database, once: boolean): Promise<number | "switch"> {
 async function reportDeployChoices(q: Queue): Promise<void> {
   const recipes = (await q.projects()).map((p): [string, Recipe] => [p.name, parseRecipe(p.recipe)]);
   await q.setDeployChoices(deployChoices(recipes)).catch((e) => { if (e instanceof Unreachable) throw e; });
+}
+
+// This machine's recipes for the queue's Recipes tab, and the edits made there for this runner, each applied here
+// (recipes.ts) and reported back. `recipes`: an attached queue's copy of this machine's recipes, kept current, so
+// an edit or an `agentry project add` applies without a restart. A queue that predates the tab refuses the calls.
+async function syncQueueRecipes(db: Database, q: Queue, recipes: Map<string, string> | null): Promise<void> {
+  try {
+    for (const line of await syncRecipes(db, home, q)) console.log(line);
+  } catch (e) {
+    if (e instanceof Unreachable) throw e;
+  }
+  if (recipes) for (const [name, json] of localRecipes(db)) recipes.set(name, json);
 }
 
 // This machine's recipes by project name, for the projects of an attached queue.

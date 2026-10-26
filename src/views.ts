@@ -187,6 +187,7 @@ legend { font-size: 13px; font-weight: 750; font-stretch: 85%; letter-spacing: .
 input[type=text], input[type=number], textarea, select { width: 100%; font: inherit; padding: 10px 12px; min-height: 44px;
   border: 1.5px solid var(--ink); border-radius: 2px; background: var(--label); color: var(--ink); }
 textarea { min-height: 96px; resize: vertical; }
+textarea.code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; white-space: pre; overflow-wrap: normal; }
 ::placeholder { color: var(--muted); opacity: 1; }
 input:disabled, textarea:disabled, select:disabled { background: var(--sunk); color: var(--muted); border-style: dashed; border-color: var(--muted); cursor: not-allowed; }
 input[type=file] { font: inherit; font-size: 14px; color: var(--muted); max-width: 100%; }
@@ -269,7 +270,7 @@ pre.wide { white-space: pre; overflow-wrap: normal; }
 .message::first-letter { text-transform: uppercase; }
 `;
 
-export type Nav = "home" | "settings" | null;
+export type Nav = "home" | "recipes" | "settings" | null;
 
 // `attachedTo`: the queue this machine's runner works instead of its own; every page then says so. `band`: what the
 // page adds to the header band (the home page's runner plates).
@@ -284,7 +285,7 @@ export function page(title: string, body: Html, user?: User | null, extraHead: H
 <script src="/static/offline.js" defer></script>${extraHead}</head>
 <body><header class="band"><div class="wrap">
 <div class="bar"><a class="brand" href="/"><img src="/static/icon.png" alt="">Agentry</a>${user ? html`<nav aria-label="Main">
-  <a href="/"${here("home")}>Home</a><a href="/settings"${here("settings")}>Settings</a>
+  <a href="/"${here("home")}>Home</a><a href="/recipes"${here("recipes")}>Recipes</a><a href="/settings"${here("settings")}>Settings</a>
   <span class="who">${user.name}</span><form method="post" action="/logout"><button class="link">Sign out</button></form></nav>` : ""}</div>
 ${user && o.attachedTo ? html`<div class="modebar"><p>This machine's runner works <strong>${queueLink(o.attachedTo)}</strong>'s queue:
   file requests, follow runs and change runner settings <a href="${o.attachedTo}">there</a> (<a href="${o.attachedTo}/settings">its settings</a>).</p>
@@ -840,6 +841,51 @@ export function messagePage(title: string, message: string, user?: User | null):
 // The home page's script (served as /static/home.js). The project picker: the form isn't sent with no project ticked.
 // The lists: their refresh waits while one of their folded forms is open or focus is in them, so it never drops
 // what you type or where you are.
+// The Recipes tab (recipes.ts): every project's recipe as each runner that may run it has it. An owner edits one as
+// JSON after a recent passkey check, since its commands run on that runner's machine, some outside the sandbox.
+export type RecipesData = {
+  verified: boolean;
+  projects: { name: string; runners: {
+    holder: string; name: string;                         // the runner, and its machine
+    text: { json: string; file: string | null } | null;  // its recipe; null: an attached runner that hasn't reported it
+    waiting: { recipe: string; by: string; at: number } | null; // an edit it hasn't applied yet
+    refused: string | null;                               // why it refused the last edit
+  }[] }[];
+};
+// A recipe the server refused, shown again as typed.
+export type RecipeRefused = { project: string; runner: string; text: string; message: string };
+
+export function recipesPage(d: RecipesData, user: User, o: { saved?: Flash; refused?: RecipeRefused } = {}): string {
+  const owner = user.role === "owner";
+  const card = (project: string, r: RecipesData["projects"][number]["runners"][number]) => {
+    const refused = o.refused?.project === project && o.refused.runner === r.holder ? o.refused : null;
+    const text = refused?.text ?? r.waiting?.recipe ?? r.text?.json ?? null;
+    const id = `recipe-${project}-${r.holder}`;
+    return html`<details class="more panel" id="${id}"${refused ? html` open` : ""}><summary>On ${r.name}</summary>
+  ${r.text?.file ? html`<p class="hint">File: <span class="mono">${r.text.file}</span></p>` : ""}
+  ${r.waiting ? html`<p class="warn">Edited by ${r.waiting.by} ${ago(Date.now() - r.waiting.at)}: ${r.name} applies it when it next checks in, within a minute.</p>`
+    : r.refused ? html`<p class="field-error">${r.name} refused the last edit: ${r.refused}</p>` : ""}
+  ${text === null ? html`<p class="muted">${r.name} hasn't reported its recipes yet. It does each minute, once it runs this version of Agentry.</p>`
+    : owner && d.verified ? html`<form method="post" action="/recipes/${encodeURIComponent(project)}/${encodeURIComponent(r.holder)}">
+    <label for="${id}-json">Recipe (JSON)</label>
+    <textarea class="code" id="${id}-json" name="recipe" rows="${Math.min(40, text.split("\n").length + 2)}" spellcheck="false" autocapitalize="off">${text}</textarea>
+    ${refused ? html`<p class="field-error message" role="alert">Not saved: ${refused.message}</p>` : ""}
+    <div class="actions"><button class="primary">Save</button></div></form>`
+    : html`<pre class="wide">${text}</pre>`}</details>`;
+  };
+  return page("Recipes", html`
+<h1>Recipes</h1>
+<p class="hint">How each runner builds, tests and deploys a project. Saving checks a recipe the way <code>agentry project add</code> does,
+  and writes its file on that runner's machine too.</p>
+${o.saved ? html`<p class="flash ${o.saved.kind}" role="status">${o.saved.text}</p>` : ""}
+${!owner ? html`<p class="muted">Only an owner can edit recipes.</p>`
+  : d.verified ? html`<p class="flash ok" role="status">Passkey confirmed: you can edit recipes for a few minutes.</p>`
+  : html`<div class="card"><p>A recipe's commands run on its runner's machine, some outside the sandbox: editing one needs a fresh check of your passkey.</p>
+    <div class="actions"><button class="primary" id="step-up">Confirm with passkey</button></div><p id="msg" class="bad" role="alert"></p></div>`}
+${d.projects.map((p) => html`<h2>${p.name}</h2>${p.runners.map((r) => card(p.name, r))}`)}
+`, user, html`<script src="/static/webauthn.js"></script><script src="/static/app.js"></script>`, { nav: "recipes" });
+}
+
 export const HOME_JS = `
 for (const form of document.querySelectorAll("form[action='/requests']")) {
   const picks = form.querySelector(".picks");

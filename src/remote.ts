@@ -34,7 +34,7 @@ const LOG_TAIL_BYTES = 64 * 1024;
 // The localQueue methods a remote runner may call. Not process groups (they stay on the runner's machine) and not
 // attachment copies (the runner downloads them), and beginStep only through the wrapper below.
 const CALLS = new Set<keyof LocalQueue>([
-  "acquire", "renew", "release", "settings", "setDeployChoices", "takeRedeploy", "claim", "unclaim", "requeueStaleClaims", "request", "run", "lastCommitRun", "parts", "projects",
+  "acquire", "renew", "release", "settings", "setDeployChoices", "syncRecipes", "recipeEdited", "takeRedeploy", "claim", "unclaim", "requeueStaleClaims", "request", "run", "lastCommitRun", "parts", "projects",
   "blockedGroup", "baseCounts", "answers", "startRun", "setRun", "setRunTests", "endStep", "setStatus", "markPushed", "finish",
   "unresolvedPushes", "recoveryRun", "expiredRuns", "resolvePush", "interrupt",
 ]);
@@ -215,6 +215,8 @@ export function remoteQueue(o: RemoteOptions): Queue {
     release: () => call("release"),
     settings: () => call("settings"),
     setDeployChoices: (choices) => call("setDeployChoices", choices),
+    syncRecipes: (texts) => call("syncRecipes", texts),
+    recipeEdited: (id, error) => call("recipeEdited", id, error),
 
     takeRedeploy: () => call("takeRedeploy"),
     claim: () => call("claim"),
