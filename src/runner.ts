@@ -37,6 +37,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { DOCX, PPTX, XLSX, type RunFile } from "./attachments.ts";
+import { pickedSteps, type Picks, type Step } from "./devices.ts";
 import { LeaseLost, type PushState, type RequestStatus } from "./db.ts";
 import * as g from "./git.ts";
 import { countRegression, inspect, type Flag, type Owner } from "./inspect.ts";
@@ -95,10 +96,14 @@ function partsOf(rows: PartRow[]): Part[] {
 
 const groupsOf = (parts: Part[]) => [...new Set(parts.map((p) => p.groupId))];
 
-// A request that picked a device installs each project that can on it, instead of the project's own deploy
-// (devices.ts). Nothing reads back what a device runs, so its targets are neither guarded nor checked.
-const onDevice = (j: Job, r: Recipe) => !!(j.req.device && r.device_deploy_cmd);
-const deployCmdOf = (j: Job, r: Recipe) => onDevice(j, r) ? r.device_deploy_cmd : r.deploy_cmd;
+// What the request deploys of a project, in order: the deploy entries it picked, or the project's defaults (devices.ts).
+// Nothing reads back what a device runs, so a device step has no targets to guard or check.
+function stepsFor(j: Job, p: Part): Step[] {
+  const picks = j.req.deploy_to ? JSON.parse(j.req.deploy_to) as Picks : {};
+  return pickedSteps(p.recipe, picks[p.name]?.map((e) => e.id));
+}
+// Projects that share a deploy command (a server and its web app) deploy once.
+const stepKey = (s: Step) => `${s.cmd}\0${s.device?.id ?? ""}`;
 
 // The first item for each key, in order.
 function distinct<T>(items: T[], key: (item: T) => unknown): T[] {
@@ -540,38 +545,42 @@ async function deploy(j: Job, sha: string, redeploy = false): Promise<Stop> {
   let ran = false;
   let later = false;
   let checkedOut = !redeploy;
-  for (const [i, { name, recipe }] of j.parts.entries()) {
-    const cmd = deployCmdOf(j, recipe);
-    if (!cmd || done.has(cmd)) continue;
-    done.add(cmd);
-    const device = onDevice(j, recipe);
-    const fail = (reason: string) => post(j.parts.length > 1 ? `${name}: ${reason}` : reason, sha, groupsOf(j.parts.slice(i).filter((p) => deployCmdOf(j, p.recipe))));
-    if (redeploy && !device) {
-      const plan = await redeployPlan(j, recipe, sha);
-      if (typeof plan === "object") return fail(plan.error);
-      if (plan !== "deploy") { later ||= plan === "later"; continue; }
+  for (const [i, part] of j.parts.entries()) {
+    const { name, recipe } = part;
+    const steps = stepsFor(j, part);
+    for (const step of steps) {
+      if (done.has(stepKey(step))) continue;
+      done.add(stepKey(step));
+      const what = steps.length > 1 ? `${step.name}: ` : "";
+      const fail = (reason: string) => post(`${j.parts.length > 1 ? `${name}: ` : ""}${what}${reason}`, sha,
+        groupsOf(j.parts.slice(i).filter((p) => stepsFor(j, p).length)));
+      if (redeploy && !step.device) {
+        const plan = await redeployPlan(j, recipe, step.check, sha);
+        if (typeof plan === "object") return fail(plan.error);
+        if (plan !== "deploy") { later ||= plan === "later"; continue; }
+      }
+      if (redeploy && !checkedOut) await g.detachedWorktree(j.repo, j.wt, sha);
+      checkedOut = true;
+      if (recipe.remote_busy_cmd && !step.device) {
+        const busy = await command(j, "remote_busy", recipe.remote_busy_cmd, { cwd: j.dir, timeout: "version", recipe });
+        if (busy.exitCode === 0) return fail("previous install still running on the target");
+        if (busy.exitCode !== 1) return fail(`could not check for a running install (exit ${busy.exitCode})`);
+      }
+      // Deploy builds unsandboxed with credentials, so nothing a sandboxed step wrote may survive (e.g. obj/*.targets).
+      await g.cleanUntracked(j.wt);
+      const refused = await checkDeployable(j.wt, sha);
+      if (refused) return fail(refused);
+      const env = step.device ? { ...process.env as Record<string, string>, AGENTRY_DEVICE: step.device.id, AGENTRY_DEVICE_NAME: step.device.name } : undefined;
+      const d = await command(j, "deploy", step.cmd, { recipe, env });
+      if (d.timedOut) return fail("deploy timed out: remote state unknown");
+      if (d.exitCode !== 0) return fail(step.device ? `install on ${step.name} failed (exit ${d.exitCode})` : `deploy failed (exit ${d.exitCode})`);
+      for (const t of step.check) {
+        const live = await liveVersion(j, recipe, t);
+        if ("error" in live) return fail(`${t.name}: ${live.error}`);
+        if (live.sha !== sha || live.uncommitted) return fail(`${t.name} runs ${live.short}${live.uncommitted ? "+uncommitted" : ""}, expected ${sha.slice(0, 7)}`);
+      }
+      ran = true;
     }
-    if (redeploy && !checkedOut) await g.detachedWorktree(j.repo, j.wt, sha);
-    checkedOut = true;
-    if (recipe.remote_busy_cmd && !device) {
-      const busy = await command(j, "remote_busy", recipe.remote_busy_cmd, { cwd: j.dir, timeout: "version", recipe });
-      if (busy.exitCode === 0) return fail("previous install still running on the target");
-      if (busy.exitCode !== 1) return fail(`could not check for a running install (exit ${busy.exitCode})`);
-    }
-    // Deploy builds unsandboxed with credentials, so nothing a sandboxed step wrote may survive (e.g. obj/*.targets).
-    await g.cleanUntracked(j.wt);
-    const refused = await checkDeployable(j.wt, sha);
-    if (refused) return fail(refused);
-    const env = device ? { ...process.env as Record<string, string>, AGENTRY_DEVICE: j.req.device!, AGENTRY_DEVICE_NAME: j.req.device_name ?? "" } : undefined;
-    const d = await command(j, "deploy", cmd, { recipe, env });
-    if (d.timedOut) return fail("deploy timed out: remote state unknown");
-    if (d.exitCode !== 0) return fail(device ? `install on ${j.req.device_name} failed (exit ${d.exitCode})` : `deploy failed (exit ${d.exitCode})`);
-    for (const t of device ? [] : recipe.targets ?? []) {
-      const live = await liveVersion(j, recipe, t);
-      if ("error" in live) return fail(`${t.name}: ${live.error}`);
-      if (live.sha !== sha || live.uncommitted) return fail(`${t.name} runs ${live.short}${live.uncommitted ? "+uncommitted" : ""}, expected ${sha.slice(0, 7)}`);
-    }
-    ran = true;
   }
   if (ran) return { status: "done", reason: "deployed" };
   if (!redeploy) return { status: "done", reason: "built" };
@@ -580,10 +589,10 @@ async function deploy(j: Job, sha: string, redeploy = false): Promise<Stop> {
 
 // Re-run deploy never moves a target backwards (winhost review D14): every target must run this commit, an
 // older one, or a later one that already contains it. Deploys only when some target is behind.
-async function redeployPlan(j: Job, recipe: Recipe, sha: string): Promise<"deploy" | "live" | "later" | { error: string }> {
+async function redeployPlan(j: Job, recipe: Recipe, targets: Target[], sha: string): Promise<"deploy" | "live" | "later" | { error: string }> {
   let behind = false;
   let later = false;
-  for (const t of recipe.targets ?? []) {
+  for (const t of targets) {
     const live = await liveVersion(j, recipe, t);
     if ("error" in live) return { error: `${t.name}: ${live.error}` };
     if (live.uncommitted) return { error: `${t.name} runs ${live.short}+uncommitted` };
@@ -607,9 +616,9 @@ export async function checkDeployable(wt: string, sha: string): Promise<string |
 // drifted target blocks its own project's group.
 async function driftGuard(j: Job): Promise<{ reason: string; group: number } | null> {
   const tracking = `${j.remote}/${j.branch}`;
-  for (const { recipe, groupId } of distinct(j.parts, (p) => p.recipe.deploy_cmd)) {
-    if (!recipe.deploy_cmd || onDevice(j, recipe)) continue;
-    for (const t of recipe.targets ?? []) {
+  const steps = j.parts.flatMap((p) => stepsFor(j, p).map((step) => ({ step, recipe: p.recipe, groupId: p.groupId })));
+  for (const { step, recipe, groupId } of distinct(steps, (s) => stepKey(s.step))) {
+    for (const t of step.check) {
       const live = await liveVersion(j, recipe, t);
       const reason = "error" in live ? `can't read live version of ${t.name}: ${live.error}`
         : live.uncommitted ? `${t.name} runs ${live.short}+uncommitted`

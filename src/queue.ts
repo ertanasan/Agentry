@@ -18,8 +18,7 @@ export type ReqRow = {
   attempts: number; resume_run: number | null; status: RequestStatus; status_reason: string | null;
   ai_agent?: AgentId | null; // its own agent; none takes the queue's (absent from a queue that predates it)
   deploy_only?: number;      // 1: deploy main as it is, no agent (actions.deployMain; absent from a queue that predates it)
-  device?: string | null;    // the UDID of the device it installs on instead of its projects' own deploy (devices.ts)
-  device_name?: string | null;
+  deploy_to?: string | null; // what it deploys to, by project (devices.ts Picks, JSON); none: each project's defaults
 };
 export type RunRow = {
   id: number; attempt: number; branch: string; base_sha: string | null; candidate_sha: string | null;
@@ -55,7 +54,7 @@ export interface Queue {
   renew(runIds: number[]): Promise<void>;
   release(): Promise<void>;
   settings(): Promise<Settings>;
-  setDevices(choices: DeployChoices): Promise<void>;  // the devices this runner can install its projects on, for the pages
+  setDeployChoices(choices: DeployChoices): Promise<void>;  // where this runner's projects can deploy, for the pages
 
   takeRedeploy(): Promise<number | null>;  // a queued Re-run deploy, now no longer queued and this runner's
   claim(): Promise<ReqRow | null>;         // the next request for this runner, now running and this runner's
@@ -95,7 +94,7 @@ export interface Queue {
 // A queue on another machine could not be reached; the runner retries what it can.
 export class Unreachable extends Error {}
 
-const REQ_COLUMNS = "r.id, r.project_id, r.title, r.body, r.done_when, r.done_when_test, r.attempts, r.resume_run, r.status, r.status_reason, r.ai_agent, r.deploy_only, r.device, r.device_name";
+const REQ_COLUMNS = "r.id, r.project_id, r.title, r.body, r.done_when, r.done_when_test, r.attempts, r.resume_run, r.status, r.status_reason, r.ai_agent, r.deploy_only, r.deploy_to";
 const RUN_COLUMNS = `ru.id, ru.request_id, ru.current_step, ru.pgid, ru.base_sha, ru.commit_sha, ru.push_state,
   p.name AS project, p.recipe`;
 const RUN_JOIN = "FROM runs ru JOIN requests r ON r.id = ru.request_id JOIN projects p ON p.id = r.project_id";
@@ -139,8 +138,8 @@ export function localQueue(db: Database, token: string, home: string, holder = L
       const { paused, pause_reason, workers, ai_agent } = runnerRow(db);
       return { paused, pause_reason, workers, ai_agent };
     },
-    async setDevices(choices: DeployChoices) {
-      w(() => db.query("UPDATE leases SET devices = ? WHERE holder = ?").run(JSON.stringify(choices), holder));
+    async setDeployChoices(choices: DeployChoices) {
+      w(() => db.query("UPDATE leases SET deploy_choices = ? WHERE holder = ?").run(JSON.stringify(choices), holder));
     },
 
     // Taken in the same transaction that checks it, so two runners can't both take it (D5).

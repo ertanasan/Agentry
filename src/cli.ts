@@ -37,7 +37,7 @@ import { claudeVerifier } from "./verifier.ts";
 
 const POLL_MS = 5_000;
 const RESOLVE_EVERY_MS = 60_000;
-const DEVICES_EVERY_MS = 60_000;
+const CHOICES_EVERY_MS = 60_000;
 
 const USAGE = `usage: agentry <command>
   project add <name> <recipe.json> [--runner R,...]   register or update a project; --runner: the runners that
@@ -347,7 +347,7 @@ function runQueue(db: Database, once: boolean): Promise<number | "switch"> {
     process.on("SIGINT", onSignal);
     process.on("SIGTERM", onSignal);
     let lastResolve = Date.now();
-    let lastDevices = 0;
+    let lastChoices = 0;
     let saidPaused = false;
     let failure: unknown = null;
     // The requests in progress; each removes itself when its run ends.
@@ -390,9 +390,9 @@ function runQueue(db: Database, once: boolean): Promise<number | "switch"> {
           if (res !== "unknown") console.log(`run ${runId}: push ${res}`);
         }
       }
-      if (Date.now() - lastDevices >= DEVICES_EVERY_MS) {
-        lastDevices = Date.now();
-        await reportDevices(q);
+      if (Date.now() - lastChoices >= CHOICES_EVERY_MS) {
+        lastChoices = Date.now();
+        await reportDeployChoices(q);
       }
       // Runs handed to this runner by `agentry runner-key remove` (two-runners review D8).
       for (const r of await recoverExpired(ctx)) console.log(`recovery: #${r.requestId} was interrupted → ${r.status}`);
@@ -413,12 +413,12 @@ function runQueue(db: Database, once: boolean): Promise<number | "switch"> {
   });
 }
 
-// The devices this machine's recipes install their projects on, for the queue's pages (devices.ts); read again each
-// minute, so `agentry project add` shows without a restart. A queue that predates them refuses the call, and its
-// pages list no devices.
-async function reportDevices(q: Queue): Promise<void> {
+// Where this machine's recipes deploy their projects, for the queue's pages (devices.ts); read again each minute, so
+// `agentry project add` shows without a restart. A queue that predates it refuses the call, and its pages offer no
+// choice.
+async function reportDeployChoices(q: Queue): Promise<void> {
   const recipes = (await q.projects()).map((p): [string, Recipe] => [p.name, parseRecipe(p.recipe)]);
-  await q.setDevices(deployChoices(recipes)).catch((e) => { if (e instanceof Unreachable) throw e; });
+  await q.setDeployChoices(deployChoices(recipes)).catch((e) => { if (e instanceof Unreachable) throw e; });
 }
 
 // This machine's recipes by project name, for the projects of an attached queue.

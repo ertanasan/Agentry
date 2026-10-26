@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import type { User } from "./accounts.ts";
 import { AGENTS, type AgentId } from "./adapters/providers.ts";
-import { deviceLabel, type Choices, type DeployChoices, type Device } from "./devices.ts";
+import type { DeployChoices, Entry, Picks } from "./devices.ts";
 
 export class Html { constructor(readonly s: string) {} toString() { return this.s; } }
 
@@ -197,6 +197,7 @@ input[type=file]::file-selector-button { font: inherit; font-size: 15px; font-we
   min-height: 44px; padding: 0 14px; border: 2px solid var(--ink); background: var(--label); cursor: pointer; }
 .picks label:has(input:checked) { background: var(--ink); color: var(--label); }
 .picks input { width: 18px; height: 18px; margin: 0; accent-color: var(--attn); }
+.deploy-one { margin: 10px 0 6px; font-size: 15px; }
 .field-error { color: var(--fail); font-size: 14px; font-weight: 600; margin: 12px 0 0; }
 
 button, .btn { font: inherit; font-size: 15px; font-weight: 650; min-height: 44px; padding: 8px 16px; border-radius: 2px; cursor: pointer;
@@ -302,7 +303,7 @@ export type ReqRow = {
   id: number; project: string; title: string; status: string; status_reason: string | null; updated_at: number; last_run: number | null;
   body: string; done_when: string | null; files: string; // the attachments, a JSON array of FileRef
   ai_agent?: AgentId | null;                             // its own agent; none: the queue's
-  device_name?: string | null;                           // the device it installs on instead of its projects' own deploy
+  deploy_to?: string | null;                             // what it deploys to, by project, when not the defaults (devices.ts Picks)
   commit_sha: string | null; groups: string | null;     // the last commit made for it, and its deploy groups
   waiting?: string | null;                               // a queued request whose runner can't take it now: why
   runner?: string | null;                                // a running request: the runner working on it
@@ -320,13 +321,14 @@ export type GroupLock = { name: string; lock_reason: string | null };
 export type Flash = { kind: "ok" | "bad"; text: string };
 // What was typed into the new-request form when the server refused it, to show again.
 export type Draft = {
-  projects: string[]; title: string; body: string; done_when: string; done_when_test: string; ai_agent: string; deploy_to: string; hadFiles: boolean;
+  projects: string[]; title: string; body: string; done_when: string; done_when_test: string; ai_agent: string;
+  deploy_to: Record<string, string[]>; hadFiles: boolean;
 };
 export type HomeData = {
   projects: Project[]; needs: ReqRow[]; queue: ReqRow[]; recent: ReqRow[]; groupLocks: GroupLock[];
   paused: string | null; runners: RunnerInfo[]; backupAgeMs: number | null; backupStale: boolean;
   aiAgent: AgentId;           // the queue's agent, for requests that don't choose one
-  deployTo: DeployChoices;    // by project, the devices it can install on instead of its own deploy (devices.ts)
+  deployTo: DeployChoices;    // by project, the deploy entries a request may pick (devices.ts)
   runnerAlerts: string[];     // runner problems that hold queued requests: offline, a missing recipe, no runner at all
   attachedTo: string | null;  // the queue this machine's runner works instead of this one (agentry attach)
 };
@@ -407,7 +409,7 @@ function reqLine(r: ReqRow, card = false): Html {
   const shipped = r.status === "done" && r.status_reason === "deployed" && r.commit_sha;
   return html`<div class="req">${routing(r.id)}<div class="body">${r.last_run ? html`<a class="title" href="/runs/${r.last_run}">${r.title}</a>` : html`<span class="title">${r.title}</span>`}
   <div class="meta">${stateOf(r.status, r.status_reason)}<span>${r.project}</span>
-    ${r.ai_agent ? html`<span>${AGENTS[r.ai_agent]}</span>` : ""}${r.device_name ? html`<span>to ${r.device_name}</span>` : ""}${r.runner ? html`<span>on ${r.runner}</span>` : ""}
+    ${r.ai_agent ? html`<span>${AGENTS[r.ai_agent]}</span>` : ""}${r.deploy_to ? html`<span>to ${Object.values(JSON.parse(r.deploy_to) as Picks).flat().map((e) => e.name).join(", ")}</span>` : ""}${r.runner ? html`<span>on ${r.runner}</span>` : ""}
     ${shipped ? html`<span class="mono">${r.commit_sha!.slice(0, 7)}</span>` : ""}
     ${flags ? html`<span class="st attn"><i aria-hidden="true"></i>${flags} check flag${flags > 1 ? "s" : ""}</span>` : ""}</div>
   ${r.waiting ? html`<p class="why wait"><span class="st attn"><i aria-hidden="true"></i></span>${r.waiting}</p>` : why ? html`<p class="why">${why}</p>` : ""}
@@ -469,7 +471,7 @@ function needsCard(r: ReqRow): Html {
 }
 
 function newRequestForm(d: HomeData, draft?: Draft, error?: string): Html {
-  const v = draft ?? { projects: [], title: "", body: "", done_when: "", done_when_test: "", ai_agent: "", deploy_to: "", hadFiles: false };
+  const v = draft ?? { projects: [], title: "", body: "", done_when: "", done_when_test: "", ai_agent: "", deploy_to: {}, hadFiles: false };
   return html`<details class="new"${draft ? html` open` : ""}><summary>New request</summary>
 <form method="post" action="/requests" enctype="multipart/form-data">
   <fieldset><legend>Projects</legend><div class="picks">
@@ -493,33 +495,27 @@ function newRequestForm(d: HomeData, draft?: Draft, error?: string): Html {
 </form></details>`;
 }
 
-// A new request's Deploy to list, for the projects selected whose recipe defines devices: their own deploy (e.g.
-// TestFlight), the default, then their devices. It shows only while such a project is selected, and offers only the
-// devices of the projects selected (home.js; data-usual and data-projects say whose each entry is).
+// A new request's Deploy to: for each project selected, where it deploys (devices.ts). A project with several entries
+// gets a checkbox each, its targets checked; one with a single entry shows it. home.js shows the groups of the
+// projects checked.
 function requestDeployTo(c: DeployChoices, v: Draft): Html {
   const names = Object.keys(c);
   if (!names.length) return html``;
-  const devices = new Map<string, { d: Device; projects: string[] }>();
-  for (const n of names) for (const d of c[n].devices) (devices.get(d.id) ?? devices.set(d.id, { d, projects: [] }).get(d.id)!).projects.push(n);
-  const picked = v.projects.filter((p) => c[p]);
-  const usual = Object.fromEntries(names.map((n) => [n, c[n].usual]));
-  return html`<div class="deploy-to" data-usual="${JSON.stringify(usual)}"${picked.length ? "" : html` hidden`}>
-  <label for="deploy_to">Deploy to</label>
-  <select id="deploy_to" name="deploy_to"${picked.length ? "" : html` disabled`}>
-    <option value="">${[...new Set(picked.map((p) => usual[p]))].join(" / ")}</option>
-    ${[...devices.values()].map(({ d, projects }) => html`<option value="${d.id}" data-projects="${projects.join(" ")}"${v.deploy_to === d.id ? html` selected` : ""}>${deviceLabel(d)}</option>`)}
-  </select>
-  <p class="hint">A device gets a Debug build installed instead; the other projects deploy as usual.</p></div>`;
+  const shown = (n: string) => v.projects.includes(n);
+  return html`<fieldset class="deploy-to"${names.some(shown) ? "" : html` hidden`}><legend>Deploy to</legend>
+  ${names.map((n) => html`<div class="deploy-group" data-project="${n}"${shown(n) ? "" : html` hidden`}>
+    ${deployGroup(n, c[n], v.deploy_to[n], shown(n) ? html`` : html` disabled`)}</div>`)}
+  <p class="hint">At least one for each project. A device gets a Debug build installed.</p></fieldset>`;
 }
 
-// Deploy main's list for one project: its own deploy, the default, then its devices.
-function deployToPicker(id: string, c: Choices, disabled = html``): Html {
-  return html`<label for="${id}">Deploy to</label>
-  <select id="${id}" name="deploy_to"${disabled}>
-    <option value="">${c.usual.join(" / ")}</option>
-    ${c.devices.map((dv) => html`<option value="${dv.id}">${deviceLabel(dv)}</option>`)}
-  </select>
-  <p class="hint">A device gets a Debug build installed instead.</p>`;
+// One project's deploy entries: checkboxes when there are several, checked as `picked` or its defaults; otherwise
+// what it deploys to, in words. The empty marker makes none checked read as no pick.
+function deployGroup(project: string, entries: Entry[], picked: string[] | undefined, disabled = html``): Html {
+  if (entries.length < 2) return html`<p class="deploy-one"><strong>${project}</strong> → ${entries[0]?.name ?? "no deploy (built only)"}</p>`;
+  const name = `deploy:${project}`;
+  return html`<p class="deploy-one"><strong>${project}</strong></p><input type="hidden" name="${name}" value=""${disabled}>
+  <div class="picks">${entries.map((e) => html`<label><input type="checkbox" name="${name}" value="${e.id}"${
+    (picked ? picked.includes(e.id) : e.pick) ? html` checked` : ""}${disabled}>${e.name}</label>`)}</div>`;
 }
 
 // The runners as plates: attached elsewhere, or each one with its state, what it works on and its worker slots.
@@ -713,7 +709,7 @@ export type SettingsData = {
   workers: number; maxWorkers: number; suggested: number; cores: number; memoryGb: number; windows: boolean;
   paused: string | null;
   verified: boolean; // the session's passkey was checked recently: owners may change settings
-  projects: { name: string; deploy_group: string; enabled: number; deployTo?: Choices }[];
+  projects: { name: string; deploy_group: string; enabled: number; deployTo?: Entry[] }[];
   users: { name: string; role: string; passkeys: number; last_used: number | null }[];
   attachedTo?: string | null; // the queue this machine's runner works: its owner's runner settings apply, not these
 };
@@ -731,16 +727,17 @@ export function settingsPage(d: SettingsData, user: User, link?: NewLink): strin
     : html`<button class="danger" disabled>${label}</button>`;
   const change = (action: string, label: string, cls = "") =>
     html`<form method="post" action="${action}"><button class="${cls}"${off}>${label}</button></form>`;
-  // Deploy main, with the Deploy to list for a project that can install on a device.
+  // Deploy main, with the project's deploy entries to pick from when it has several (devices.ts).
   const deployMain = (p: SettingsData["projects"][number]) => {
     const action = `/settings/projects/${encodeURIComponent(p.name)}/deploy`;
-    const devices = p.deployTo?.devices.length ? p.deployTo : null;
-    const question = `Deploy ${p.name}'s main as it is? The runner builds and tests it, then ${devices ? "deploys it where you pick" : "runs its deploy step"}. Nothing is changed or committed.`;
-    if (!devices) return ask(action, "Deploy main", question);
-    // Before the passkey check the list shows too, disabled like the button, so the targets are visible.
-    if (!(owner && d.verified)) return html`${deployToPicker(`deploy-to-${p.name}`, devices, html` disabled`)}<button class="danger" disabled>Deploy main</button>`;
+    const entries = p.deployTo ?? [];
+    const where = entries.length > 1 ? "deploys it where you pick" : entries.length ? `deploys it to ${entries[0].name}` : "runs its deploy step";
+    const question = `Deploy ${p.name}'s main as it is? The runner builds and tests it, then ${where}. Nothing is changed or committed.`;
+    if (entries.length < 2) return ask(action, "Deploy main", question);
+    // Before the passkey check the entries show too, disabled like the button, so the targets are visible.
+    if (!(owner && d.verified)) return html`${deployGroup(p.name, entries, undefined, html` disabled`)}<button class="danger" disabled>Deploy main</button>`;
     return html`<details class="confirm danger"><summary class="btn danger">Deploy main…</summary><div class="confirm-body"><p>${question}</p>
-      <form method="post" action="${action}">${deployToPicker(`deploy-to-${p.name}`, devices)}<div class="actions"><button class="danger">Deploy main</button></div></form></div></details>`;
+      <form method="post" action="${action}">${deployGroup(p.name, entries, undefined)}<div class="actions"><button class="danger">Deploy main</button></div></form></div></details>`;
   };
   const userPath = (name: string, verb: string) => `/settings/users/${encodeURIComponent(name)}/${verb}`;
   return page("Settings", html`
@@ -849,19 +846,16 @@ for (const form of document.querySelectorAll("form[action='/requests']")) {
   form.addEventListener("submit", (e) => {
     if (picks && !picks.querySelector("input:checked")) { e.preventDefault(); picks.querySelector("input")?.focus(); }
   });
-  // Deploy to follows the projects checked: shown while one of them has devices, with only their devices. The options
-  // are rebuilt, not hidden, since Safari shows hidden options.
+  // Deploy to shows the projects checked, each with its targets; the others' inputs are disabled, so they aren't sent.
   const box = form.querySelector(".deploy-to");
   if (!box) continue;
-  const select = box.querySelector("select"), usual = JSON.parse(box.dataset.usual);
-  const [first, ...devices] = select.options;
   const follow = () => {
-    const picked = [...form.querySelectorAll("input[name=project]:checked")].map((i) => i.value).filter((p) => p in usual);
-    const keep = select.value;
-    box.hidden = select.disabled = !picked.length;
-    first.textContent = [...new Set(picked.map((p) => usual[p]))].join(" / ");
-    select.replaceChildren(first, ...devices.filter((o) => o.dataset.projects.split(" ").some((p) => picked.includes(p))));
-    select.value = [...select.options].some((o) => o.value === keep) ? keep : "";
+    const checked = new Set([...form.querySelectorAll("input[name=project]:checked")].map((i) => i.value));
+    for (const group of box.querySelectorAll(".deploy-group")) {
+      group.hidden = !checked.has(group.dataset.project);
+      for (const input of group.querySelectorAll("input")) input.disabled = group.hidden;
+    }
+    box.hidden = !box.querySelector(".deploy-group:not([hidden])");
   };
   form.addEventListener("change", (e) => { if (e.target.name === "project") follow(); });
   follow();

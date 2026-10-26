@@ -596,51 +596,78 @@ describe("runner: deploy main without a change", () => {
   });
 });
 
-describe("runner: install on a device", () => {
+describe("runner: deploy to the targets and devices picked", () => {
   const phone = { id: "00000000-0000000000000001", name: "Test phone", model: "iPhone 18 Pro" };
-  // A project that can install on `phone`, which its runner reported; the install writes what it installed to `installed`.
-  const withPhone = async (cmd?: string) => {
+  const onPhone = `device:${phone.id}`;
+  // p1 can also install on `phone`; the install writes what it installed to `installed`.
+  const withPhone = (cmd?: string) => {
     const h = setup();
     const installed = () => join(h.prod, "installed");
     const device_deploy_cmd = cmd ?? `printf '%s %s\\n' "$AGENTRY_DEVICE" "$(git rev-parse --short HEAD)" > '${installed()}'`;
     h.db.query("UPDATE projects SET recipe = ? WHERE name = 'p1'").run(JSON.stringify({ ...h.recipe, device_deploy_cmd, devices: [phone] }));
-    await h.ctx.q.setDevices({ p1: { usual: "prod", devices: [phone] } });
     return { ...h, installed };
   };
+  const steps = (h: ReturnType<typeof setup>) => h.db.query("SELECT step FROM steps ORDER BY id").all().map((r: any) => r.step);
 
-  test("Deploy main to a device installs it there instead of the project's deploy; no target is read back", async () => {
-    const h = await withPhone();
+  test("only the device picked: it is installed there; the project's own deploy doesn't run and nothing is read back", async () => {
+    const h = withPhone();
     writeFileSync(join(h.prod, "VERSION"), "deadbeef 2026-10-17 12:00\n"); // a target the drift guard would refuse
-    const id = deployMain(h.db, "p1", phone.id);
-    expect(h.req(id)).toMatchObject({ device: phone.id, device_name: "Test phone · iPhone 18 Pro" });
+    const id = deployMain(h.db, "p1", [onPhone]);
+    expect(JSON.parse(h.req(id).deploy_to)).toEqual({ p1: [{ id: onPhone, name: "Test phone · iPhone 18 Pro" }] });
     expect(await runNext(h.ctx)).toEqual({ kind: "ran", requestId: id, status: "done" });
     expect(h.req(id)).toMatchObject({ status: "done", status_reason: "deployed" });
     expect(readFileSync(h.installed(), "utf8")).toBe(`${phone.id} ${h.initial.slice(0, 7)}\n`);
-    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith("deadbeef"); // the project's own deploy didn't run
-    expect(h.db.query("SELECT step FROM steps ORDER BY id").all().map((r: any) => r.step)).not.toContain("version");
+    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith("deadbeef");
+    expect(steps(h)).not.toContain("version");
   });
 
-  test("without a device, the project deploys as usual", async () => {
-    const h = await withPhone();
-    const id = deployMain(h.db, "p1");
+  test("nothing picked: the project's defaults, its own deploy and no device", async () => {
+    const h = withPhone();
+    const id = deployMain(h.db, "p1", ["deploy"]); // the defaults, so nothing is kept
+    expect(h.req(id).deploy_to).toBeNull();
     await runNext(h.ctx);
-    expect(h.req(id)).toMatchObject({ status: "done", status_reason: "deployed", device: null });
+    expect(h.req(id)).toMatchObject({ status: "done", status_reason: "deployed" });
     expect(existsSync(h.installed())).toBe(false);
     expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith(h.initial.slice(0, 7));
   });
 
+  test("both picked: the project's own deploy, checked, then the device", async () => {
+    const h = withPhone();
+    const id = deployMain(h.db, "p1", ["deploy", onPhone]);
+    await runNext(h.ctx);
+    expect(h.req(id)).toMatchObject({ status: "done", status_reason: "deployed" });
+    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith(h.initial.slice(0, 7));
+    expect(readFileSync(h.installed(), "utf8")).toStartWith(phone.id);
+    expect(steps(h).filter((s) => s === "deploy" || s === "version")).toEqual(["version", "deploy", "version", "deploy"]); // guard, deploy, check, install
+  });
+
+  test("a target with its own deploy_cmd deploys alone when picked alone", async () => {
+    const h = setup();
+    const other = join(h.prod, "OTHER");
+    writeFileSync(other, `${h.initial.slice(0, 7)} 2026-10-17 12:00\n`);
+    const own = { name: "other", live_version_cmd: `cat '${other}'`, deploy_cmd: `printf '%s 2026-10-18 09:00\\n' "$(git rev-parse --short HEAD)" > '${other}'` };
+    h.db.query("UPDATE projects SET recipe = ? WHERE name = 'p1'").run(JSON.stringify({ ...h.recipe, targets: [...h.recipe.targets!, own] }));
+    h.pushFromUser("app/main.txt", "v2 by hand\n");
+    const id = deployMain(h.db, "p1", ["target:other"]);
+    await runNext(h.ctx);
+    expect(h.req(id)).toMatchObject({ status: "done", status_reason: "deployed" });
+    expect(readFileSync(other, "utf8")).toStartWith(h.originHead().slice(0, 7));
+    expect(readFileSync(join(h.prod, "VERSION"), "utf8")).toStartWith(h.initial.slice(0, 7)); // prod wasn't picked
+  });
+
   test("a failed install blocks the group, naming the device", async () => {
-    const h = await withPhone("exit 3");
-    const id = deployMain(h.db, "p1", phone.id);
+    const h = withPhone("exit 3");
+    const id = deployMain(h.db, "p1", [onPhone]);
     await runNext(h.ctx);
     expect(h.req(id)).toMatchObject({ status: "blocked_post_push", status_reason: "install on Test phone · iPhone 18 Pro failed (exit 3)" });
   });
 
-  test("a device its runner didn't report is refused", async () => {
-    const h = await withPhone();
-    expect(() => deployMain(h.db, "p1", "00000000-0000000000000002")).toThrow("p1 can't be installed on that device");
+  test("a target the project doesn't have, or none at all, is refused", async () => {
+    const h = withPhone();
+    expect(() => deployMain(h.db, "p1", ["device:00000000-0000000000000002"])).toThrow("p1 can't deploy to that target: pick from its list");
+    expect(() => deployMain(h.db, "p1", [])).toThrow("pick at least one deploy target for p1");
     h.project("p2", { ...h.recipe, deploy_group: "g2" });
-    expect(() => deployMain(h.db, "p2", phone.id)).toThrow("p2 can't be installed on that device");
+    expect(() => deployMain(h.db, "p2", [onPhone])).toThrow("p2 can't deploy to that target: pick from its list");
   });
 });
 

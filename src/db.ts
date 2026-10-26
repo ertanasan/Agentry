@@ -150,6 +150,16 @@ export const MIGRATIONS: string[] = [
   `ALTER TABLE leases ADD COLUMN devices TEXT;
    ALTER TABLE requests ADD COLUMN device TEXT;
    ALTER TABLE requests ADD COLUMN device_name TEXT;`,
+  // 14: a request picks any of its projects' deploy entries (devices.ts Picks, JSON; NULL: each project's defaults),
+  // its targets as well as its devices; a request that picked a device keeps it, instead of its project's own deploy.
+  // A runner reports every project's entries, in the new shape, from its next report.
+  `ALTER TABLE requests ADD COLUMN deploy_to TEXT;
+   UPDATE requests SET deploy_to = json_object((SELECT name FROM projects WHERE id = requests.project_id),
+     json_array(json_object('id', 'device:' || device, 'name', device_name))) WHERE device IS NOT NULL;
+   ALTER TABLE requests DROP COLUMN device;
+   ALTER TABLE requests DROP COLUMN device_name;
+   ALTER TABLE leases RENAME COLUMN devices TO deploy_choices;
+   UPDATE leases SET deploy_choices = NULL;`,
 ];
 
 // Checks run before a migration; a message refuses it and leaves the database as it was.

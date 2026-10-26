@@ -4,6 +4,9 @@ export type Target = {
   name: string;
   // Prints the live VERSION line ("<short-sha>[+uncommitted] <date> <time>") of what this target runs (D10).
   live_version_cmd: string;
+  // Deploys this target alone, so a request can pick it on its own (devices.ts). Without one, the recipe's deploy_cmd
+  // deploys it together with the others that have none.
+  deploy_cmd?: string;
 };
 
 // A real device the project installs on, as Xcode knows it (`xcrun devicectl list devices`).
@@ -21,10 +24,11 @@ export type Recipe = {
   sandbox_user_temp?: boolean;  // sandboxed steps may use the per-user temp folder (Swift Build ignores TMPDIR)
   test_cmd: string;             // runs sandboxed
   test_result_file?: string;    // TRX file path relative to the worktree, e.g. "TestResults/agentry.trx"
-  deploy_cmd?: string;          // runs unsandboxed from the worktree (D6); absent = "built", not deployed
-  device_deploy_cmd?: string;   // instead of deploy_cmd for a request that picked one of `devices` (devices.ts): installs
-                                // on $AGENTRY_DEVICE (its UDID); no targets are read back
-  devices?: Device[];           // with device_deploy_cmd: offered after the project's own deploy (its targets, e.g. TestFlight)
+  deploy_cmd?: string;          // runs unsandboxed from the worktree (D6), for the targets without their own; absent and
+                                // no target's own = "built", not deployed
+  device_deploy_cmd?: string;   // for a request that picked one of `devices` (devices.ts): installs on $AGENTRY_DEVICE
+                                // (its UDID); nothing is read back
+  devices?: Device[];           // with device_deploy_cmd: offered after the targets (e.g. TestFlight), unpicked by default
   deploy_order?: number;        // a request with several projects deploys them lowest first; default 0
   targets?: Target[];           // live-version reads for the drift guard and the post-deploy check
   remote_busy_cmd?: string;     // exit 0 = an earlier install is still running remotely, 1 = free, else unknown (D18)
@@ -58,6 +62,8 @@ export function parseRecipe(json: string): Recipe {
     if (typeof r[key] !== "string" || (!r[key] && key !== "scope_path")) throw new Error(`recipe: "${key}" is required`);
   }
   if (r.deploy_cmd && !r.targets?.length) throw new Error("recipe: a deploy_cmd needs targets with live_version_cmd");
+  const orphan = r.targets?.find((t) => !t.deploy_cmd && !r.deploy_cmd);
+  if (orphan && r.targets!.some((t) => t.deploy_cmd)) throw new Error(`recipe: target ${orphan.name} has no deploy_cmd, and the recipe has none`);
   if (!r.device_deploy_cmd !== !r.devices?.length) throw new Error("recipe: device_deploy_cmd and devices go together");
   if (r.devices?.some((d) => typeof d?.id !== "string" || !d.id || typeof d.name !== "string" || !d.name)) {
     throw new Error("recipe: each device needs an id (its UDID) and a name");
