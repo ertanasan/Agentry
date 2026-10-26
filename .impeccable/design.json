@@ -1,0 +1,488 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-26T16:30:28+00:00",
+  "title": "Design System: Agentry",
+  "extensions": {
+    "colorMeta": {
+      "thermal-ink": {
+        "role": "primary",
+        "displayName": "Thermal Ink",
+        "canonical": "oklch(19.1% 0 0)",
+        "tonalRamp": [
+          "oklch(15% 0.004 85.0)",
+          "oklch(25% 0.004 85.0)",
+          "oklch(35% 0.004 85.0)",
+          "oklch(47% 0.004 85.0)",
+          "oklch(59% 0.004 85.0)",
+          "oklch(71% 0.004 85.0)",
+          "oklch(83% 0.004 85.0)",
+          "oklch(95% 0.004 85.0)"
+        ]
+      },
+      "attn-orange": {
+        "role": "secondary",
+        "displayName": "Needs-You Orange",
+        "canonical": "oklch(65.5% 0.178 44.7)",
+        "tonalRamp": [
+          "oklch(15% 0.150 44.7)",
+          "oklch(25% 0.150 44.7)",
+          "oklch(35% 0.150 44.7)",
+          "oklch(47% 0.150 44.7)",
+          "oklch(59% 0.150 44.7)",
+          "oklch(71% 0.150 44.7)",
+          "oklch(83% 0.150 44.7)",
+          "oklch(95% 0.150 44.7)"
+        ]
+      },
+      "attn-text": {
+        "role": "secondary",
+        "displayName": "Needs-You Orange, text",
+        "canonical": "oklch(51.3% 0.146 43.4)",
+        "tonalRamp": [
+          "oklch(15% 0.140 43.4)",
+          "oklch(25% 0.140 43.4)",
+          "oklch(35% 0.140 43.4)",
+          "oklch(47% 0.140 43.4)",
+          "oklch(59% 0.140 43.4)",
+          "oklch(71% 0.140 43.4)",
+          "oklch(83% 0.140 43.4)",
+          "oklch(95% 0.140 43.4)"
+        ]
+      },
+      "work-blue": {
+        "role": "secondary",
+        "displayName": "In-Transit Blue",
+        "canonical": "oklch(49.1% 0.188 265.2)",
+        "tonalRamp": [
+          "oklch(15% 0.150 265.2)",
+          "oklch(25% 0.150 265.2)",
+          "oklch(35% 0.150 265.2)",
+          "oklch(47% 0.150 265.2)",
+          "oklch(59% 0.150 265.2)",
+          "oklch(71% 0.150 265.2)",
+          "oklch(83% 0.150 265.2)",
+          "oklch(95% 0.150 265.2)"
+        ]
+      },
+      "fail-red": {
+        "role": "secondary",
+        "displayName": "Failed Red",
+        "canonical": "oklch(53.8% 0.200 28.7)",
+        "tonalRamp": [
+          "oklch(15% 0.160 28.7)",
+          "oklch(25% 0.160 28.7)",
+          "oklch(35% 0.160 28.7)",
+          "oklch(47% 0.160 28.7)",
+          "oklch(59% 0.160 28.7)",
+          "oklch(71% 0.160 28.7)",
+          "oklch(83% 0.160 28.7)",
+          "oklch(95% 0.160 28.7)"
+        ]
+      },
+      "done-green": {
+        "role": "secondary",
+        "displayName": "Delivered Green",
+        "canonical": "oklch(51.2% 0.127 149.7)",
+        "tonalRamp": [
+          "oklch(15% 0.120 149.7)",
+          "oklch(25% 0.120 149.7)",
+          "oklch(35% 0.120 149.7)",
+          "oklch(47% 0.120 149.7)",
+          "oklch(59% 0.120 149.7)",
+          "oklch(71% 0.120 149.7)",
+          "oklch(83% 0.120 149.7)",
+          "oklch(95% 0.120 149.7)"
+        ]
+      },
+      "idle-grey": {
+        "role": "neutral",
+        "displayName": "Idle Grey",
+        "canonical": "oklch(50.1% 0.023 77.1)",
+        "tonalRamp": [
+          "oklch(15% 0.023 77.1)",
+          "oklch(25% 0.023 77.1)",
+          "oklch(35% 0.023 77.1)",
+          "oklch(47% 0.023 77.1)",
+          "oklch(59% 0.023 77.1)",
+          "oklch(71% 0.023 77.1)",
+          "oklch(83% 0.023 77.1)",
+          "oklch(95% 0.023 77.1)"
+        ]
+      },
+      "kraft-ground": {
+        "role": "neutral",
+        "displayName": "Kraft Board",
+        "canonical": "oklch(82.6% 0.046 82.6)",
+        "tonalRamp": [
+          "oklch(15% 0.046 82.6)",
+          "oklch(25% 0.046 82.6)",
+          "oklch(35% 0.046 82.6)",
+          "oklch(47% 0.046 82.6)",
+          "oklch(59% 0.046 82.6)",
+          "oklch(71% 0.046 82.6)",
+          "oklch(83% 0.046 82.6)",
+          "oklch(95% 0.046 82.6)"
+        ]
+      },
+      "on-kraft": {
+        "role": "neutral",
+        "displayName": "Dark Kraft",
+        "canonical": "oklch(37.7% 0.028 77.8)",
+        "tonalRamp": [
+          "oklch(15% 0.028 77.8)",
+          "oklch(25% 0.028 77.8)",
+          "oklch(35% 0.028 77.8)",
+          "oklch(47% 0.028 77.8)",
+          "oklch(59% 0.028 77.8)",
+          "oklch(71% 0.028 77.8)",
+          "oklch(83% 0.028 77.8)",
+          "oklch(95% 0.028 77.8)"
+        ]
+      },
+      "label-stock": {
+        "role": "neutral",
+        "displayName": "Label Stock",
+        "canonical": "oklch(100% 0 0)",
+        "tonalRamp": [
+          "oklch(15% 0.000 0.0)",
+          "oklch(25% 0.000 0.0)",
+          "oklch(35% 0.000 0.0)",
+          "oklch(47% 0.000 0.0)",
+          "oklch(59% 0.000 0.0)",
+          "oklch(71% 0.000 0.0)",
+          "oklch(83% 0.000 0.0)",
+          "oklch(95% 0.000 0.0)"
+        ]
+      },
+      "label-sunk": {
+        "role": "neutral",
+        "displayName": "Sunk Stock",
+        "canonical": "oklch(95.1% 0.013 82.4)",
+        "tonalRamp": [
+          "oklch(15% 0.013 82.4)",
+          "oklch(25% 0.013 82.4)",
+          "oklch(35% 0.013 82.4)",
+          "oklch(47% 0.013 82.4)",
+          "oklch(59% 0.013 82.4)",
+          "oklch(71% 0.013 82.4)",
+          "oklch(83% 0.013 82.4)",
+          "oklch(95% 0.013 82.4)"
+        ]
+      },
+      "ink-muted": {
+        "role": "neutral",
+        "displayName": "Faded Ink",
+        "canonical": "oklch(44.7% 0.020 75.9)",
+        "tonalRamp": [
+          "oklch(15% 0.020 75.9)",
+          "oklch(25% 0.020 75.9)",
+          "oklch(35% 0.020 75.9)",
+          "oklch(47% 0.020 75.9)",
+          "oklch(59% 0.020 75.9)",
+          "oklch(71% 0.020 75.9)",
+          "oklch(83% 0.020 75.9)",
+          "oklch(95% 0.020 75.9)"
+        ]
+      },
+      "band-black": {
+        "role": "neutral",
+        "displayName": "Thermal Band",
+        "canonical": "oklch(19.1% 0 0)",
+        "tonalRamp": [
+          "oklch(15% 0.004 85.0)",
+          "oklch(25% 0.004 85.0)",
+          "oklch(35% 0.004 85.0)",
+          "oklch(47% 0.004 85.0)",
+          "oklch(59% 0.004 85.0)",
+          "oklch(71% 0.004 85.0)",
+          "oklch(83% 0.004 85.0)",
+          "oklch(95% 0.004 85.0)"
+        ]
+      },
+      "on-band": {
+        "role": "neutral",
+        "displayName": "Band Paper",
+        "canonical": "oklch(95.6% 0.014 84.6)",
+        "tonalRamp": [
+          "oklch(15% 0.014 84.6)",
+          "oklch(25% 0.014 84.6)",
+          "oklch(35% 0.014 84.6)",
+          "oklch(47% 0.014 84.6)",
+          "oklch(59% 0.014 84.6)",
+          "oklch(71% 0.014 84.6)",
+          "oklch(83% 0.014 84.6)",
+          "oklch(95% 0.014 84.6)"
+        ]
+      },
+      "band-muted": {
+        "role": "neutral",
+        "displayName": "Band Faded",
+        "canonical": "oklch(75.5% 0.025 79.7)",
+        "tonalRamp": [
+          "oklch(15% 0.025 79.7)",
+          "oklch(25% 0.025 79.7)",
+          "oklch(35% 0.025 79.7)",
+          "oklch(47% 0.025 79.7)",
+          "oklch(59% 0.025 79.7)",
+          "oklch(71% 0.025 79.7)",
+          "oklch(83% 0.025 79.7)",
+          "oklch(95% 0.025 79.7)"
+        ]
+      },
+      "kraft-ground-dark": {
+        "role": "neutral",
+        "displayName": "Corrugated Brown",
+        "canonical": "oklch(29.0% 0.025 66.6)",
+        "tonalRamp": [
+          "oklch(15% 0.025 66.6)",
+          "oklch(25% 0.025 66.6)",
+          "oklch(35% 0.025 66.6)",
+          "oklch(47% 0.025 66.6)",
+          "oklch(59% 0.025 66.6)",
+          "oklch(71% 0.025 66.6)",
+          "oklch(83% 0.025 66.6)",
+          "oklch(95% 0.025 66.6)"
+        ]
+      },
+      "label-stock-dark": {
+        "role": "neutral",
+        "displayName": "Night Label Stock",
+        "canonical": "oklch(35.0% 0.027 69.0)",
+        "tonalRamp": [
+          "oklch(15% 0.027 69.0)",
+          "oklch(25% 0.027 69.0)",
+          "oklch(35% 0.027 69.0)",
+          "oklch(47% 0.027 69.0)",
+          "oklch(59% 0.027 69.0)",
+          "oklch(71% 0.027 69.0)",
+          "oklch(83% 0.027 69.0)",
+          "oklch(95% 0.027 69.0)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "routing-number": {
+        "displayName": "Routing Number",
+        "purpose": "Request number on a parcel label; the routing code."
+      },
+      "routing-number-row": {
+        "displayName": "Routing Number Row",
+        "purpose": "Request number in list rows."
+      },
+      "wordmark": {
+        "displayName": "Wordmark",
+        "purpose": "AGENTRY in the band only."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Page titles; 22px inside a run-page parcel label."
+      },
+      "section-head": {
+        "displayName": "Section Head",
+        "purpose": "Section heads on kraft with the count pushed right; runner names on plates at 17px."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Request titles and h3."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Prose, request text, agent questions."
+      },
+      "sticker": {
+        "displayName": "Sticker",
+        "purpose": "State stickers."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Form labels, legends, table heads."
+      },
+      "track-stop": {
+        "displayName": "Track Stop",
+        "purpose": "Tracking-strip stop names."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Hashes, logs, diffs, commands only."
+      }
+    },
+    "shadows": [
+      {
+        "name": "nav-current",
+        "value": "inset 0 -3px 0 var(--attn)",
+        "purpose": "Underline stroke on the current nav item in the band; a stroke, not elevation."
+      },
+      {
+        "name": "sticker-idle-outline",
+        "value": "inset 0 0 0 1.5px currentColor",
+        "purpose": "Outline of the idle sticker, which is never filled."
+      },
+      {
+        "name": "beat",
+        "value": "0 0 0 0 color-mix(in srgb, currentColor 55%, transparent) to 0 0 0 7px transparent",
+        "purpose": "Pulse ring on a running stop or sticker; off under reduced motion."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-transition",
+        "value": ".15s ease-out",
+        "purpose": "Button background and color; disclosure chevron rotation."
+      },
+      {
+        "name": "beat",
+        "value": "1.6s ease-out infinite",
+        "purpose": "The running stop and running sticker mark; disabled by prefers-reduced-motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "single-column",
+        "value": "760px",
+        "purpose": "Max content width at every size; plates auto-fill at 164px minimum."
+      }
+    ],
+    "fonts": [
+      {
+        "family": "Archivo",
+        "source": "/static/archivo.woff2",
+        "license": "OFL",
+        "axes": "wght 100-900, wdth 62-125",
+        "display": "swap"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Button",
+      "kind": "button",
+      "refersTo": "button",
+      "description": "Default action: label stock, 2px ink rule, 2px tick.",
+      "html": "<button class=\"ds-btn\">Approve…</button>",
+      "css": ".ds-btn { font-family: Archivo, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 15px; font-weight: 650; min-height: 44px; padding: 8px 16px; border-radius: 2px; border: 2px solid var(--ink, #141414); background: var(--label, #fff); color: var(--ink, #141414); cursor: pointer; transition: background-color .15s ease-out, color .15s ease-out; } .ds-btn:hover { background: var(--sunk, #f3eee5); } .ds-btn:focus-visible { outline: 3px solid var(--work, #2b54c9); outline-offset: 2px; }"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one forward action on a label: solid thermal ink.",
+      "html": "<button class=\"ds-btn-primary\">Review the diff</button>",
+      "css": ".ds-btn-primary { font-family: Archivo, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 15px; font-weight: 650; min-height: 44px; padding: 8px 16px; border-radius: 2px; border: 2px solid var(--ink, #141414); background: var(--ink, #141414); color: var(--label, #fff); cursor: pointer; transition: background-color .15s ease-out; } .ds-btn-primary:hover { background: color-mix(in srgb, var(--ink, #141414) 80%, var(--label, #fff)); } .ds-btn-primary:focus-visible { outline: 3px solid var(--work, #2b54c9); outline-offset: 2px; }"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "Destructive action; opens a dashed red confirm that names the consequence.",
+      "html": "<button class=\"ds-btn-danger\">Reject…</button>",
+      "css": ".ds-btn-danger { font-family: Archivo, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 15px; font-weight: 650; min-height: 44px; padding: 8px 16px; border-radius: 2px; border: 2px solid var(--fail, #c8231c); background: var(--label, #fff); color: var(--fail, #c8231c); cursor: pointer; transition: background-color .15s ease-out; } .ds-btn-danger:hover { background: var(--sunk, #f3eee5); } .ds-btn-danger:focus-visible { outline: 3px solid var(--work, #2b54c9); outline-offset: 2px; }"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Condensed uppercase label above a 1.5px ruled field.",
+      "html": "<label class=\"ds-label\">Project<input class=\"ds-input\" type=\"text\" placeholder=\"vt-api\"></label>",
+      "css": ".ds-label { display: block; font-family: Archivo, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 13px; font-weight: 750; font-stretch: 85%; letter-spacing: .06em; text-transform: uppercase; color: var(--ink, #141414); } .ds-input { display: block; width: 100%; margin-top: 6px; font: 400 16px/1.5 Archivo, -apple-system, sans-serif; letter-spacing: 0; text-transform: none; padding: 10px 12px; min-height: 44px; border: 1.5px solid var(--ink, #141414); border-radius: 2px; background: var(--label, #fff); color: var(--ink, #141414); box-sizing: border-box; } .ds-input::placeholder { color: var(--muted, #5b5348); } .ds-input:focus-visible { outline: 3px solid var(--work, #2b54c9); outline-offset: 2px; }"
+    },
+    {
+      "name": "Band Navigation",
+      "kind": "nav",
+      "description": "Thermal band: condensed wordmark, muted links, current page with an inset orange underline.",
+      "html": "<nav class=\"ds-band\"><a class=\"ds-brand\" href=\"#\">Agentry</a><a class=\"ds-nav\" href=\"#\" aria-current=\"page\">Home</a><a class=\"ds-nav\" href=\"#\">Settings</a></nav>",
+      "css": ".ds-band { display: flex; align-items: center; gap: 2px; min-height: 60px; padding: 0 16px; background: var(--band, #141414); font-family: Archivo, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; } .ds-brand { margin-right: auto; color: var(--on-band, #f5f0e6); text-decoration: none; font-weight: 800; font-stretch: 72%; font-size: 23px; letter-spacing: .04em; text-transform: uppercase; } .ds-nav { color: var(--band-muted, #b8ae9e); text-decoration: none; font-size: 15px; padding: 10px; min-height: 44px; display: inline-flex; align-items: center; box-sizing: border-box; } .ds-nav:hover { color: var(--on-band, #f5f0e6); } .ds-nav[aria-current=page] { color: var(--on-band, #f5f0e6); font-weight: 650; box-shadow: inset 0 -3px 0 var(--attn, #e5641a); } .ds-nav:focus-visible { outline: 3px solid var(--band-work, #8fb0ff); outline-offset: 2px; }"
+    },
+    {
+      "name": "State Stickers",
+      "kind": "chip",
+      "refersTo": "sticker-attn",
+      "description": "Handling stickers: color, shape and word together.",
+      "html": "<span class=\"ds-sticker ds-attn\"><i></i>Needs approval</span> <span class=\"ds-sticker ds-work\"><i></i>Queued</span> <span class=\"ds-sticker ds-fail\"><i></i>Deploy failed</span> <span class=\"ds-sticker ds-done\"><i></i>Deployed</span> <span class=\"ds-sticker ds-idle\"><i></i>Canceled</span>",
+      "css": ".ds-sticker { display: inline-flex; align-items: center; gap: 6px; padding: 1px 7px 1px 6px; font-family: Archivo, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 13px; font-weight: 800; font-stretch: 75%; letter-spacing: .07em; text-transform: uppercase; line-height: 1.5; white-space: nowrap; } .ds-sticker i { width: 9px; height: 9px; display: inline-block; background: currentColor; } .ds-attn { background: var(--attn, #e5641a); color: var(--on-attn, #141414); } .ds-attn i { transform: rotate(45deg); width: 8px; height: 8px; } .ds-work { background: var(--work, #2b54c9); color: var(--on-work, #fff); } .ds-work i { border-radius: 50%; background: none; border: 2px solid currentColor; box-sizing: border-box; } .ds-fail { background: var(--fail, #c8231c); color: var(--on-fail, #fff); } .ds-fail i { border-radius: 1px; } .ds-done { background: var(--done, #1e7a3c); color: var(--on-done, #fff); } .ds-done i { border-radius: 50%; } .ds-idle { color: var(--idle, #6b6255); box-shadow: inset 0 0 0 1.5px currentColor; } .ds-idle i { height: 2px; }"
+    },
+    {
+      "name": "Parcel Label",
+      "kind": "card",
+      "refersTo": "label-card",
+      "description": "A request: ruled header with the condensed routing number, title and sticker.",
+      "html": "<article class=\"ds-parcel\"><div class=\"ds-parcel-head\"><span class=\"ds-no\"><span class=\"ds-h\">#</span>138</span><div class=\"ds-parcel-body\"><strong>Show similar words under each answer</strong><div class=\"ds-meta\">vt-api, vt-web</div></div></div><div class=\"ds-parcel-foot\">1 check flag: a test was deleted</div></article>",
+      "css": ".ds-parcel { background: var(--label, #fff); border: 2px solid var(--rule, #141414); color: var(--ink, #141414); font-family: Archivo, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; } .ds-parcel-head { display: grid; grid-template-columns: auto 1fr; border-bottom: 2px solid var(--rule, #141414); } .ds-no { font-weight: 850; font-stretch: 62%; font-size: 40px; line-height: 1; padding: 10px 12px 8px; border-right: 2px solid var(--rule, #141414); font-variant-numeric: tabular-nums; } .ds-h { font-size: .55em; font-weight: 650; color: var(--muted, #5b5348); vertical-align: .55em; } .ds-parcel-body { padding: 10px 12px 12px; font-weight: 650; line-height: 1.3; } .ds-meta { margin-top: 5px; font-size: 14px; font-weight: 400; color: var(--muted, #5b5348); } .ds-parcel-foot { padding: 12px; font-size: 16px; line-height: 1.5; }"
+    },
+    {
+      "name": "Tracking Strip",
+      "kind": "custom",
+      "description": "Signature: five stops on one rule, solid where reached, dotted ahead; current beats blue, held is an orange diamond.",
+      "html": "<ol class=\"ds-track\"><li class=\"done\">Agent</li><li class=\"hold\">Build</li><li>Test</li><li>Verify</li><li>Deploy</li></ol>",
+      "css": ".ds-track { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, 1fr); font-family: Archivo, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; } .ds-track li { position: relative; padding-top: 22px; font-size: 12px; font-weight: 750; font-stretch: 80%; letter-spacing: .05em; text-transform: uppercase; color: var(--muted, #5b5348); } .ds-track li::before { content: ''; position: absolute; z-index: 1; top: 0; left: 0; width: 14px; height: 14px; box-sizing: border-box; border: 2px solid var(--ink, #141414); border-radius: 50%; background: var(--label, #fff); } .ds-track li::after { content: ''; position: absolute; top: 6px; left: 14px; right: 0; height: 2px; background: repeating-linear-gradient(90deg, var(--ink, #141414) 0 3px, transparent 3px 7px); opacity: .55; } .ds-track li:last-child::after { display: none; } .ds-track li.done { color: var(--ink, #141414); } .ds-track li.done::before { background: var(--ink, #141414); } .ds-track li.done::after { background: var(--ink, #141414); opacity: 1; } .ds-track li.hold { color: var(--attn-t, #a8430a); } .ds-track li.hold::before { border-color: var(--attn, #e5641a); background: var(--attn, #e5641a); border-radius: 1px; transform: rotate(45deg) scale(.86); }"
+    },
+    {
+      "name": "Runner Plate",
+      "kind": "custom",
+      "refersTo": "runner-plate",
+      "description": "One per runner in the band: name with state mark, current scan, worker slots as a visible budget.",
+      "html": "<div class=\"ds-plate\"><b><i class=\"ds-dot\"></i>machost</b><span class=\"ds-doing\">online · #141 Test</span><span class=\"ds-slots\"><i class=\"on\"></i><i></i><i></i></span></div>",
+      "css": ".ds-plate { background: var(--band, #141414); color: var(--on-band, #f5f0e6); border: 1.5px solid var(--band-line, rgb(245 240 230 / .24)); padding: 8px 11px 10px; width: 180px; font-family: Archivo, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; } .ds-plate b { display: flex; align-items: center; gap: 8px; font-weight: 750; font-stretch: 75%; font-size: 17px; letter-spacing: .04em; text-transform: uppercase; } .ds-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--band-done, #62d27e); } .ds-doing { display: block; font-size: 14px; color: var(--band-muted, #b8ae9e); } .ds-slots { display: flex; gap: 4px; margin-top: 8px; } .ds-slots i { width: 18px; height: 7px; border: 1.5px solid var(--band-muted, #b8ae9e); box-sizing: border-box; } .ds-slots i.on { background: var(--on-band, #f5f0e6); border-color: var(--on-band, #f5f0e6); }"
+    },
+    {
+      "name": "New Request Bar",
+      "kind": "button",
+      "refersTo": "new-request-bar",
+      "description": "A black bar above the needs list that opens into a label.",
+      "html": "<button class=\"ds-newbar\">New request</button>",
+      "css": ".ds-newbar { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 52px; padding: 0 18px; border: 0; background: var(--ink, #141414); color: var(--label, #fff); font-family: Archivo, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-weight: 800; font-stretch: 72%; font-size: 18px; letter-spacing: .08em; text-transform: uppercase; cursor: pointer; } .ds-newbar::before { content: ''; width: 14px; height: 14px; background: linear-gradient(currentColor, currentColor) center / 100% 2.5px no-repeat, linear-gradient(currentColor, currentColor) center / 2.5px 100% no-repeat; } .ds-newbar:hover { background: color-mix(in srgb, var(--ink, #141414) 85%, var(--label, #fff)); } .ds-newbar:focus-visible { outline: 3px solid var(--work, #2b54c9); outline-offset: 2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Proof of Delivery",
+    "overview": "Every request is a parcel. It sits on kraft board, its label is white thermal stock boxed in a heavy black rule, and it is tracked stop by stop (Agent, Build, Test, Verify, Deploy) until production runs its commit. The header is a thermal-black band where each runner is a fixed plate with its worker slots shown as a visible budget. The world is a shipping dock, not an admin console: dense, ruled, legible at arm's length on a phone.\n\nOne family carries everything. Archivo, self-hosted as a variable font with a width axis, is squeezed to condensed widths for routing numbers, the wordmark, section heads, stickers and stop names, and runs at normal width for body copy. Monospace appears only where the content is machine text: hashes, logs, diffs, commands. State is a handling sticker: a color, a shape and a word, never color alone.\n\nBoth themes follow the device. Dark is the same dock at night: dark corrugated brown ground, labels in a lighter brown stock, rules softened to a warm grey, the band near-black, sticker colors lifted for contrast. The grey admin list with one blue accent and status pills is the explicit rejection.",
+    "keyCharacteristics": [
+      "Kraft ground, white labels, 2px black rules, no shadows, square corners.",
+      "One variable family, Archivo, with width doing the hierarchy work.",
+      "Four state colors as stickers, each paired with a fixed shape and a word.",
+      "The five-stop tracking strip as the signature; stops sit at the same x in every row.",
+      "44px targets everywhere; no JavaScript required for any of it."
+    ],
+    "rules": [
+      {
+        "name": "The Sticker Rule",
+        "body": "A state color appears only as a state: sticker fill, a state word, a track stop, an alert mark, or a confirm panel tint. Every use carries its shape and its word.",
+        "section": "colors"
+      },
+      {
+        "name": "The Two Stocks Rule",
+        "body": "Content lives on label stock; kraft holds only section heads, counts and the empty-state outline. Never put readable content blocks directly on kraft.",
+        "section": "colors"
+      },
+      {
+        "name": "The Width-Is-Hierarchy Rule",
+        "body": "Reach for the width axis before size: anything that names, routes or labels is condensed and uppercase; anything a person reads as sentences is normal width and sentence case.",
+        "section": "typography"
+      },
+      {
+        "name": "The Machine-Text Rule",
+        "body": "Monospace is for text a machine produced or will consume. Never for numbers, labels or decoration.",
+        "section": "typography"
+      },
+      {
+        "name": "The Rule-Not-Lift Rule",
+        "body": "If two things need separating, draw a rule between them. Never float a surface with a shadow.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** put every request on label stock inside a 2px Thermal Ink rule, with its routing number in condensed Archivo at weight 850.",
+      "**Do** show state as color, shape and word together: diamond orange, ring blue, square red, disc green, bar grey.",
+      "**Do** keep track stops at the same x in every row of a list.",
+      "**Do** separate with rules (2px structure, 1px hairline, dashed for not-yet) instead of shadows.",
+      "**Do** hold every target at 44px minimum and keep the 3px blue focus outline.",
+      "**Do** define every color as a custom property with a dark-theme counterpart."
+    ],
+    "donts": [
+      "**Don't** use drop shadows or rounded cards; labels are square and flat.",
+      "**Don't** use a state color for decoration or a color without its shape and word.",
+      "**Don't** add a second type family; Archivo's width axis carries display, and monospace is only for machine text.",
+      "**Don't** use icon fonts or glyph icons; state marks and the plus are drawn in CSS.",
+      "**Don't** fall back to a grey admin list with a single blue accent and pill-shaped status badges."
+    ]
+  }
+}

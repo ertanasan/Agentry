@@ -53,6 +53,7 @@ const STATIC: Record<string, { path?: string; body?: string; type: string }> = {
   "/sw.js": { body: SW_JS, type: "text/javascript" },
   "/static/icon.png": { path: join(assets, "icon.png"), type: "image/png" },
   "/static/apple-touch-icon.png": { path: join(assets, "apple-touch-icon.png"), type: "image/png" },  // iOS home screen
+  "/static/archivo.woff2": { path: join(assets, "archivo.woff2"), type: "font/woff2" },              // OFL, static/archivo-OFL.txt
 };
 
 const SECURITY_HEADERS = {
@@ -61,6 +62,9 @@ const SECURITY_HEADERS = {
   "referrer-policy": "same-origin",
   "x-content-type-options": "nosniff",
 };
+
+// This machine's system, for its runner's plate; an attached runner doesn't report its own.
+const OS = process.platform === "win32" ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux";
 
 export function startServer(o: ServerOptions) {
   const throttle = new LoginThrottle();
@@ -350,7 +354,9 @@ export function startServer(o: ServerOptions) {
     (SELECT commit_sha FROM runs WHERE request_id = r.id AND commit_sha IS NOT NULL ORDER BY id DESC LIMIT 1) AS commit_sha,
     (SELECT group_concat(DISTINCT g.name) FROM request_projects rp JOIN projects p ON p.id = rp.project_id
       JOIN deploy_groups g ON g.id = p.deploy_group_id WHERE rp.request_id = r.id) AS groups,
-    (SELECT json_array_length(flags) FROM runs WHERE request_id = r.id ORDER BY id DESC LIMIT 1) AS flag_count
+    (SELECT json_array_length(flags) FROM runs WHERE request_id = r.id ORDER BY id DESC LIMIT 1) AS flag_count,
+    (SELECT json_group_array(json_array(step, exit_code)) FROM (SELECT step, exit_code FROM steps
+      WHERE run_id = (SELECT MAX(id) FROM runs WHERE request_id = r.id) ORDER BY id)) AS track
     FROM requests r WHERE ${where} ORDER BY ${order}`).all(...args) as (ReqRow & { holder: string | null })[];
 
   // A runner as the pages name it: this machine's by its host, an attached one by its runner key.
@@ -362,6 +368,7 @@ export function startServer(o: ServerOptions) {
   // works on and how many queued requests wait for it.
   function runners(waitingFor: Map<string, number>, now = Date.now()): RunnerInfo[] {
     const leases = leaseHosts();
+    const slots = runnerRow(db).workers;
     const working = db.query(`SELECT r.id, r.title, r.holder, ru.id AS run, ru.current_step AS step FROM requests r
       LEFT JOIN runs ru ON ru.id = (SELECT MAX(id) FROM runs WHERE request_id = r.id AND status = 'running')
       WHERE r.status = 'running' AND r.holder IS NOT NULL ORDER BY r.id`).all() as
@@ -370,7 +377,8 @@ export function startServer(o: ServerOptions) {
     return [LOCAL, ...keys].map((h) => {
       const l = leases.get(h);
       const mine = working.filter((w) => w.holder === h).map(({ id, title, run, step }) => ({ id, title, run, step }));
-      return { name: nameOf(h, leases), local: h === LOCAL, online: !!l && l.expires_at > now, running: mine.length, working: mine, waiting: waitingFor.get(h) ?? 0 };
+      return { name: nameOf(h, leases), local: h === LOCAL, online: !!l && l.expires_at > now, running: mine.length, working: mine, waiting: waitingFor.get(h) ?? 0,
+        slots: h === LOCAL ? slots : null, os: h === LOCAL ? OS : null };
     });
   }
 

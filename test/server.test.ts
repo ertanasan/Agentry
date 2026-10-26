@@ -74,7 +74,7 @@ describe("sign-up and sign-in", () => {
     const h = await setup();
     const { cookie } = await h.signUp();
     const standalone = await (await h.call("/", { cookie })).text();
-    expect(standalone).toContain("Runner offline");
+    expect(standalone).toContain('<span class="doing">offline</span>');
     expect(standalone).toContain('action="/requests"');
 
     writeFileSync(join(h.home, "queue.json"), JSON.stringify({ url: "https://winhost.example.ts.net", key: "agentry_rk_x" }));
@@ -84,7 +84,7 @@ describe("sign-up and sign-in", () => {
     expect(page).toContain(`This machine's runner works <strong>${link}</strong>'s queue`);
     expect(page).toContain('(<a href="https://winhost.example.ts.net/settings">its settings</a>)');
     expect(page).toContain("<code>agentry detach</code> on this machine brings back its own queue.");
-    expect(page).not.toContain("Runner offline");
+    expect(page).not.toContain('<span class="doing">offline');
     expect(page).not.toContain("0 running, 0 queued"); // this machine's own queue isn't worked while attached
     expect(page).not.toContain('action="/requests"');
     const r = await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "Here anyway" } });
@@ -203,7 +203,7 @@ describe("actions", () => {
     expect(bad.status).toBe(400);
     expect(await bad.text()).toContain('<option value="">Default: Claude Code</option>');
     expect(h.db.query("SELECT title, ai_agent FROM requests ORDER BY id").all()).toEqual([{ title: "Mine", ai_agent: "codex" }, { title: "Default", ai_agent: null }]);
-    expect(await (await h.call("/", { cookie })).text()).toContain('<span class="num">#1</span><span>vt-web</span>\n    <span>Codex</span>');
+    expect(await (await h.call("/", { cookie })).text()).toContain('<span>vt-web</span>\n    <span>Codex</span>');
     h.db.query("UPDATE requests SET status = 'done' WHERE id = 1").run();
     expect((await h.call("/requests/1/reopen", { method: "POST", cookie, form: { text: "still broken" } })).status).toBe(303);
     expect(h.db.query("SELECT ai_agent FROM requests WHERE reopened_from = 1").get()).toEqual({ ai_agent: "codex" });
@@ -223,7 +223,7 @@ describe("actions", () => {
     expect((await post(["vt-web", "vt-ios"])).status).toBe(303);
     expect(h.db.query("SELECT p.name FROM request_projects rp JOIN projects p ON p.id = rp.project_id WHERE rp.request_id = 1 ORDER BY p.name").all())
       .toEqual([{ name: "vt-ios" }, { name: "vt-web" }]);
-    expect(await (await h.call("/", { cookie })).text()).toContain('<span class="num">#1</span><span>vt-web, vt-ios</span>');
+    expect(await (await h.call("/", { cookie })).text()).toContain('<span>vt-web, vt-ios</span>');
     // Refused: the form comes back open with the reason and what was typed.
     const mixed = await post(["vt-web", "habit"]);
     expect(mixed.status).toBe(400);
@@ -272,8 +272,8 @@ describe("actions", () => {
     h.db.query("INSERT INTO leases (holder, token, pid, host, expires_at) VALUES ('local', 't', 1, 'winhost', ?)").run(Date.now() + 60_000);
     await h.call("/requests", { method: "POST", cookie, form: { project: "vt-web", title: "for the mac" } });
     const page = await (await h.call("/", { cookie })).text();
-    expect(page).toContain("winhost online");
-    expect(page).toContain("machost offline");
+    expect(page).toContain('</span>winhost</b>\n      <span class="doing">online</span>');
+    expect(page).toContain('</span>machost</b>\n      <span class="doing">offline, 1 waiting</span>');
     expect(page).toContain('<span class="st attn"><i aria-hidden="true"></i></span>waiting for machost</p>');
     expect(page).toContain('<div class="alert attn"><div class="what">machost is offline: 1 request waits.</div></div>');
   });
@@ -285,7 +285,7 @@ describe("actions", () => {
     h.db.exec(`INSERT INTO requests (project_id, title, status, holder, created_at, updated_at) VALUES (1, 'busy', 'running', 'local', 0, 0);
       INSERT INTO runs (request_id, attempt, status, current_step, holder, started_at) VALUES (1, 1, 'running', 'build', 'local', 0);`);
     const page = await (await h.call("/", { cookie })).text();
-    expect(page).toContain('Runner online on winhost · <a href="/runs/1">#1 Build</a>');
+    expect(page).toContain('</span>winhost</b>\n      <span class="doing">online · <a href="/runs/1">#1 Build</a></span>');
     expect(page).toContain("<span>on winhost</span>");
   });
 

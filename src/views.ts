@@ -19,125 +19,201 @@ export function html(strings: TemplateStringsArray, ...values: unknown[]): Html 
   return new Html(out);
 }
 
-// One quiet operations look: the system font, neutral surfaces, one accent for actions, and four state colors that
-// always come with a shape and a word. Both themes follow the device; dark text sits on the dark theme's accent.
+
+// Proof of delivery: every request is a parcel on kraft board, its label boxed in black rules and tracked stop by
+// stop until production runs its commit. One family, Archivo, condensed for routing numbers, heads and stickers.
+// States are handling stickers: a color, a shape and a word. Both themes follow the device.
 const CSS = `
+@font-face { font-family: Archivo; src: url(/static/archivo.woff2) format("woff2"); font-weight: 100 900; font-stretch: 62% 125%; font-display: swap; }
 :root { color-scheme: light dark;
-  --bg:#f6f6f4; --surface:#fff; --sunk:#efefec; --fg:#18181d; --muted:#5d5d68; --line:#e2e2e0;
-  --accent:#2350c8; --on-accent:#fff; --attn:#9a4a00; --work:#2350c8; --fail:#b42318; --done:#1b7a36; }
+  --ground:#d5c4a5; --on-ground:#4a4031; --label:#fff; --sunk:#f3eee5; --ink:#141414; --muted:#5b5348; --hair:rgb(20 20 20 / .14); --rule:#141414;
+  --band:#141414; --on-band:#f5f0e6; --band-muted:#b8ae9e; --band-line:rgb(245 240 230 / .24);
+  --band-done:#62d27e; --band-fail:#ff8a7a; --band-attn:#f6a465; --band-work:#8fb0ff;
+  --attn:#e5641a; --attn-t:#a8430a; --on-attn:#141414; --work:#2b54c9; --on-work:#fff;
+  --fail:#c8231c; --on-fail:#fff; --done:#1e7a3c; --on-done:#fff; --idle:#6b6255; }
 @media (prefers-color-scheme: dark) { :root {
-  --bg:#111114; --surface:#19191e; --sunk:#0c0c0f; --fg:#ececf0; --muted:#a3a3ae; --line:#2c2c34;
-  --accent:#8fb0ff; --on-accent:#0b1222; --attn:#f2a65a; --work:#8fb0ff; --fail:#ff8a80; --done:#62d27e; } }
-* { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
-body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; caret-color: var(--accent); }
-::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
-a { color: var(--accent); text-underline-offset: .2em; }
-main { max-width: 760px; margin: 0 auto; padding: 0 16px 48px; }
+  --ground:#34291e; --on-ground:#c4b8a4; --label:#44382b; --sunk:#3b3024; --ink:#f1ebe0; --muted:#b9ae9c; --hair:rgb(241 235 224 / .13); --rule:#a89c87;
+  --band:#0c0b09; --on-band:#f1ebe0; --band-muted:#a69c8b; --band-line:rgb(241 235 224 / .2);
+  --attn:#f0893c; --attn-t:#f6a465; --on-attn:#141414; --work:#8fb0ff; --on-work:#0b1222;
+  --fail:#ff9a8f; --on-fail:#1a0806; --done:#62d27e; --on-done:#06190c; --idle:#b3a894; } }
+* { box-sizing: border-box; scrollbar-color: color-mix(in srgb, var(--ink) 35%, transparent) transparent; }
+html { -webkit-text-size-adjust: 100%; background: var(--ground); }
+body { margin: 0; background: var(--ground); color: var(--ink); font: 16px/1.5 Archivo, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; caret-color: var(--work); }
+::selection { background: color-mix(in srgb, var(--attn) 45%, transparent); }
+:focus-visible { outline: 3px solid var(--work); outline-offset: 2px; }
+.band :focus-visible { outline-color: var(--band-work); }
+a { color: inherit; text-decoration-thickness: 1.5px; text-underline-offset: .2em; }
+.wrap, main { max-width: 760px; margin: 0 auto; padding: 0 16px; }
+main { padding-bottom: 56px; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .muted { color: var(--muted); }
-.num, table, .meta { font-variant-numeric: tabular-nums; }
-code, pre, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.num, table, .meta, .no { font-variant-numeric: tabular-nums; }
+code, pre, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
 .mono { font-size: .9em; }
 p, .hint, .why { text-wrap: pretty; }
-code { font-size: .9em; background: var(--sunk); padding: 1px 5px; border-radius: 4px; }
+code { font-size: .9em; background: var(--sunk); padding: 1px 5px; border-radius: 2px; }
 
-header.top { display: flex; align-items: center; gap: 4px 16px; flex-wrap: wrap; padding: 12px 0; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
-.brand { font-weight: 650; font-size: 17px; color: var(--fg); text-decoration: none; margin-right: auto; display: inline-flex; align-items: center; gap: 8px; min-height: 44px; }
-.brand img { width: 22px; height: 22px; border-radius: 5px; }
-nav.top { display: flex; align-items: center; gap: 2px; font-size: 15px; }
-nav.top a { color: var(--muted); text-decoration: none; padding: 10px 10px; border-radius: 8px; min-height: 44px; display: inline-flex; align-items: center; }
-nav.top a[aria-current="page"] { color: var(--fg); font-weight: 600; }
-nav.top .who { color: var(--muted); padding: 0 6px 0 12px; border-left: 1px solid var(--line); margin-left: 6px; }
-nav.top form { display: inline; }
-nav.top button.link { color: var(--muted); }
+/* The header band: thermal black, with the wordmark, the nav, and on the home page one plate per runner. */
+.band { background: var(--band); color: var(--on-band); }
+.band a { color: var(--on-band); }
+.bar { display: flex; align-items: center; gap: 4px 16px; flex-wrap: wrap; min-height: 60px; }
+.brand { font-weight: 800; font-stretch: 72%; font-size: 23px; letter-spacing: .04em; text-transform: uppercase; text-decoration: none;
+  margin-right: auto; display: inline-flex; align-items: center; gap: 10px; min-height: 44px; }
+.brand img { width: 24px; height: 24px; border-radius: 5px; }
+.bar nav { display: flex; align-items: center; gap: 2px; font-size: 15px; }
+.bar nav a { color: var(--band-muted); text-decoration: none; padding: 10px; min-height: 44px; display: inline-flex; align-items: center; }
+.bar nav a:hover { color: var(--on-band); }
+.bar nav a[aria-current="page"] { color: var(--on-band); font-weight: 650; box-shadow: inset 0 -3px 0 var(--attn); }
+.bar .who { color: var(--band-muted); padding: 0 6px 0 12px; border-left: 1px solid var(--band-line); margin-left: 6px; }
+.bar form { display: inline; }
+.band button.link { color: var(--band-muted); }
+.band button.link:hover { color: var(--on-band); background: none; }
+.status { padding: 2px 0 14px; }
+.plates { display: grid; grid-template-columns: repeat(auto-fill, minmax(164px, 1fr)); gap: 8px; }
+.plate { border: 1.5px solid var(--band-line); padding: 8px 11px 10px; min-width: 0; }
+.plate b { display: flex; align-items: center; gap: 8px; font-weight: 750; font-stretch: 75%; font-size: 17px; letter-spacing: .04em; text-transform: uppercase; overflow-wrap: anywhere; }
+.plate .doing { display: block; font-size: 14px; color: var(--band-muted); margin-top: 1px; overflow-wrap: anywhere; }
+.plate .doing a { color: var(--on-band); }
+.plate.off { border-color: color-mix(in srgb, var(--band-fail) 55%, transparent); }
+.plate.off .doing { color: var(--band-fail); }
+.plate .os { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--band-muted); margin-top: 1px; }
+.slots { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.slots i { width: 18px; height: 7px; border: 1.5px solid var(--band-muted); }
+.slots i.on { background: var(--on-band); border-color: var(--on-band); }
+.counts { display: flex; flex-wrap: wrap; gap: 2px 14px; margin: 10px 0 0; font-size: 14px; color: var(--band-muted); }
+.band .st.done { color: var(--band-done); } .band .st.fail { color: var(--band-fail); }
+.band .st.attn { color: var(--band-attn); } .band .st.work { color: var(--band-work); }
+.modebar { margin: 0 0 14px; padding: 12px 14px; border: 1.5px solid var(--band-line); }
+.modebar strong { font-weight: 650; }
+.modebar p { margin: 0; } .modebar .hint { margin-top: 6px; color: var(--band-muted); }
+.modebar code { background: rgb(255 255 255 / .1); }
 
-.modebar { margin: 12px 0 0; padding: 12px 14px; border-radius: 10px; background: color-mix(in srgb, var(--work) 12%, var(--surface)); }
-.modebar strong { font-weight: 600; }
-.modebar p { margin: 0; } .modebar .hint { margin-top: 6px; }
-
-h1 { font-size: 25px; line-height: 1.3; font-weight: 650; margin: 24px 0 6px; letter-spacing: -.01em; text-wrap: balance; }
-h2 { font-size: 20px; font-weight: 650; margin: 36px 0 12px; padding-top: 14px; border-top: 1px solid var(--line); display: flex; align-items: baseline; gap: 8px; letter-spacing: -.005em; }
-h2 .count { font-weight: 500; color: var(--muted); }
-h3 { font-size: 15px; font-weight: 600; margin: 0; }
+h1 { font-size: 26px; line-height: 1.25; font-weight: 700; margin: 24px 0 6px; letter-spacing: -.01em; text-wrap: balance; }
+h2 { font-size: 15px; font-weight: 800; font-stretch: 72%; letter-spacing: .1em; text-transform: uppercase; margin: 34px 0 10px;
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+h2 .count { font-weight: 700; color: var(--on-ground); letter-spacing: .04em; }
+h3 { font-size: 15px; font-weight: 650; margin: 0; }
 p { margin: 6px 0; }
 
-.statusbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin: 14px 0 0; color: var(--muted); font-size: 15px; }
-.statusbar .runner { color: var(--fg); font-weight: 550; display: inline-flex; align-items: center; gap: 8px; }
+/* A label: white thermal stock boxed in a heavy rule. */
+.label, .card, .settings-section { background: var(--label); border: 2px solid var(--rule); }
+.card { padding: 14px; margin: 12px 0; }
+.settings-section { padding: 4px 14px 16px; }
+.sheet { margin-top: 28px; padding: 2px 18px 18px; }
+.sheet h1 { margin-top: 18px; }
 
-.flash { margin: 14px 0 0; padding: 12px 14px; border-radius: 10px; }
-.flash.ok { background: color-mix(in srgb, var(--done) 13%, var(--surface)); }
-.flash.bad { background: color-mix(in srgb, var(--fail) 13%, var(--surface)); }
+.flash { margin: 16px 0 0; padding: 12px 14px 12px 40px; position: relative; background: var(--label); border: 2px solid var(--rule); }
+.flash.ok, .flash.bad { color: var(--ink); }
+.alerts { display: grid; gap: 8px; margin-top: 16px; }
+.alert { padding: 12px 14px 12px 40px; position: relative; background: var(--label); border: 2px solid var(--rule); display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.alert .what { flex: 1 1 240px; }
+.flash::before, .alert::before { content: ""; position: absolute; left: 15px; top: 18px; width: 12px; height: 12px; }
+.alert.attn::before { background: var(--attn); transform: rotate(45deg); }
+.alert.fail::before, .flash.bad::before { background: var(--fail); border-radius: 2px; }
+.flash.ok::before { border: 2px solid var(--ink); border-radius: 50%; }
 
-.alerts { display: grid; gap: 8px; margin-top: 14px; }
-.alert { padding: 12px 14px; border-radius: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
-.alert .what { flex: 1 1 260px; }
-.alert.fail { background: color-mix(in srgb, var(--fail) 12%, var(--surface)); }
-.alert.attn { background: color-mix(in srgb, var(--attn) 13%, var(--surface)); }
-
-/* A state: a shape and a word, colored by its family (waiting on you, working, failed, finished, idle). */
-.st { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; white-space: nowrap; }
-.st i { width: 9px; height: 9px; flex: none; display: inline-block; background: currentColor; }
-.st.attn { color: var(--attn); } .st.attn i { transform: rotate(45deg); width: 8px; height: 8px; }
-.st.work { color: var(--work); } .st.work i { border-radius: 50%; background: none; border: 2px solid currentColor; }
-.st.work.now i { background: currentColor; animation: beat 1.6s ease-out infinite; }
-.st.fail { color: var(--fail); } .st.fail i { border-radius: 2px; }
-.st.done { color: var(--done); } .st.done i { border-radius: 50%; }
-.st.idle { color: var(--muted); } .st.idle i { height: 2px; border-radius: 1px; }
+/* A state's mark: waiting on you is a diamond, working a ring (filled and beating while it runs), failed a square,
+   finished a disc, idle a bar. As a sticker it is printed on its family's color; inline, it colors its word. */
+.st { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 650; white-space: nowrap; }
+.st i, .sticker i { width: 9px; height: 9px; flex: none; display: inline-block; background: currentColor; }
+:is(.st, .sticker).attn i { transform: rotate(45deg); width: 8px; height: 8px; }
+:is(.st, .sticker).work i { border-radius: 50%; background: none; border: 2px solid currentColor; }
+:is(.st, .sticker).work.now i { background: currentColor; animation: beat 1.6s ease-out infinite; }
+:is(.st, .sticker).fail i { border-radius: 1px; }
+:is(.st, .sticker).done i { border-radius: 50%; }
+:is(.st, .sticker).idle i { height: 2px; }
+.st.attn { color: var(--attn-t); } .st.work { color: var(--work); } .st.fail { color: var(--fail); } .st.done { color: var(--done); } .st.idle { color: var(--idle); }
+.sticker { display: inline-flex; align-items: center; gap: 6px; padding: 1px 7px 1px 6px; font-size: 13px; font-weight: 800; font-stretch: 75%;
+  letter-spacing: .07em; text-transform: uppercase; white-space: nowrap; line-height: 1.5; }
+.sticker.attn { background: var(--attn); color: var(--on-attn); } .sticker.work { background: var(--work); color: var(--on-work); }
+.sticker.fail { background: var(--fail); color: var(--on-fail); } .sticker.done { background: var(--done); color: var(--on-done); }
+.sticker.idle { color: var(--idle); box-shadow: inset 0 0 0 1.5px currentColor; }
 @keyframes beat { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 55%, transparent); } 100% { box-shadow: 0 0 0 7px transparent; } }
-@media (prefers-reduced-motion: reduce) { .st.work.now i { animation: none; } }
 
-.list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
-.list > li { padding: 12px 0; border-bottom: 1px solid var(--line); }
-.req .title { font-weight: 600; color: var(--fg); text-decoration: none; overflow-wrap: anywhere; }
+/* A request: its routing number, then what it is and where it stands; in a list, its track at the same x on every row. */
+.req { display: grid; grid-template-columns: 3.4em 1fr auto; gap: 0 12px; align-items: start; }
+.no { font-weight: 850; font-stretch: 62%; font-size: 24px; line-height: 1.1; letter-spacing: .01em; white-space: nowrap; }
+.no .h { font-size: .55em; font-weight: 650; color: var(--muted); vertical-align: .55em; margin-right: 1px; }
+.req .body { min-width: 0; }
+.req .title { display: block; font-weight: 650; line-height: 1.3; color: var(--ink); text-decoration: none; overflow-wrap: anywhere; }
 .req a.title:hover { text-decoration: underline; }
-.req .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 4px; font-size: 14px; color: var(--muted); }
+.req .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 5px; font-size: 14px; color: var(--muted); }
 .req .why { margin: 6px 0 0; font-size: 15px; overflow-wrap: anywhere; }
-.req .why.wait { color: var(--attn); font-weight: 550; display: flex; align-items: baseline; gap: 8px; }
-.empty { color: var(--muted); margin: 8px 0; }
-.cards { list-style: none; margin: 0; padding: 0; }
+.req .why.wait { color: var(--attn-t); font-weight: 600; display: flex; align-items: baseline; gap: 8px; }
+.list { list-style: none; margin: 0; padding: 0; background: var(--label); border: 2px solid var(--rule); }
+.list > li { padding: 12px; border-top: 1px solid var(--hair); }
+.list > li:first-child { border-top: 0; }
+.list > li > details { margin-left: calc(3.4em + 12px); }
+.cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.parcel .req { grid-template-columns: auto 1fr; gap: 0; border-bottom: 2px solid var(--rule); }
+.parcel .no { font-size: 40px; line-height: 1; padding: 10px 12px 8px; border-right: 2px solid var(--rule); align-self: stretch; min-width: 3.2ch; }
+.parcel .req .body { padding: 10px 12px 12px; }
+.parcel .lb { padding: 2px 12px 14px; }
+.parcel h1 { margin: 0; font-size: 22px; }
+#live > .parcel { margin-top: 20px; }
+.empty { margin: 0; padding: 14px; color: var(--on-ground); border: 2px dashed color-mix(in srgb, var(--ink) 35%, transparent); }
 
-.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 10px 0; }
-.ask { margin: 10px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--sunk); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The track: a request's five stops on one rule, solid where it has been, dotted where it has yet to go. */
+.track { list-style: none; margin: 14px 0 6px; padding: 0; display: grid; grid-template-columns: repeat(5, 1fr); }
+.track li { position: relative; padding-top: 22px; font-size: 12px; font-weight: 750; font-stretch: 80%; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.track li::before { content: ""; position: absolute; z-index: 1; top: 0; left: 0; width: 14px; height: 14px; border: 2px solid var(--ink); border-radius: 50%; background: var(--label); }
+.track li::after { content: ""; position: absolute; top: 6px; left: 14px; right: 0; height: 2px; background: repeating-linear-gradient(90deg, var(--ink) 0 3px, transparent 3px 7px); opacity: .55; }
+.track li:last-child::after { display: none; }
+.track li.done { color: var(--ink); } .track li.done::before { background: var(--ink); }
+.track li.done::after { background: var(--ink); opacity: 1; }
+.track li.now { color: var(--work); } .track li.now::before { border-color: var(--work); background: var(--work); color: var(--work); animation: beat 1.6s ease-out infinite; }
+.track li.fail { color: var(--fail); } .track li.fail::before { border-color: var(--fail); background: var(--fail); border-radius: 2px; }
+.track li.hold { color: var(--attn-t); } .track li.hold::before { border-color: var(--attn); background: var(--attn); border-radius: 1px; transform: rotate(45deg) scale(.86); }
+.track .when { display: block; font-size: 12.5px; font-weight: 500; font-stretch: 100%; letter-spacing: 0; text-transform: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.track.mini { display: flex; width: 108px; margin: 5px 0 0; }
+.track.mini li { flex: 1; padding-top: 10px; }
+.track.mini li:last-child { flex: none; width: 10px; }
+.track.mini li::before { width: 10px; height: 10px; border-width: 1.5px; }
+.track.mini li::after { top: 4px; left: 10px; height: 1.5px; }
+.track.mini .lbl { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .track li.now::before, :is(.st, .sticker).work.now i { animation: none; } }
+.proof { margin: 0 -6px; padding: 12px 14px; border-top: 2px solid var(--rule); background: color-mix(in srgb, var(--done) 12%, var(--label)); overflow-wrap: anywhere; }
+
+.ask { margin: 10px 0 0; padding: 10px 12px; background: var(--sunk); white-space: pre-wrap; overflow-wrap: anywhere; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin-top: 12px; }
 .actions form { display: inline; margin: 0; }
 .hint { font-size: 14px; color: var(--muted); margin: 6px 0 0; }
 
-label { display: block; font-size: 14px; font-weight: 600; margin: 14px 0 6px; }
-label .opt { font-weight: 400; color: var(--muted); }
-fieldset { border: 0; margin: 14px 0 0; padding: 0; min-width: 0; }
-legend { font-size: 14px; font-weight: 600; padding: 0; margin-bottom: 6px; }
+label { display: block; font-size: 13px; font-weight: 750; font-stretch: 85%; letter-spacing: .06em; text-transform: uppercase; margin: 16px 0 6px; }
+label .opt { font-weight: 500; font-stretch: 100%; letter-spacing: 0; text-transform: none; color: var(--muted); }
+fieldset { border: 0; margin: 16px 0 0; padding: 0; min-width: 0; }
+legend { font-size: 13px; font-weight: 750; font-stretch: 85%; letter-spacing: .06em; text-transform: uppercase; padding: 0; margin-bottom: 6px; }
 input[type=text], input[type=number], textarea, select { width: 100%; font: inherit; padding: 10px 12px; min-height: 44px;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--fg); }
-textarea { min-height: 92px; resize: vertical; }
+  border: 1.5px solid var(--ink); border-radius: 2px; background: var(--label); color: var(--ink); }
+textarea { min-height: 96px; resize: vertical; }
 ::placeholder { color: var(--muted); opacity: 1; }
-input:disabled, textarea:disabled, select:disabled { background: var(--sunk); color: var(--muted); cursor: not-allowed; }
+input:disabled, textarea:disabled, select:disabled { background: var(--sunk); color: var(--muted); border-style: dashed; border-color: var(--muted); cursor: not-allowed; }
 input[type=file] { font: inherit; font-size: 14px; color: var(--muted); max-width: 100%; }
-input[type=file]::file-selector-button { font: inherit; font-size: 15px; min-height: 44px; padding: 8px 14px; margin-right: 10px; border-radius: 8px;
-  border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; }
+input[type=file]::file-selector-button { font: inherit; font-size: 15px; font-weight: 650; min-height: 44px; padding: 8px 14px; margin-right: 10px; border-radius: 2px;
+  border: 2px solid var(--ink); background: var(--label); color: var(--ink); cursor: pointer; }
 .picks { display: flex; flex-wrap: wrap; gap: 8px; }
-.picks label { display: inline-flex; align-items: center; gap: 8px; margin: 0; font-weight: 500; min-height: 44px; padding: 0 14px;
-  border: 1px solid var(--line); border-radius: 999px; background: var(--surface); cursor: pointer; }
-.picks label:has(input:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
-.picks input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
-.field-error { color: var(--fail); font-size: 14px; margin: 10px 0 0; }
+.picks label { display: inline-flex; align-items: center; gap: 8px; margin: 0; font-size: 15px; font-weight: 600; font-stretch: 100%; letter-spacing: 0; text-transform: none;
+  min-height: 44px; padding: 0 14px; border: 2px solid var(--ink); background: var(--label); cursor: pointer; }
+.picks label:has(input:checked) { background: var(--ink); color: var(--label); }
+.picks input { width: 18px; height: 18px; margin: 0; accent-color: var(--attn); }
+.field-error { color: var(--fail); font-size: 14px; font-weight: 600; margin: 12px 0 0; }
 
-button, .btn { font: inherit; font-size: 15px; font-weight: 550; min-height: 44px; padding: 9px 16px; border-radius: 9px; cursor: pointer;
-  border: 1px solid var(--line); background: var(--surface); color: var(--fg); display: inline-flex; align-items: center; justify-content: center;
-  gap: 6px; text-decoration: none; transition: background-color .15s ease-out, border-color .15s ease-out; }
-button:hover, .btn:hover { border-color: color-mix(in srgb, var(--fg) 30%, var(--line)); }
-button.primary, .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-button.primary:hover { background: color-mix(in srgb, var(--accent) 88%, var(--fg)); }
-button.danger, .btn.danger { color: var(--fail); }
-button:disabled { opacity: .55; cursor: not-allowed; }
+button, .btn { font: inherit; font-size: 15px; font-weight: 650; min-height: 44px; padding: 8px 16px; border-radius: 2px; cursor: pointer;
+  border: 2px solid var(--ink); background: var(--label); color: var(--ink); display: inline-flex; align-items: center; justify-content: center;
+  gap: 6px; text-decoration: none; transition: background-color .15s ease-out, color .15s ease-out; }
+button:hover, .btn:hover { background: var(--sunk); }
+button.primary, .btn.primary { background: var(--ink); color: var(--label); }
+button.primary:hover, .btn.primary:hover { background: color-mix(in srgb, var(--ink) 80%, var(--label)); }
+button.danger, .btn.danger { color: var(--fail); border-color: var(--fail); }
+button:disabled { opacity: .5; cursor: not-allowed; }
 button.link { background: none; border: 0; padding: 10px 6px; font-weight: 500; }
 
 /* A disclosure: a 44 px row that opens a short form. A confirm is one with a button as its summary. */
 details > summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; gap: 8px; list-style: none; }
 details > summary::-webkit-details-marker { display: none; }
-details.more > summary { color: var(--accent); font-weight: 550; font-size: 15px; }
-details.more > summary::before { content: ""; width: 7px; height: 7px; border: solid currentColor; border-width: 0 2px 2px 0; transform: rotate(-45deg); transition: transform .15s ease-out; margin: 0 2px; }
+details.more > summary { font-weight: 650; font-size: 15px; }
+details.more > summary:hover { text-decoration: underline; text-underline-offset: .2em; }
+details.more > summary::before { content: ""; width: 7px; height: 7px; border: solid currentColor; border-width: 0 2px 2px 0; transform: rotate(-45deg); transition: transform .15s ease-out; margin: 0 3px; }
 details.more[open] > summary::before { transform: rotate(45deg); }
 details.confirm, details.answer { display: inline-block; }
 details.answer > summary { display: inline-flex; }
@@ -145,40 +221,40 @@ details.answer[open] { display: block; flex-basis: 100%; }
 details.answer[open] > summary { display: none; }
 details.confirm > summary { display: inline-flex; }
 details.confirm[open] { display: block; flex-basis: 100%; }
-.confirm-body { margin-top: 8px; padding: 12px; border-radius: 10px; background: color-mix(in srgb, var(--fail) 10%, var(--surface)); }
+.confirm-body { margin-top: 8px; padding: 12px; border: 2px dashed var(--fail); background: color-mix(in srgb, var(--fail) 8%, var(--label)); }
 .confirm-body .actions { margin-top: 8px; }
-.confirm.go .confirm-body { background: color-mix(in srgb, var(--attn) 11%, var(--surface)); }
+.confirm.go .confirm-body { border-color: var(--attn); background: color-mix(in srgb, var(--attn) 10%, var(--label)); }
 
-details.new { margin-top: 16px; }
-details.new > summary { font-weight: 600; font-size: 16px; color: var(--on-accent); background: var(--accent); border-radius: 10px; padding: 0 16px; width: fit-content; }
-details.new[open] > summary { color: var(--fg); background: none; padding: 0; }
-details.new > summary::before { content: "+"; font-size: 20px; font-weight: 500; line-height: 1; }
-details.new[open] > summary::before { content: "–"; }
-details.new form { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px 14px; margin-top: 6px; }
+/* New request: a black bar that opens into a label. */
+details.new { margin-top: 18px; }
+details.new > summary { min-height: 52px; padding: 0 18px; justify-content: center; background: var(--ink); color: var(--label);
+  font-weight: 800; font-stretch: 72%; font-size: 18px; letter-spacing: .08em; text-transform: uppercase; }
+details.new > summary:hover { background: color-mix(in srgb, var(--ink) 85%, var(--label)); }
+details.new > summary::before { content: ""; width: 14px; height: 14px; flex: none;
+  background: linear-gradient(currentColor, currentColor) center / 100% 2.5px no-repeat, linear-gradient(currentColor, currentColor) center / 2.5px 100% no-repeat; }
+details.new[open] { background: var(--label); border: 2px solid var(--rule); }
+details.new[open] > summary { justify-content: flex-start; background: none; color: var(--ink); border-bottom: 1px solid var(--hair); }
+details.new[open] > summary::before { background: linear-gradient(currentColor, currentColor) center / 100% 2.5px no-repeat; }
+details.new form { padding: 0 14px 16px; }
 
 .thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.thumbs img { height: 56px; max-width: 120px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); display: block; }
-.thumbs a.file { display: inline-flex; align-items: center; min-height: 32px; border: 1px solid var(--line); border-radius: 6px; padding: 2px 10px; font-size: 14px; }
+.thumbs img { height: 56px; max-width: 120px; object-fit: cover; border: 1.5px solid var(--hair); display: block; }
+.thumbs a.file { display: inline-flex; align-items: center; min-height: 44px; border: 1.5px solid var(--ink); padding: 2px 10px; font-size: 14px; text-decoration: none; }
 
-/* The run page: the pipeline, the steps and the log of a run. */
-.pipeline { list-style: none; margin: 18px 0 0; padding: 0; display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
-.pipeline li { font-size: 13px; font-weight: 600; color: var(--muted); padding-top: 10px; position: relative; }
-.pipeline li::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 4px; border-radius: 2px; background: var(--line); }
-.pipeline li.done { color: var(--fg); } .pipeline li.done::before { background: var(--done); }
-.pipeline li.fail { color: var(--fail); } .pipeline li.fail::before { background: var(--fail); }
-.pipeline li.now { color: var(--work); } .pipeline li.now::before { background: var(--work); animation: glow 1.6s ease-in-out infinite alternate; }
-@keyframes glow { from { opacity: .45; } to { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .pipeline li.now::before { animation: none; } }
-.live { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--work); }
+/* The run page: its label and track, the steps, and the log. */
+.live { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 650; color: var(--work); }
 table { width: 100%; border-collapse: collapse; font-size: 15px; }
-th { text-align: left; font-size: 13px; font-weight: 600; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line); }
-td { text-align: left; padding: 0 8px; border-bottom: 1px solid var(--line); height: 44px; }
+th { text-align: left; font-size: 12px; font-weight: 750; font-stretch: 85%; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 8px; border-bottom: 2px solid var(--rule); }
+td { text-align: left; padding: 0 8px; border-bottom: 1px solid var(--hair); height: 44px; }
+tbody tr:last-child td { border-bottom: 0; }
 td.n, th.n { width: 2.5em; color: var(--muted); } td.t, th.t { text-align: right; white-space: nowrap; } td.nw { white-space: nowrap; }
-tr[aria-current] td { background: color-mix(in srgb, var(--accent) 9%, transparent); }
-tr[aria-current] td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+tr[aria-current] td { background: var(--sunk); font-weight: 650; }
 td a { display: block; padding: 11px 0; }
-.ok { color: var(--done); } .bad { color: var(--fail); } .warn { color: var(--attn); }
-pre { background: var(--sunk); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 8px 0 0; overflow: auto;
+.steps { padding: 0 6px; }
+.ok { color: var(--done); } .bad { color: var(--fail); } .warn { color: var(--attn-t); }
+p.warn { position: relative; padding-left: 20px; }
+p.warn::before { content: ""; position: absolute; left: 2px; top: .55em; width: 8px; height: 8px; background: currentColor; transform: rotate(45deg); }
+pre { background: var(--label); border: 2px solid var(--rule); padding: 12px; margin: 8px 0 0; overflow: auto;
   font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; }
 pre.wide { white-space: pre; overflow-wrap: normal; }
 .flags { list-style: none; padding: 0; margin: 0; }
@@ -186,7 +262,6 @@ pre.wide { white-space: pre; overflow-wrap: normal; }
 .flagbox { margin-top: 12px; }
 .flagbox .flags { margin-top: 4px; }
 .panel { margin-top: 10px; }
-.settings-section { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px 14px; }
 .settings-section table { margin-top: 8px; }
 .link-box { overflow-wrap: anywhere; }
 .message::first-letter { text-transform: uppercase; }
@@ -194,21 +269,26 @@ pre.wide { white-space: pre; overflow-wrap: normal; }
 
 export type Nav = "home" | "settings" | null;
 
-// `attachedTo`: the queue this machine's runner works instead of its own; every page then says so.
-export function page(title: string, body: Html, user?: User | null, extraHead: Html = html``, o: { nav?: Nav; attachedTo?: string | null } = {}): string {
+// `attachedTo`: the queue this machine's runner works instead of its own; every page then says so. `band`: what the
+// page adds to the header band (the home page's runner plates).
+export function page(title: string, body: Html, user?: User | null, extraHead: Html = html``,
+  o: { nav?: Nav; attachedTo?: string | null; band?: Html } = {}): string {
   const here = (n: Nav) => o.nav === n ? html` aria-current="page"` : html``;
   return html`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title} · Agentry</title><link rel="icon" href="/static/icon.png" type="image/png">
-<link rel="apple-touch-icon" href="/static/apple-touch-icon.png"><meta name="apple-mobile-web-app-title" content="Agentry"><style>${new Html(CSS)}</style>
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png"><meta name="apple-mobile-web-app-title" content="Agentry">
+<link rel="preload" href="/static/archivo.woff2" as="font" type="font/woff2" crossorigin><style>${new Html(CSS)}</style>
 <script src="/static/offline.js" defer></script>${extraHead}</head>
-<body><main>
-<header class="top"><a class="brand" href="/"><img src="/static/icon.png" alt="">Agentry</a>${user ? html`<nav class="top" aria-label="Main">
+<body><header class="band"><div class="wrap">
+<div class="bar"><a class="brand" href="/"><img src="/static/icon.png" alt="">Agentry</a>${user ? html`<nav aria-label="Main">
   <a href="/"${here("home")}>Home</a><a href="/settings"${here("settings")}>Settings</a>
-  <span class="who">${user.name}</span><form method="post" action="/logout"><button class="link">Sign out</button></form></nav>` : ""}</header>
+  <span class="who">${user.name}</span><form method="post" action="/logout"><button class="link">Sign out</button></form></nav>` : ""}</div>
 ${user && o.attachedTo ? html`<div class="modebar"><p>This machine's runner works <strong>${queueLink(o.attachedTo)}</strong>'s queue:
   file requests, follow runs and change runner settings <a href="${o.attachedTo}">there</a> (<a href="${o.attachedTo}/settings">its settings</a>).</p>
   <p class="hint"><code>agentry detach</code> on this machine brings back its own queue.</p></div>` : ""}
+${o.band ?? ""}</div></header>
+<main>
 ${body}
 </main></body></html>`.s;
 }
@@ -225,11 +305,13 @@ export type ReqRow = {
   waiting?: string | null;                               // a queued request whose runner can't take it now: why
   runner?: string | null;                                // a running request: the runner working on it
   flag_count?: number | null;                            // the check flags of its latest run
+  track?: string | null;                                 // its latest run's steps, a JSON array of [step, exit code]
 };
 // A runner of the queue: this machine's (named by its host) or an attached one (named by its runner key), what it
-// works on and how many queued requests wait for it.
+// works on and how many queued requests wait for it. `slots` and `os`: its worker count and system, when this
+// machine knows them.
 export type RunnerInfo = {
-  name: string; local: boolean; online: boolean; running: number; waiting: number;
+  name: string; local: boolean; online: boolean; running: number; waiting: number; slots?: number | null; os?: string | null;
   working: { id: number; title: string; run: number | null; step: string | null }[];
 };
 export type GroupLock = { name: string; lock_reason: string | null };
@@ -254,14 +336,44 @@ const STATES: Record<string, [string, Family]> = {
   needs_review: ["Needs approval", "attn"], blocked_pre_push: ["Failed", "fail"], blocked_post_push: ["Deploy failed", "fail"],
   done: ["Done", "done"], done_manual: ["Done by hand", "done"], canceled: ["Canceled", "idle"],
 };
+// A request's state as its sticker.
 function stateOf(status: string, reason: string | null): Html {
   const [label, family] = STATES[status] ?? [status, "idle" as Family];
   const word = status === "done" && reason === "deployed" ? "Deployed" : status === "done" && reason === "built" ? "Built" : label;
-  return html`<span class="st ${family}${status === "running" ? " now" : ""}"><i aria-hidden="true"></i>${word}</span>`;
+  return html`<span class="sticker ${family}${status === "running" ? " now" : ""}"><i aria-hidden="true"></i>${word}</span>`;
 }
 // The reason worth showing under a request: "deployed" and "built" are already in its state.
 const reasonOf = (r: { status: string; status_reason: string | null }) =>
   r.status_reason && !(r.status === "done" && ["deployed", "built"].includes(r.status_reason)) ? r.status_reason : null;
+
+const STEP_NAMES: Record<string, string> = {
+  version: "Live version", agent: "Agent", build: "Build", test: "Test", verify: "Verify", remote_busy: "Install check", deploy: "Deploy",
+};
+// The five stops of a run, each done, running, failed, held for a person, or not reached ("").
+const STAGES = ["agent", "build", "test", "verify", "deploy"];
+type Stop = "" | "done" | "now" | "fail" | "hold";
+// `status`: the request's, when these are its latest run's steps. A request waiting on you, or stopped with no step
+// failing (a scope or check stop), is held or stopped at the first stop it hasn't reached.
+function stopsOf(steps: [string, number | null][], status: string | null): Stop[] {
+  if (status === "queued") return STAGES.map(() => "");
+  const stops = STAGES.map((name): Stop => {
+    const mine = steps.filter(([s]) => s === name);
+    return !mine.length ? "" : mine.some(([, e]) => e === null) ? "now" : mine.some(([, e]) => e !== 0) ? "fail" : "done";
+  });
+  const family = status ? STATES[status]?.[1] : null;
+  if ((family === "attn" || family === "fail") && !stops.includes("fail") && !stops.includes("now")) {
+    const next = stops.indexOf("");
+    stops[next === -1 ? stops.length - 1 : next] = family === "attn" ? "hold" : "fail";
+  }
+  return stops;
+}
+const reqStops = (r: ReqRow) => stopsOf(JSON.parse(r.track || "[]"), r.status);
+// `mini`: the list form, marks only, at the same width on every row. `times`: how long each stop took.
+function track(stops: Stop[], o: { mini?: boolean; times?: string[] } = {}): Html {
+  const said = { "": "not reached", now: "running", fail: "failed", done: "done", hold: "waiting on you" };
+  return html`<ol class="track${o.mini ? " mini" : ""}" aria-label="Progress">${STAGES.map((name, i) => html`<li class="${stops[i]}"><span class="lbl">${STEP_NAMES[name]}</span><span class="sr">: ${said[stops[i]]}</span>${
+    o.times?.[i] ? html`<span class="when">${o.times[i]}</span>` : ""}</li>`)}</ol>`;
+}
 
 export type FileRef = { id: number; name: string; mime: string };
 
@@ -280,15 +392,21 @@ const filePicker = (id: string) => html`<label for="${id}">Files <span class="op
   <input type="file" id="${id}" name="files" accept="${ACCEPT}" multiple>
   <p class="hint">Up to 5 files of 10 MB: images, PDF, text or Office documents.</p>`;
 
-function reqLine(r: ReqRow): Html {
+const routing = (id: number) => html`<span class="no"><span class="h">#</span>${id}</span>`;
+
+// A request's line: its routing number, title, sticker and facts. `card`: on a label of its own, which shows the
+// full track below; otherwise its mini track ends the line.
+function reqLine(r: ReqRow, card = false): Html {
   const why = reasonOf(r);
   const flags = r.flag_count ?? 0;
-  return html`<div class="req">${r.last_run ? html`<a class="title" href="/runs/${r.last_run}">${r.title}</a>` : html`<span class="title">${r.title}</span>`}
-  <div class="meta">${stateOf(r.status, r.status_reason)}<span class="num">#${r.id}</span><span>${r.project}</span>
+  const shipped = r.status === "done" && r.status_reason === "deployed" && r.commit_sha;
+  return html`<div class="req">${routing(r.id)}<div class="body">${r.last_run ? html`<a class="title" href="/runs/${r.last_run}">${r.title}</a>` : html`<span class="title">${r.title}</span>`}
+  <div class="meta">${stateOf(r.status, r.status_reason)}<span>${r.project}</span>
     ${r.ai_agent ? html`<span>${AGENTS[r.ai_agent]}</span>` : ""}${r.runner ? html`<span>on ${r.runner}</span>` : ""}
+    ${shipped ? html`<span class="mono">${r.commit_sha!.slice(0, 7)}</span>` : ""}
     ${flags ? html`<span class="st attn"><i aria-hidden="true"></i>${flags} check flag${flags > 1 ? "s" : ""}</span>` : ""}</div>
   ${r.waiting ? html`<p class="why wait"><span class="st attn"><i aria-hidden="true"></i></span>${r.waiting}</p>` : why ? html`<p class="why">${why}</p>` : ""}
-  ${thumbs(r.files)}</div>`;
+  ${thumbs(r.files)}</div>${card ? "" : track(reqStops(r), { mini: true })}</div>`;
 }
 
 const post = (id: number, name: string, label: string, cls = "") =>
@@ -338,10 +456,11 @@ function actionsFor(r: ReqRow): Html {
   return html``;
 }
 
+// A request that needs you, on a label of its own: its line, its track, the question asked, and what you can do.
 function needsCard(r: ReqRow): Html {
   const asks = r.status === "needs_info" && r.status_reason;
-  return html`<li class="card">${reqLine(asks ? { ...r, status_reason: null } : r)}
-    ${asks ? html`<p class="ask">${r.status_reason}</p>` : ""}${detailsPanel(r)}${actionsFor(r)}</li>`;
+  return html`<li class="label parcel">${reqLine(asks ? { ...r, status_reason: null } : r, true)}<div class="lb">${track(reqStops(r))}
+    ${asks ? html`<p class="ask">${r.status_reason}</p>` : ""}${detailsPanel(r)}${actionsFor(r)}</div></li>`;
 }
 
 function newRequestForm(d: HomeData, draft?: Draft, error?: string): Html {
@@ -368,11 +487,10 @@ function newRequestForm(d: HomeData, draft?: Draft, error?: string): Html {
 </form></details>`;
 }
 
-// The runners in a few words: attached elsewhere, paused, or each one online or offline.
-function runnerState(d: HomeData): Html {
+// The runners as plates: attached elsewhere, or each one with its state, what it works on and its worker slots.
+function runnerPlates(d: HomeData): Html {
   const mark = (family: string) => html`<span class="st ${family}"><i aria-hidden="true"></i></span>`;
-  if (d.attachedTo) return html`<span class="runner">${mark("work")}Runner attached to ${queueLink(d.attachedTo)}</span>`;
-  if (d.paused) return html`<span class="runner">${mark("attn")}Runner${d.runners.length > 1 ? "s" : ""} paused</span>`;
+  if (d.attachedTo) return html`<div class="plate"><b>${mark("work")}This machine</b><span class="doing">Runner attached to ${queueLink(d.attachedTo)}</span></div>`;
   // What a runner works on: its first request, linked to its run, with the step it's in.
   const doing = (r: RunnerInfo) => {
     const [w] = r.working;
@@ -380,12 +498,18 @@ function runnerState(d: HomeData): Html {
     const what = html`#${w.id} ${w.step ? STEP_NAMES[w.step] ?? w.step : "starting"}`;
     return html` · ${w.run ? html`<a href="/runs/${w.run}">${what}</a>` : what}${r.working.length > 1 ? ` +${r.working.length - 1}` : ""}`;
   };
-  if (d.runners.length === 1) {
-    const [r] = d.runners;
-    return r.online ? html`<span class="runner">${mark("done")}Runner online on ${r.name}${doing(r)}</span>` : html`<span class="runner">${mark("fail")}Runner offline</span>`;
-  }
-  return html`${d.runners.map((r) => html`<span class="runner">${mark(r.online ? "done" : "fail")}${r.name} ${r.online ? "online" : "offline"}${doing(r)}${
-    !r.online && r.waiting ? `, ${r.waiting} waiting` : ""}</span>`)}`;
+  // Its workers, busy or free; a runner on another machine shows only the busy ones.
+  const slots = (r: RunnerInfo) => {
+    const n = Math.max(r.slots ?? 0, r.running);
+    return n ? html`<span class="slots" aria-hidden="true">${Array.from({ length: n }, (_, i) => html`<i${i < r.running ? html` class="on"` : ""}></i>`)}</span>
+      ${r.slots ? html`<span class="sr">${r.running} of ${r.slots} workers busy</span>` : ""}` : "";
+  };
+  return html`${d.runners.map((r) => {
+    const state = r.online ? html`online${doing(r)}` : html`offline${r.waiting ? `, ${r.waiting} waiting` : ""}`;
+    return html`<div class="plate${r.online ? "" : " off"}"><b>${mark(r.online ? "done" : "fail")}${r.name}</b>
+      <span class="doing">${state}</span>${r.os || d.paused ? html`<span class="os">${r.os ?? ""}${r.os && d.paused ? " · " : ""}${
+        d.paused ? html`<span class="st attn"><i aria-hidden="true"></i>paused</span>` : ""}</span>` : ""}${slots(r)}</div>`;
+  })}`;
 }
 
 // `flash`: what the last action did. `draft` and `error`: a new request the server refused, shown again with why.
@@ -402,12 +526,11 @@ export function homePage(d: HomeData, user: User, o: { flash?: Flash; draft?: Dr
   ];
   return page("Home", html`
 <h1 class="sr">Home</h1>
-${statusBar(d)}
 ${flash ? html`<p class="flash ${flash.kind}" role="${flash.kind === "bad" ? "alert" : "status"}">${flash.text}</p>` : ""}
 ${alerts.length ? html`<div class="alerts">${alerts}</div>` : ""}
 ${d.attachedTo ? "" : newRequestForm(d, draft, error)}
 ${board(d)}
-`, user, html`<script src="/static/htmx.js"></script><script src="/static/home.js" defer></script>`, { nav: "home", attachedTo: d.attachedTo });
+`, user, html`<script src="/static/htmx.js"></script><script src="/static/home.js" defer></script>`, { nav: "home", attachedTo: d.attachedTo, band: statusBar(d) });
 }
 
 // A part of the home page that refreshes itself every 5 s. `h` is a hash of what it shows, sent back with each poll:
@@ -415,14 +538,14 @@ ${board(d)}
 export class Live extends Html { constructor(s: string, readonly h: string) { super(s); } }
 const hashOf = (s: string) => createHash("sha1").update(s).digest("base64url").slice(0, 12);
 
-// The home page's status line, refreshing from /live/status.
+// The home page's runner plates and counts, in the header band, refreshing from /live/status.
 export function statusBar(d: HomeData): Live {
   const running = d.queue.filter((r) => r.status === "running").length;
   const waiting = d.queue.length - running;
-  const inner = html`${d.attachedTo ? "" : html`${runnerState(d)}<span>${running} running, ${waiting} queued</span>`}
-  <span>Backup ${d.backupAgeMs === null ? "never ran" : ago(d.backupAgeMs)}</span>`;
+  const inner = html`<div class="plates">${runnerPlates(d)}</div>
+  <p class="counts">${d.attachedTo ? "" : html`<span>${running} running, ${waiting} queued</span>`}<span>Backup ${d.backupAgeMs === null ? "never ran" : ago(d.backupAgeMs)}</span></p>`;
   const h = hashOf(inner.s);
-  return new Live(html`<p class="statusbar" id="statusbar" role="status" hx-get="/live/status?h=${h}" hx-trigger="every 5s" hx-swap="outerHTML">${inner}</p>`.s, h);
+  return new Live(html`<div class="status" id="statusbar" role="status" hx-get="/live/status?h=${h}" hx-trigger="every 5s" hx-swap="outerHTML">${inner}</div>`.s, h);
 }
 
 // A queued or running request's line, refreshing from /requests/<id>/line.
@@ -466,29 +589,38 @@ export type RunData = {
 const PUSH: Record<string, string> = {
   none: "not pushed", push_started: "pushing", pushed: "pushed", push_unknown: "push unconfirmed", not_pushed: "not pushed",
 };
-const duration = (s: StepRow) => {
-  if (s.ended_at === null) return "…";
-  const secs = Math.round((s.ended_at - s.started_at) / 1000);
-  return secs < 1 ? "<1 s" : secs < 60 ? `${secs} s` : `${Math.floor(secs / 60)} min${secs % 60 ? ` ${secs % 60} s` : ""}`;
+const secs = (ms: number) => {
+  const s = Math.round(ms / 1000);
+  return s < 1 ? "<1 s" : s < 60 ? `${s} s` : `${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ""}`;
 };
+const duration = (s: StepRow) => s.ended_at === null ? "…" : secs(s.ended_at - s.started_at);
 // A step's outcome in words. remote_busy exits 1 when nothing else is installing: that's good news.
 function outcome(s: StepRow): Html {
   if (s.exit_code === null) return html`<span class="st work now"><i aria-hidden="true"></i>Running</span>`;
-  if (s.step === "remote_busy") return s.exit_code === 1 ? html`<span class="muted">Free</span>` : s.exit_code === 0 ? html`<span class="warn">Busy</span>` : html`<span class="bad">Unknown (exit ${s.exit_code})</span>`;
-  return s.exit_code === 0 ? html`<span class="ok">Passed</span>` : html`<span class="bad">Failed (exit ${s.exit_code})</span>`;
+  const said = (family: Family, word: string) => html`<span class="st ${family}"><i aria-hidden="true"></i>${word}</span>`;
+  if (s.step === "remote_busy") return s.exit_code === 1 ? said("idle", "Free") : s.exit_code === 0 ? said("attn", "Busy") : said("fail", `Unknown (exit ${s.exit_code})`);
+  return s.exit_code === 0 ? said("done", "Passed") : said("fail", `Failed (exit ${s.exit_code})`);
 }
-const STEP_NAMES: Record<string, string> = {
-  version: "Live version", agent: "Agent", build: "Build", test: "Test", verify: "Verify", remote_busy: "Install check", deploy: "Deploy",
-};
-// The five stages a run goes through, each done, failed, running or not reached.
-function pipeline(d: RunData): Html {
-  const stages = ["agent", "build", "test", "verify", "deploy"];
-  return html`<ol class="pipeline" aria-label="Progress">${stages.map((name) => {
-    const steps = d.steps.filter((s) => s.step === name);
-    const state = !steps.length ? "" : steps.some((s) => s.exit_code === null) ? "now" : steps.some((s) => s.exit_code !== 0) ? "fail" : "done";
-    const said = { "": "not reached", now: "running", fail: "failed", done: "done" }[state];
-    return html`<li class="${state}">${STEP_NAMES[name]}<span class="sr">: ${said}</span></li>`;
-  })}</ol>`;
+
+// The run's track, each stop with the time its steps took. The request's state shapes it only on its latest run.
+function runTrack(d: RunData): Html {
+  const latest = d.req.last_run === d.run.id;
+  const stops = stopsOf(d.steps.map((s) => [s.step, s.exit_code]), latest ? d.req.status : null);
+  const times = STAGES.map((name) => {
+    const mine = d.steps.filter((s) => s.step === name && s.ended_at !== null);
+    return mine.length ? secs(mine.reduce((t, s) => t + s.ended_at! - s.started_at, 0)) : "";
+  });
+  return track(stops, { times });
+}
+
+// Proof of delivery, the last line of the steps: a deployed request whose live version was read back after the
+// deploy, naming the commit.
+function proof(d: RunData): Html {
+  const r = d.req;
+  const checked = d.steps.some((s) => s.step === "version" && s.exit_code === 0);
+  if (!(r.status === "done" && r.status_reason === "deployed" && r.commit_sha && checked && r.last_run === d.run.id)) return html``;
+  return html`<p class="proof"><strong>Signed for:</strong> ${r.groups ? r.groups.replace(/,/g, ", ") : "the target"} runs
+    <span class="mono">${r.commit_sha.slice(0, 7)}</span>, read from its live version after the deploy.</p>`;
 }
 
 // The part of a run's page that changes while it runs; it refreshes itself every 2 s until the run ends.
@@ -498,18 +630,21 @@ export function liveBlock(d: RunData): Html {
   const chosen = d.steps.find((s) => s.n === d.logStep);
   const why = reasonOf(d.req);
   return html`<div id="live"${poll}>
-<div class="req"><div class="meta">${stateOf(d.req.status, d.req.status_reason)}<span class="num">#${d.req.id}</span><span>${d.req.project}</span>
-  ${live ? html`<span class="live">${d.remoteHost ? `Running on ${d.remoteHost} · log every 15 s` : "Live"}</span>` : ""}</div>
-  ${why ? html`<p class="why">${why}</p>` : ""}${thumbs(d.req.files)}</div>
+<div class="label parcel"><div class="req">${routing(d.req.id)}<div class="body"><h1>${d.req.title}</h1>
+  <div class="meta">${stateOf(d.req.status, d.req.status_reason)}<span>${d.req.project}</span>
+  ${live ? html`<span class="live">${d.remoteHost ? `Running on ${d.remoteHost} · log every 15 s` : "Live"}</span>` : ""}</div></div></div>
+<div class="lb"><p class="meta muted">Run ${d.run.id} · attempt ${d.run.attempt}${d.run.branch ? html` · <span class="mono">${d.run.branch}</span>` : ""}
+  ${d.run.commit_sha ? html` · commit <span class="mono">${d.run.commit_sha.slice(0, 7)}</span>, ${PUSH[d.run.push_state] ?? d.run.push_state}` : ""}</p>
+${runTrack(d)}
+${why ? html`<p class="why">${why}</p>` : ""}${thumbs(d.req.files)}</div></div>
 ${detailsPanel(d.req)}
 ${flagsBox(d.run.flags)}
 ${actionsFor(d.req)}
-${pipeline(d)}
 <h2>Steps</h2>
-<table><thead><tr><th class="n">#</th><th>Step</th><th>Result</th><th class="t">Time</th></tr></thead><tbody>
+<div class="label steps"><table><thead><tr><th class="n">#</th><th>Step</th><th>Result</th><th class="t">Time</th></tr></thead><tbody>
 ${d.steps.map((s) => html`<tr${s.n === d.logStep ? html` aria-current="true"` : ""}><td class="n">${s.n}</td>
   <td><a href="/runs/${d.run.id}?n=${s.n}#log">${STEP_NAMES[s.step] ?? s.step}</a></td><td>${outcome(s)}</td><td class="t">${duration(s)}</td></tr>`)}
-</tbody></table>
+</tbody></table>${proof(d)}</div>
 <h2 id="log-title">Log${chosen ? html` <span class="count">${STEP_NAMES[chosen.step] ?? chosen.step}, step ${chosen.n}</span>` : ""}</h2>
 <pre id="log" role="log" aria-labelledby="log-title" tabindex="0">${d.log || "(no output yet)"}</pre>
 </div>`;
@@ -526,9 +661,6 @@ function flagsBox(json: string): Html {
 
 export function runPage(d: RunData, user: User): string {
   return page(`Run ${d.run.id}`, html`
-<h1>${d.req.title}</h1>
-<p class="muted meta">Run ${d.run.id} · attempt ${d.run.attempt}${d.run.branch ? html` · <span class="mono">${d.run.branch}</span>` : ""}
-  ${d.run.commit_sha ? html` · commit <span class="mono">${d.run.commit_sha.slice(0, 7)}</span>, ${PUSH[d.run.push_state] ?? d.run.push_state}` : ""}</p>
 ${liveBlock(d)}
 
 <h2 id="diff">Changes</h2>
@@ -539,6 +671,7 @@ ${d.diffStat ? html`<pre class="wide">${d.diffStat.replace(/^\n+/, "")}</pre><de
 `, user, d.run.status === "running" ? html`<script src="/static/htmx.js"></script><script src="/static/run.js" defer></script>` : html`<script src="/static/run.js" defer></script>`,
   { nav: null, attachedTo: d.attachedTo });
 }
+
 
 export type SettingsData = {
   aiAgent?: AgentId;
@@ -628,37 +761,38 @@ ${owner ? html`<form method="post" action="/settings/users">
 `, user, html`<script src="/static/webauthn.js"></script><script src="/static/app.js"></script>`, { nav: "settings", attachedTo: d.attachedTo });
 }
 
+
 export function loginPage(message?: string): string {
-  return page("Sign in", html`
+  return page("Sign in", html`<div class="label sheet">
 <h1>Sign in</h1>
 <p>Use the passkey on this device: Face ID, Touch ID or your device's lock.</p>
 <div class="actions"><button class="primary" id="login">Sign in with passkey</button></div>
-<p id="msg" class="bad" role="alert">${message ?? ""}</p>
+<p id="msg" class="bad" role="alert">${message ?? ""}</p></div>
 <script src="/static/webauthn.js"></script><script src="/static/app.js"></script>`);
 }
 
 export function registerPage(code: string, name: string): string {
-  return page("Set up passkey", html`
+  return page("Set up passkey", html`<div class="label sheet">
 <h1>Set up a passkey for ${name}</h1>
 <p>It stays on this device and signs you in from now on. This link works once.</p>
 <div class="actions"><button class="primary" id="register" data-code="${code}">Create passkey</button></div>
-<p id="msg" class="bad" role="alert"></p>
+<p id="msg" class="bad" role="alert"></p></div>
 <script src="/static/webauthn.js"></script><script src="/static/app.js"></script>`);
 }
 
 // What the service worker shows when this device can't reach the server (SW_JS), naming the site by its machine.
 export function offlinePage(host: string): string {
   const site = host.split(".")[0].split(":")[0];
-  return page(`Can't reach ${site}`, html`<h1>Can't reach ${site}</h1>
+  return page(`Can't reach ${site}`, html`<div class="label sheet"><h1>Can't reach ${site}</h1>
 <p class="message">This device can't reach Agentry at <strong>${host}</strong>.</p>
 <p>Most likely Tailscale on this device is off or not connected. Open the Tailscale app: check that it's on and shows no
   warnings, or turn it off and on again.</p>
 <p>If Tailscale looks fine, ${site} may be asleep, off or restarting.</p>
-<div class="actions"><a class="btn" href="">Try again</a></div>`);
+<div class="actions"><a class="btn" href="">Try again</a></div></div>`);
 }
 
 export function messagePage(title: string, message: string, user?: User | null): string {
-  return page(title, html`<h1>${title}</h1><p class="message">${message}</p><div class="actions"><a class="btn" href="/">Back to home</a></div>`, user);
+  return page(title, html`<div class="label sheet"><h1>${title}</h1><p class="message">${message}</p><div class="actions"><a class="btn" href="/">Back to home</a></div></div>`, user);
 }
 
 // The home page's script (served as /static/home.js). The project picker: the form isn't sent with no project ticked.
@@ -746,15 +880,17 @@ export const OFFLINE_JS = `if ("serviceWorker" in navigator) navigator.serviceWo
 
 // The service worker (served as /sw.js, so it covers every page): a page that can't load because this device can't
 // reach the server gets the /offline page cached at install, instead of the browser's own error. Only page loads and
-// the icon that page shows are handled; every other request goes to the network as if there were no worker.
+// the icon and font that page shows are handled; every other request goes to the network as if there were no worker.
 export const SW_JS = `
 const CACHE = "agentry-offline";
+const KEPT = ["/static/icon.png", "/static/archivo.woff2"];
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll([new Request("/offline", { cache: "reload" }), "/static/icon.png"])).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll([new Request("/offline", { cache: "reload" }), ...KEPT])).then(() => self.skipWaiting()));
 });
 self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET") return; // a form post goes straight out: iOS WebKit truncates its files when re-sent
-  const fallback = e.request.mode === "navigate" ? "/offline" : new URL(e.request.url).pathname === "/static/icon.png" ? "/static/icon.png" : null;
+  const path = new URL(e.request.url).pathname;
+  const fallback = e.request.mode === "navigate" ? "/offline" : KEPT.includes(path) ? path : null;
   if (fallback) e.respondWith(fetch(e.request).catch(() => caches.match(fallback)));
 });
 `;
