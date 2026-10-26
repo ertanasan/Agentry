@@ -682,6 +682,8 @@ describe("settings", () => {
     expect(refused.status).toBe(400);
     expect(await refused.text()).toContain("vt-web can&#39;t be installed on that device");
 
+    stale(h);
+    expect(await (await h.call("/settings", { cookie })).text()).toContain('<select id="deploy-to-vt-web" name="deploy_to" disabled>'); // seen before the passkey check
     await stepUp(h, cookie, key);
     expect(await (await h.call("/settings", { cookie })).text()).toContain('<select id="deploy-to-vt-web" name="deploy_to">');
     expect((await h.call("/settings/projects/vt-web/deploy", { method: "POST", cookie, form: { deploy_to: phone.id } })).status).toBe(303);

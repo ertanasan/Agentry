@@ -720,7 +720,8 @@ export function settingsPage(d: SettingsData, user: User, link?: NewLink): strin
     const devices = p.deployTo?.devices.length ? p.deployTo : null;
     const question = `Deploy ${p.name}'s main as it is? The runner builds and tests it, then ${devices ? "deploys it where you pick" : "runs its deploy step"}. Nothing is changed or committed.`;
     if (!devices) return ask(action, "Deploy main", question);
-    if (!(owner && d.verified)) return html`<button class="danger" disabled>Deploy main</button>`;
+    // Before the passkey check the list shows too, disabled like the button, so the targets are visible.
+    if (!(owner && d.verified)) return html`${deployToPicker(`deploy-to-${p.name}`, devices, "", html` disabled`)}<button class="danger" disabled>Deploy main</button>`;
     return html`<details class="confirm danger"><summary class="btn danger">Deploy main…</summary><div class="confirm-body"><p>${question}</p>
       <form method="post" action="${action}">${deployToPicker(`deploy-to-${p.name}`, devices)}<div class="actions"><button class="danger">Deploy main</button></div></form></div></details>`;
   };
