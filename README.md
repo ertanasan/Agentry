@@ -282,6 +282,10 @@ How it works:
 - **Removing a machine for good:** `agentry runner-key remove machost` on the owner, once that runner is
   disconnected and no project lists it any more. Its unfinished runs pass to the owner's runner, which
   recovers them within a few seconds; requests waiting to resume one of its branches start over from `main`.
+- **A lost or leaked key:** `agentry runner-key rotate machost` on the owner prints a new key under the same
+  name, and the old one stops working at once. Projects, runs and the lease stay; run `agentry attach` on the
+  machine with the new key. The key exists only in that machine's `queue.json`, so a reinstall that deletes
+  `~/.agentry` needs one.
 
 ## Automated deployment
 
@@ -400,8 +404,8 @@ executes code at build time needs a person's approval**: `*.csproj`, `*.props`, 
 - **Runner keys.** A runner on another machine calls `/api/runner/*` with a key from `agentry runner-key add`,
   stored as a SHA-256 hash. The key reaches only the queue methods a runner uses (no accounts, no settings),
   and every write it makes is fenced by its lease and limited to the runs and requests its runner claimed. It can
-  still read every request and its files: keep it as you would an owner's credentials, and `agentry runner-key
-  remove` it when a machine leaves.
+  still read every request and its files: keep it as you would an owner's credentials, `agentry runner-key
+  rotate` it if it leaks, and `agentry runner-key remove` it when a machine leaves.
 - **One code path for state.** The web UI and the CLI call the same state actions, so a state rule lives in one
   place, and each action records its actor (`user:<name>` or `cli`) in the audit log.
 
@@ -589,7 +593,9 @@ created for.
 
 Run the script again at any time, for example after `git pull`: it keeps the URL and port of the last run unless
 you give new ones. `--self-test` runs the sandbox canary against your Mac and checks the UI and the runner, and
-`--uninstall` removes the agents and the command (your data in `~/.agentry` stays).
+`--uninstall` removes the agents and the command (your data in `~/.agentry` stays). `--uninstall --purge` also
+deletes `~/.agentry`, after keeping its database, backups, an `agentry export` (projects and this Mac's recipes)
+and an attached runner's `queue.json` in `~/.agentry-backup-<date>`; it prints how to bring them back after setup.
 
 ### Choose an AI agent
 
@@ -757,6 +763,7 @@ agentry backup                        back up now
 agentry export <dir>                  write the projects (recipes, runners), runner keys and queue settings to <dir>
 agentry import <dir>                  bring an export into this install, a fresh one say (safe to run again)
 agentry runner-key add <name> | remove <name>   a key for another machine's runner to work this queue
+agentry runner-key rotate <name>      a new key for that runner (a lost or leaked one); the old one stops working
 agentry attach <url>                  this machine's runner works the queue at <url> (paste its runner key)
 agentry detach                        this machine's runner works its own queue again
 ```

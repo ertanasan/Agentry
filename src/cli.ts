@@ -28,7 +28,7 @@ import { DEFAULT_PORT, startServer } from "./server.ts";
 import { deployChoices } from "./devices.ts";
 import { parseRecipe, type Recipe } from "./recipe.ts";
 import { localQueue, startHeartbeat, Unreachable, type Queue } from "./queue.ts";
-import { addRunnerKey, readAttached, remoteQueue, removeRunnerKey, workDir } from "./remote.ts";
+import { addRunnerKey, readAttached, remoteQueue, removeRunnerKey, rotateRunnerKey, workDir } from "./remote.ts";
 import { storeRecipe, syncRecipes } from "./recipes.ts";
 import { recover, recoverExpired, resolvePushUnknown } from "./recovery.ts";
 import { runnersOf } from "./routing.ts";
@@ -69,6 +69,7 @@ const USAGE = `usage: agentry <command>
   import <dir>                       bring an export into this install (a fresh one, say); safe to run again
   runner-key add <name> | remove <name>   a key for a runner on another machine to work this queue beside this one's
                                      (printed once); remove: for a machine gone for good, its runs pass to this one
+  runner-key rotate <name>           a new key for that runner, for a lost or leaked one; the old one stops working
   attach <url>                       this machine's runner works the queue at <url> instead (paste its runner key)
   detach                             this machine's runner works its own queue again
 
@@ -471,7 +472,7 @@ function detach(): number {
 
 function runnerKey(db: Database, args: string[]): number {
   const [sub, name] = args;
-  if (!name || !["add", "remove"].includes(sub)) fail("usage: agentry runner-key add <name> | agentry runner-key remove <name>");
+  if (!name || !["add", "rotate", "remove"].includes(sub)) fail("usage: agentry runner-key add|rotate|remove <name>");
   if (sub === "remove") {
     let handedBack = 0;
     try { ({ handedBack } = removeRunnerKey(db, name)); } catch (e) { fail(e instanceof Error ? e.message : String(e)); }
@@ -479,9 +480,9 @@ function runnerKey(db: Database, args: string[]): number {
     return 0;
   }
   let key = "";
-  try { key = addRunnerKey(db, name); } catch (e) { fail(e instanceof Error ? e.message : String(e)); }
-  console.log(`Runner key ${name} (shown once). On the machine whose runner should work this queue, run\n` +
-    `  agentry attach ${publicUrl()}\nand paste:\n${key}`);
+  try { key = sub === "add" ? addRunnerKey(db, name) : rotateRunnerKey(db, name); } catch (e) { fail(e instanceof Error ? e.message : String(e)); }
+  console.log(`${sub === "add" ? "Runner key" : "New runner key for"} ${name} (shown once)${sub === "rotate" ? "; the old key no longer works" : ""}. ` +
+    `On the machine whose runner should work this queue, run\n  agentry attach ${publicUrl()}\nand paste:\n${key}`);
   return 0;
 }
 

@@ -42,13 +42,22 @@ const CALLS = new Set<keyof LocalQueue>([
 export type Diff = { stat: string; diff: string; cut: boolean };
 
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
+const newKey = () => `agentry_rk_${randomBytes(32).toString("base64url")}`;
 
 // A new key for a runner on another machine; only its hash is kept.
 export function addRunnerKey(db: Database, name: string): string {
   if (!/^[A-Za-z0-9._-]{1,32}$/.test(name)) throw new Error("a runner key's name is 1-32 letters, digits, '.', '_' or '-'");
   if (name === LOCAL) throw new Error(`"${LOCAL}" names this machine's own runner; pick another name`);
-  const key = `agentry_rk_${randomBytes(32).toString("base64url")}`;
+  const key = newKey();
   db.query("INSERT INTO runner_keys (name, key_hash, created_at) VALUES (?, ?, ?)").run(name, hash(key), Date.now());
+  return key;
+}
+
+// A new key in place of a lost or leaked one. The old key stops working at once; the projects that list the name,
+// its runs and its lease stay, so the machine picks up where it left off once it attaches with the new key.
+export function rotateRunnerKey(db: Database, name: string): string {
+  const key = newKey();
+  if (!db.query("UPDATE runner_keys SET key_hash = ? WHERE name = ?").run(hash(key), name).changes) throw new Error(`no runner key named ${name}`);
   return key;
 }
 

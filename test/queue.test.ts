@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import * as A from "../src/actions.ts";
 import { acquireLease, NotYours, openDb } from "../src/db.ts";
 import { localQueue } from "../src/queue.ts";
-import { addRunnerKey, removeRunnerKey } from "../src/remote.ts";
+import { addRunnerKey, removeRunnerKey, rotateRunnerKey, runnerApi } from "../src/remote.ts";
 import { eligible, routeOf, waitingFor } from "../src/routing.ts";
 
 // One repo; web and api share the vt-server group, ios has its own.
@@ -145,6 +145,20 @@ describe("removing a runner key", () => {
     // This machine's runner sees the handed-back run as its own expired one, so its next poll recovers it.
     db.query("UPDATE runs SET lease_expires_at = 1 WHERE id = ?").run(run);
     expect((await local.expiredRuns(Date.now())).map((r) => r.id)).toEqual([run]);
+  });
+
+  test("rotating a runner key: the old key stops working, the new one works, and its projects and lease stay", async () => {
+    const { db } = setup();
+    const status = async (key: string) => (await runnerApi(db, "", new Request("http://q/api/runner/call/settings", { method: "POST", headers: { authorization: `Bearer ${key}` } }), new URL("http://q/api/runner/call/settings")))!.status;
+    const old = rotateRunnerKey(db, "mac");
+    expect(await status(old)).toBe(400);   // past the key check; stopped only for want of a lease token
+
+    const key = rotateRunnerKey(db, "mac");
+    expect(await status(old)).toBe(401);
+    expect(await status(key)).toBe(400);
+    expect(db.query("SELECT name FROM projects WHERE runners LIKE '%mac%' ORDER BY name").all()).toEqual([{ name: "api" }, { name: "ios" }, { name: "web" }]);
+    expect(db.query("SELECT host FROM leases WHERE holder = 'mac'").get()).toEqual({ host: "machost" });
+    expect(() => rotateRunnerKey(db, "pc")).toThrow("no runner key named pc");
   });
 
   test("a runner key can't be named after this machine's runner", () => {

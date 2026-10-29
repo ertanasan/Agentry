@@ -4,6 +4,8 @@
 #   setup/mac-setup.sh --public-url https://myhost.tailnet.ts.net --owner alice
 #   setup/mac-setup.sh --self-test     the sandbox canary against this Mac, and a check that the web UI answers
 #   setup/mac-setup.sh --uninstall     stop and remove the agents and the command; $AGENTRY_HOME stays
+#   ... --uninstall --purge            also delete $AGENTRY_HOME, keeping its database, backups, an export (projects
+#                                      and recipes) and the attach file in $AGENTRY_HOME-backup-<date> first
 #
 # What it makes:
 #   <bin-dir>/agentry   runs this checkout's src/cli.ts with bun, and AGENTRY_HOME, AGENTRY_PORT and AGENTRY_PUBLIC_URL as
@@ -20,9 +22,9 @@ home_dir=${AGENTRY_HOME:-$HOME/.agentry}
 bin_dir=$HOME/.local/bin
 agents=$HOME/Library/LaunchAgents
 labels=(com.agentry.serve com.agentry.run)
-public_url='' port='' owner='' mode=install
+public_url='' port='' owner='' mode=install purge=0
 
-usage() { sed -n '2,6p' "$script" | sed 's/^# \{0,1\}//'; echo "options: --public-url URL --port N --owner NAME --bin-dir DIR | --self-test | --uninstall"; exit 1; }
+usage() { sed -n '2,8p' "$script" | sed 's/^# \{0,1\}//'; echo "options: --public-url URL --port N --owner NAME --bin-dir DIR | --self-test | --uninstall [--purge]"; exit 1; }
 while (( $# )); do
   case $1 in
     --public-url) public_url=${2:?}; shift 2 ;;
@@ -31,9 +33,11 @@ while (( $# )); do
     --bin-dir) bin_dir=${2:?}; shift 2 ;;
     --self-test) mode=selftest; shift ;;
     --uninstall) mode=uninstall; shift ;;
+    --purge) purge=1; shift ;;
     *) usage ;;
   esac
 done
+(( purge )) && [[ $mode != uninstall ]] && usage
 cmd=$bin_dir/agentry
 uid=$(id -u)
 
@@ -66,8 +70,31 @@ answers() {
 if [[ $mode == uninstall ]]; then
   step "Removing the launchd agents"
   for label in $labels; do remove_agent $label; rm -f "$agents/$label.plist"; done
+  keep=$home_dir-backup-$(date +%Y%m%d-%H%M)
+  if (( purge )) && [[ -f $home_dir/agentry.db ]]; then
+    step "Keeping the database in $keep"
+    mkdir -m 700 -p "$keep"
+    cp -p "$home_dir"/agentry.db* "$keep"
+    [[ -d $home_dir/backups ]] && cp -Rp "$home_dir/backups" "$keep/backups"
+    # The attach file holds the runner key, which the queue's owner keeps only as a hash: with it back, this
+    # machine rejoins that queue without a new key.
+    [[ -f $home_dir/queue.json ]] && cp -p "$home_dir/queue.json" "$keep"
+    # The projects and this machine's recipes, for `agentry import` once setup has run again.
+    AGENTRY_HOME=$home_dir bun "$app/src/cli.ts" export "$keep/export" || print -u2 "    no export: the database copy in $keep still has everything"
+  fi
   if [[ -f $cmd ]] && grep -q 'mac-setup.sh' "$cmd"; then step "Removing $cmd"; rm -f "$cmd"; fi
-  print "Done. Agentry's data stays in $home_dir; delete it yourself if you want it gone."
+  if (( ! purge )); then
+    print "Done. Agentry's data stays in $home_dir; --uninstall --purge deletes it too."
+    exit 0
+  fi
+  step "Deleting $home_dir"
+  rm -rf "$home_dir"
+  print "Done."
+  if [[ -d $keep ]]; then
+    print "The old database and its backups are in $keep. After running this setup again:"
+    [[ -d $keep/export ]] && print "  bring the projects back:   agentry import $keep/export"
+    [[ -f $keep/queue.json ]] && print "  rejoin the same queue:     cp -p $keep/queue.json $home_dir/"
+  fi
   exit 0
 fi
 
