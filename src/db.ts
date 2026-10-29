@@ -166,6 +166,8 @@ export const MIGRATIONS: string[] = [
    ALTER TABLE leases ADD COLUMN recipes_report TEXT;
    CREATE TABLE recipe_edits (id INTEGER PRIMARY KEY, holder TEXT NOT NULL, project TEXT NOT NULL, recipe TEXT NOT NULL,
      by_user TEXT NOT NULL, created_at INTEGER NOT NULL, done_at INTEGER, error TEXT);`,
+  // 16: each user's theme for the web UI (views.ts THEMES); NULL is the default.
+  `ALTER TABLE users ADD COLUMN theme TEXT;`,
 ];
 
 // Checks run before a migration; a message refuses it and leaves the database as it was.

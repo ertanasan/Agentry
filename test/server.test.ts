@@ -587,7 +587,7 @@ describe("settings", () => {
     const h = await setup();
     const { cookie } = await h.signUp("helper", "admin");
     const body = await (await h.call("/settings", { cookie })).text();
-    expect(body).toContain("Only an owner can change settings.");
+    expect(body).toContain("only an owner can change the rest.");
     expect(body).toContain(" disabled");
     expect((await h.call("/settings", { method: "POST", cookie, form: { workers: "4" } })).status).toBe(403);
     expect(runnerRow(h.db).workers).toBe(1);
@@ -785,6 +785,25 @@ describe("settings", () => {
       { type: "user_add", actor: null }, { type: "user_add", actor: "user:ertan" }, { type: "user_reset", actor: "user:ertan" },
       { type: "user_remove", actor: "user:ertan" },
     ]);
+  });
+
+  test("each user picks their own theme, Apple by default, with no passkey check; an unknown one is refused", async () => {
+    const h = await setup();
+    const owner = await h.signUp();
+    const { cookie } = await h.signUp("helper", "admin");
+    const theme = async (c: string) => (await (await h.call("/settings", { cookie: c })).text()).match(/<html lang="en" data-theme="([a-z]+)"/)?.[1];
+    expect(await theme(cookie)).toBe("apple");
+
+    const r = await h.call("/settings/theme", { method: "POST", cookie, form: { theme: "midnight" } });
+    expect(r.status).toBe(303);
+    expect(await theme(cookie)).toBe("midnight");
+    expect(await theme(owner.cookie)).toBe("apple");
+    expect((await (await h.call("/settings", { cookie })).text())).toContain('value="midnight" checked');
+
+    await h.call("/settings/theme", { method: "POST", cookie, form: { theme: "apple" } });
+    expect(h.db.query("SELECT theme FROM users WHERE name = 'helper'").get()).toEqual({ theme: null });
+    expect((await h.call("/settings/theme", { method: "POST", cookie, form: { theme: "neon" } })).status).toBe(400);
+    expect(await theme(cookie)).toBe("apple");
   });
 
   test("an admin can't pause, toggle projects or manage users", async () => {
