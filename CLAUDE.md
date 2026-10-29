@@ -16,3 +16,7 @@ Key routing rules:
 - Save progress → invoke /context-save
 - Resume context → invoke /context-restore
 - Author a backlog-ready spec/issue → invoke /spec
+
+## Installing Agentry
+
+When someone asks for help installing, updating or reinstalling Agentry, follow [setup/install-guide.md](setup/install-guide.md) step by step.

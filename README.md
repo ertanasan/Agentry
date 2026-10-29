@@ -560,6 +560,9 @@ A screenshot or a spec often explains a change faster than a paragraph does.
 
 ## Getting started
 
+Installing with an AI agent's help? Point it at [`setup/install-guide.md`](setup/install-guide.md): the steps in
+order, which machine each runs on, and a check after each.
+
 ### Requirements
 
 - **macOS:** [**Bun**](https://bun.sh), **git**, and the [**Claude Code**](https://docs.anthropic.com/en/docs/claude-code)
