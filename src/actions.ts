@@ -5,7 +5,8 @@ import type { Database } from "bun:sqlite";
 import { AGENTS, isAgent } from "./adapters/providers.ts";
 import { logEvent, setRequestStatus, type RequestStatus } from "./db.ts";
 import { choicesFor, type Picks } from "./devices.ts";
-import { eligible, runnersOf } from "./routing.ts";
+import { storeRecipe } from "./recipes.ts";
+import { eligible, LOCAL, runnersOf } from "./routing.ts";
 
 // A refused action: wrong state, unknown request or project, or a user whose role may not take it. The CLI exits
 // 1 with the message; the server answers 409 (wrong state), 404 (not found), 400 (invalid) or 403 (forbidden).
@@ -174,6 +175,22 @@ export function unblock(db: Database, group: string): void {
 export function pause(db: Database, reason: string): void {
   db.query("UPDATE runner SET paused = 1, pause_reason = ? WHERE id = 1").run(reason);
   logEvent(db, null, "pause", { reason });
+}
+
+// Registers a project, or updates the one with that name, with its recipe and the file that recipe lives in.
+// `runners`: the runners that may run it, home first ('local' or runner-key names; two-runners review D4). Null: a
+// new project is this machine's only and an existing one keeps its list.
+export function addProject(db: Database, name: string, recipeJson: string, file: string | null, runners: string[] | null): void {
+  if (runners) {
+    if (!runners.length) throw new ActionError("--runner needs at least one runner", "invalid");
+    const known = new Set([LOCAL, ...(db.query("SELECT name FROM runner_keys").all() as { name: string }[]).map((k) => k.name)]);
+    const unknown = runners.filter((r) => !known.has(r));
+    if (unknown.length) throw new ActionError(`no runner key named ${unknown.join(", ")} (agentry runner-key add <name>; this machine's runner is "${LOCAL}")`, "invalid");
+  }
+  db.transaction(() => {
+    storeRecipe(db, name, recipeJson, file);
+    if (runners) db.query("UPDATE projects SET runners = ? WHERE name = ?").run(runners.join(","), name);
+  })();
 }
 
 // A disabled project's requests stay queued until it is enabled again.

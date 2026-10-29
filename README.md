@@ -664,7 +664,16 @@ agentry token                          # then: Start-ScheduledTask 'Agentry runn
 Run setup again to update Agentry or change its options. `-Uninstall` removes the startup tasks and takes
 `agentry` off `PATH`; the accounts and `C:\Agentry` stay. To start from scratch, `-Uninstall -Purge -SqlInstances
 '.\SQLEXPRESS'` also removes the two accounts with their profiles, the sandbox's SQL Server logins and `C:\Agentry`,
-keeping a copy of the database and its backups in `C:\Agentry-backup-<date>`.
+keeping a copy of the database and its backups in `C:\Agentry-backup-<date>`, with an `export` folder beside them.
+Run setup again, then bring the projects, their recipes and runners, the runner keys (attached machines keep
+theirs) and the queue's agent and workers back:
+
+```powershell
+agentry import C:\Agentry-backup-<date>\export
+```
+
+Users, passkeys and requests start empty. `agentry export <dir>` makes the same folder at any time, on Windows or
+macOS; its recipes are plain files you can edit before you import them.
 
 Recipe commands run in Windows PowerShell 5.1, which has no `&&`: use `;` and
 `if ($LASTEXITCODE) { exit $LASTEXITCODE }`.
@@ -745,6 +754,8 @@ agentry user reset <name>             revoke a user's passkeys and sessions; pri
 agentry user passkey <name>           a link for one more passkey (another device); keeps the others
 agentry user remove <name>            delete a web UI account with its passkeys and sessions (not the last owner)
 agentry backup                        back up now
+agentry export <dir>                  write the projects (recipes, runners), runner keys and queue settings to <dir>
+agentry import <dir>                  bring an export into this install, a fresh one say (safe to run again)
 agentry runner-key add <name> | remove <name>   a key for another machine's runner to work this queue
 agentry attach <url>                  this machine's runner works the queue at <url> (paste its runner key)
 agentry detach                        this machine's runner works its own queue again

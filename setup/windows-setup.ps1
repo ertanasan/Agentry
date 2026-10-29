@@ -112,6 +112,9 @@ if ($Uninstall) {
     New-Item -ItemType Directory -Force $keep | Out-Null
     Copy-Item (Join-Path $home_ 'agentry.db*') $keep
     if (Test-Path (Join-Path $home_ 'backups')) { Copy-Item -Recurse (Join-Path $home_ 'backups') (Join-Path $keep 'backups') }
+    # The projects, runner keys and queue settings, for `agentry import` once setup has run again.
+    & (Join-Path $Root 'agentry.cmd') export (Join-Path $keep 'export')
+    if ($LASTEXITCODE) { Write-Warning "no export: the database copy in $keep still has everything" }
   }
   foreach ($i in $SqlInstances) {
     $login = "$env:COMPUTERNAME\$sandbox"
@@ -138,7 +141,9 @@ if ($Uninstall) {
   if (Test-Path $Root) { Remove-Item -Recurse -Force $Root }
   Write-Host @"
 
-Done. $(if (Test-Path $keep) { "The old database and its backups are in $keep. " })The access entries setup gave the old accounts
+Done. $(if (Test-Path $keep) { "The old database and its backups are in $keep. " })$(if (Test-Path (Join-Path $keep 'export')) { "After setup, bring
+the projects back with: agentry import $(Join-Path $keep 'export')
+" })The access entries setup gave the old accounts
 (deploy folders, services, C:\) stay as unresolved SIDs; a new setup grants its new accounts again.
 "@
   exit 0

@@ -31,9 +31,10 @@ import { localQueue, startHeartbeat, Unreachable, type Queue } from "./queue.ts"
 import { addRunnerKey, readAttached, remoteQueue, removeRunnerKey, workDir } from "./remote.ts";
 import { storeRecipe, syncRecipes } from "./recipes.ts";
 import { recover, recoverExpired, resolvePushUnknown } from "./recovery.ts";
-import { LOCAL, runnersOf } from "./routing.ts";
+import { runnersOf } from "./routing.ts";
 import { startNext, type RunnerCtx, type RunOutcome } from "./runner.ts";
 import { AGENTRY_HOME } from "./sandbox.ts";
+import { exportSetup, importSetup } from "./transfer.ts";
 import { claudeVerifier } from "./verifier.ts";
 
 const POLL_MS = 5_000;
@@ -64,6 +65,8 @@ const USAGE = `usage: agentry <command>
   user passkey <name>                a link for one more passkey (another device); keeps the others
   user remove <name>                 delete a web UI account with its passkeys and sessions
   backup                            back up the database and agentry/* branches now
+  export <dir>                       write the projects (recipes, runners), runner keys and queue settings to <dir>
+  import <dir>                       bring an export into this install (a fresh one, say); safe to run again
   runner-key add <name> | remove <name>   a key for a runner on another machine to work this queue beside this one's
                                      (printed once); remove: for a machine gone for good, its runs pass to this one
   attach <url>                       this machine's runner works the queue at <url> instead (paste its runner key)
@@ -125,6 +128,14 @@ function main(argv: string[]): Promise<number> | number {
     case "serve": return serve(db);
     case "user": return userCmd(db, args, o.owner && o.admin ? fail("give --owner or --admin, not both") : !o.admin);
     case "backup": return backupNow(db);
+    case "export": {
+      const dir = args[0] ?? fail("export needs a folder");
+      const m = exportSetup(db, dir);
+      const n = (k: number, what: string) => `${k} ${what}${k === 1 ? "" : "s"}`;
+      console.log(`exported ${n(m.projects.length, "project")} and ${n(m.runner_keys.length, "runner key")} to ${dir}`);
+      return 0;
+    }
+    case "import": for (const line of importSetup(db, args[0] ?? fail("import needs a folder made by agentry export"), home)) console.log(line); return 0;
     case "resume": A.resume(db); return 0;
     default: return fail(`unknown command "${cmd}"\n${USAGE}`);
   }
@@ -137,16 +148,8 @@ function projectAdd(db: Database, args: string[], runners: string | undefined): 
   if (args[0] !== "add" || args.length !== 3) fail("usage: agentry project add <name> <recipe.json> [--runner local,<runner key name>...]");
   const [, name, file] = args;
   const json = readFileSync(file, "utf8");
-  const list = runners === undefined ? null : runnersOf(runners);
-  if (list) {
-    if (!list.length) fail("--runner needs at least one runner");
-    const known = new Set([LOCAL, ...(db.query("SELECT name FROM runner_keys").all() as { name: string }[]).map((k) => k.name)]);
-    const unknown = list.filter((r) => !known.has(r));
-    if (unknown.length) fail(`no runner key named ${unknown.join(", ")} (agentry runner-key add <name>; this machine's runner is "${LOCAL}")`);
-  }
   const recipe = parseRecipe(json);
-  storeRecipe(db, name, json, resolvePath(file));
-  if (list) db.query("UPDATE projects SET runners = ? WHERE name = ?").run(list.join(","), name);
+  A.addProject(db, name, json, resolvePath(file), runners === undefined ? null : runnersOf(runners));
   const set = (db.query("SELECT runners FROM projects WHERE name = ?").get(name) as { runners: string | null }).runners;
   console.log(`project ${name}: ${basename(recipe.repo)}, group ${recipe.deploy_group}, runs on ${runnersOf(set).join(", ")}`);
   return 0;
