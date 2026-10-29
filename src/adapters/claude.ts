@@ -9,7 +9,7 @@
 // --tools list; the sandbox, not the permission mode, is the boundary.
 // The prompt goes through a file in the run's temp dir. Output is stream-json in the step log; its final
 // `result` event decides: is_error, a crash without a result, or a timeout is infra_error.
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { readTail, runStep } from "../proc.ts";
 import { AGENTRY_HOME, KEY_HELPER } from "../sandbox.ts";
@@ -20,32 +20,50 @@ export type ClaudeAuth = { kind: "api_key"; keyHelper: string } | { kind: "subsc
 
 export type ClaudeOptions = { bin: string; model?: string; auth?: ClaudeAuth }; // default: api_key with KEY_HELPER
 
-// Output of `claude setup-token`, saved by the user (chmod 600). More accounts sit beside it as
-// claude-oauth-token-<name> (`agentry token --account <name>`).
+// Each Claude account is the output of `claude setup-token`, saved by `agentry token claude <name>` as
+// claude-oauth-token-<name> (chmod 600). This is the path the account files are named after.
 export const OAUTH_TOKEN_FILE = join(AGENTRY_HOME, "claude-oauth-token");
+export const ACCOUNT_NAME = /^[A-Za-z0-9._-]{1,32}$/;
 
 // Each limited account's reset time (ms), beside the token files.
 const limitsFile = (tokenFile: string) => join(dirname(tokenFile), "claude-limits.json");
 // Without a reset time from Claude, a limited account is tried again after this.
 const LIMIT_FALLBACK_MS = 60 * 60_000;
 
-function accounts(tokenFile: string): { name: string; file: string }[] {
+// The Claude accounts, in the order runs use them: by name. A token file without a name, saved before accounts had
+// names, becomes the account "default" here (its usage limit was already kept under that name).
+export function claudeAccounts(tokenFile = OAUTH_TOKEN_FILE): { name: string; file: string }[] {
   const dir = dirname(tokenFile), base = basename(tokenFile);
-  const named = existsSync(dir) ? readdirSync(dir).filter((f) => f.startsWith(`${base}-`)).sort() : [];
-  return [...(existsSync(tokenFile) ? [{ name: "default", file: tokenFile }] : []),
-    ...named.map((f) => ({ name: f.slice(base.length + 1), file: join(dir, f) }))];
+  if (existsSync(tokenFile) && !existsSync(`${tokenFile}-default`)) {
+    try { renameSync(tokenFile, `${tokenFile}-default`); } catch { /* read it as "default" where it is */ }
+  }
+  const named = existsSync(dir) ? readdirSync(dir).filter((f) => f.startsWith(`${base}-`) && ACCOUNT_NAME.test(f.slice(base.length + 1))) : [];
+  const all = named.map((f) => ({ name: f.slice(base.length + 1), file: join(dir, f) }));
+  if (existsSync(tokenFile) && !all.some((a) => a.name === "default")) all.push({ name: "default", file: tokenFile });
+  return all.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
-function readLimits(tokenFile: string): Record<string, number> {
+// Removes a Claude account and its usage limit. Returns how many accounts are left.
+export function removeClaudeAccount(name: string, tokenFile = OAUTH_TOKEN_FILE): number {
+  const account = claudeAccounts(tokenFile).find((a) => a.name === name);
+  if (!account) throw new Error(`no Claude account named ${name}`);
+  rmSync(account.file, { force: true });
+  const limits = readLimits(tokenFile);
+  if (name in limits) { delete limits[name]; writeFileSync(limitsFile(tokenFile), JSON.stringify(limits) + "\n"); }
+  return claudeAccounts(tokenFile).length;
+}
+
+// Each account's usage-limit reset (ms), for those that hit one.
+export function readLimits(tokenFile = OAUTH_TOKEN_FILE): Record<string, number> {
   try { return JSON.parse(readFileSync(limitsFile(tokenFile), "utf8")); } catch { return {}; }
 }
 
-// The subscription token when ~/.agentry/claude-oauth-token or another account exists, else the API key helper.
+// The subscription token when a Claude account exists, else the API key helper.
 // Several accounts: the first not at its usage limit (failover); all of them limited, the one that resets first,
 // whose run is refused and pauses the runner. Whitespace is dropped anywhere in a token: `claude setup-token`
 // wraps it over two lines, and a copied line break would cut it.
 export function resolveAuth(tokenFile = OAUTH_TOKEN_FILE, keyHelper = KEY_HELPER, now = Date.now()): ClaudeAuth {
-  const all = accounts(tokenFile);
+  const all = claudeAccounts(tokenFile);
   if (!all.length) return { kind: "api_key", keyHelper };
   const limits = readLimits(tokenFile);
   const pick = all.find((a) => !(limits[a.name] > now)) ?? all.reduce((a, b) => (limits[b.name] < limits[a.name] ? b : a));
@@ -59,7 +77,7 @@ function markLimited(account: { name: string; tokenFile: string }, resetsAt: num
   const limits = readLimits(account.tokenFile);
   limits[account.name] = resetsAt ? resetsAt * 1000 : now + LIMIT_FALLBACK_MS;
   writeFileSync(limitsFile(account.tokenFile), JSON.stringify(limits) + "\n");
-  return accounts(account.tokenFile).some((a) => !(limits[a.name] > now));
+  return claudeAccounts(account.tokenFile).some((a) => !(limits[a.name] > now));
 }
 
 // retry: the account hit its usage limit and another is free, so the run goes back on the queue without a pause.

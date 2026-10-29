@@ -206,7 +206,7 @@ export function resume(db: Database): void {
 }
 
 export function setAgent(db: Database, agent: string): void {
-  if (!["claude", "codex", "gemini", "antigravity"].includes(agent)) throw new ActionError("Choose Claude Code, Codex, Gemini CLI or Antigravity CLI.", "invalid");
+  if (!isAgent(agent)) throw new ActionError(`Choose ${Object.values(AGENTS).join(", ")}.`, "invalid");
   db.query("UPDATE runner SET ai_agent = ? WHERE id = 1").run(agent);
   logEvent(db, null, "settings", { ai_agent: agent });
 }

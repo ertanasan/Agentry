@@ -6,7 +6,7 @@
 // the queue with up to the settings page's worker count of requests at once, retrying unknown pushes now and
 // then (D19). A runner that loses its lease exits with code 3 (D17).
 //
-// AGENTRY_HOME (default ~/.agentry) holds agentry.db, worktrees/, runs/, cache/, claude-oauth-token and
+// AGENTRY_HOME (default ~/.agentry) holds agentry.db, worktrees/, runs/, cache/, claude-oauth-token-<account> and
 // api-key-helper. AGENTRY_CLAUDE_BIN overrides the claude on PATH; AGENTRY_MODEL picks its model.
 import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
@@ -20,7 +20,8 @@ import { codexAgent, codexVerifier } from "./adapters/codex.ts";
 import { callGemini, googleAgent, googleVerifier, oauthCredentials } from "./adapters/google.ts";
 import { antigravityCredentials, callAntigravity, importAntigravityLogin } from "./adapters/antigravity.ts";
 import { isAgent, type AgentId } from "./adapters/providers.ts";
-import { claudeAgent, resolveAuth } from "./adapters/claude.ts";
+import { copilotAgent, copilotToken, copilotVerifier } from "./adapters/copilot.ts";
+import { ACCOUNT_NAME, claudeAccounts, claudeAgent, readLimits, removeClaudeAccount, resolveAuth } from "./adapters/claude.ts";
 import { asActor, LeaseLost, openDb, runnerRow } from "./db.ts";
 import { addUser, AuthError, passkeyLink, removeUser, resetUser } from "./accounts.ts";
 import { backupIfDue, runBackup } from "./backup.ts";
@@ -45,7 +46,7 @@ const USAGE = `usage: agentry <command>
   project add <name> <recipe.json> [--runner R,...]   register or update a project; --runner: the runners that
                                      may run it, home first ("local": this machine's; others: runner key names)
   add <project>[,<project>...] <title> [--body B] [--done-when D] [--done-when-test T] [--priority N]
-                                     --agent claude|codex|gemini|antigravity: its agent (else the queue's)
+                                     --agent claude|codex|gemini|antigravity|copilot: its agent (else the queue's)
   list [--all]
   run [--once]                       work the queue (--once: stop when idle or paused and nothing runs)
   answer <id> <text>                 needs_info → queued
@@ -56,9 +57,10 @@ const USAGE = `usage: agentry <command>
   reopen <id> <what's wrong>         done → a new linked request (counts one false-done)
   unblock <group>                    clear a deploy group's lock that no request holds (drift guard)
   resume                             unpause the runner
-  token [claude|codex|gemini|antigravity]   save a token (Google providers: OAuth JSON, not API keys)
+  token claude <name>                save a Claude account's token; a run uses the first account, by name, not at its usage limit
+  token claude --list | --remove <name>   the Claude accounts in that order and their limits | remove one
+  token codex|gemini|antigravity|copilot   save a token (Google providers: OAuth JSON, not API keys; Copilot: a fine-grained GitHub token)
   token antigravity --from-login      import the current Windows account's Antigravity Google login
-  token --account <name>              another Claude account: a run uses the first one not at its usage limit
   serve                              the web UI on 127.0.0.1:$AGENTRY_PORT (default 4747), with nightly backups
   user add <name> [--admin]          create a web UI account, an owner (--admin: one that can't change settings);
                                      prints a one-time passkey link (30 min)
@@ -89,7 +91,7 @@ function main(argv: string[]): Promise<number> | number {
       body: { type: "string" }, "done-when": { type: "string" }, "done-when-test": { type: "string" },
       priority: { type: "string" }, once: { type: "boolean" }, all: { type: "boolean" }, help: { type: "boolean", short: "h" },
       owner: { type: "boolean" }, admin: { type: "boolean" }, runner: { type: "string" },
-      "from-login": { type: "boolean" }, agent: { type: "string" }, account: { type: "string" },
+      "from-login": { type: "boolean" }, agent: { type: "string" }, list: { type: "boolean" }, remove: { type: "string" },
     },
   });
   if (!cmd || o.help) { console.log(USAGE); return cmd ? 0 : 1; }
@@ -123,7 +125,12 @@ function main(argv: string[]): Promise<number> | number {
       return 0;
     }
     case "unblock": A.unblock(db, args[0] ?? fail("unblock needs a group name")); return 0;
-    case "token": return saveToken(args[0], !!o["from-login"], o.account);
+    case "token": {
+      if (args[0] === "claude" && o.list) return listAccounts();
+      if (args[0] === "claude" && o.remove !== undefined) return removeAccount(o.remove);
+      if (o.list || o.remove !== undefined) fail(TOKEN_USAGE);
+      return saveToken(args[0], !!o["from-login"], args[1]);
+    }
     case "attach": return attach(db, args[0]);
     case "detach": return detach();
     case "runner-key": return runnerKey(db, args);
@@ -189,15 +196,16 @@ function list(db: Database, all: boolean): number {
   return 0;
 }
 
-// Reads a pasted `claude setup-token` token from stdin, refuses anything else, and saves it with mode 600.
-// --account <name>: another Claude account beside the first, used when the ones before it are at their usage limit.
-async function saveToken(provider = "claude", fromLogin = false, account?: string): Promise<number> {
-  if (!isAgent(provider)) fail("usage: agentry token [claude|codex|gemini|antigravity]");
+const TOKEN_USAGE = "usage: agentry token claude <name> | agentry token claude --list | agentry token claude --remove <name> | agentry token codex|gemini|antigravity|copilot";
+
+// Reads a pasted `claude setup-token` token from stdin, refuses anything else, and saves it with mode 600. Claude:
+// under the account <name>, a new one or in place of the one of that name.
+async function saveToken(provider: string | undefined, fromLogin: boolean, account?: string): Promise<number> {
+  if (!provider || !isAgent(provider)) fail(TOKEN_USAGE);
   if (fromLogin && provider !== "antigravity") fail("--from-login is supported for Antigravity on Windows only");
-  if (account !== undefined && provider !== "claude") fail("--account is for Claude tokens only");
-  if (account !== undefined && (!/^[A-Za-z0-9._-]{1,32}$/.test(account) || account === "default")) {
-    fail("an account's name is 1-32 letters, digits, '.', '_' or '-', and not \"default\" (the first account's)");
-  }
+  if (provider === "claude" && account === undefined) fail(`name the account, e.g. agentry token claude personal (${TOKEN_USAGE})`);
+  if (provider !== "claude" && account !== undefined) fail(TOKEN_USAGE);
+  if (account !== undefined && !ACCOUNT_NAME.test(account)) fail("an account's name is 1-32 letters, digits, '.', '_' or '-'");
   if (provider === "gemini" || provider === "antigravity") {
     if (!fromLogin && process.stdin.isTTY) console.log("Paste the Google OAuth credential JSON, then finish stdin (Ctrl-D on macOS, Ctrl-Z then Enter on Windows):");
     const raw = fromLogin ? importAntigravityLogin() : await Bun.stdin.text();
@@ -208,14 +216,41 @@ async function saveToken(provider = "claude", fromLogin = false, account?: strin
     console.log(`saved ${provider} OAuth credentials to ${file}`);
     return 0;
   }
+  if (provider === "copilot") {
+    if (process.stdin.isTTY) console.log("Paste a fine-grained GitHub token with the Copilot Requests permission, then press Enter on an empty line:");
+    let token = "";
+    try { token = copilotToken(process.stdin.isTTY ? await readUntilBlankLine() : await Bun.stdin.text()); } catch (e) { fail(`${(e as Error).message}; nothing saved`); }
+    const file = join(home, "copilot-github-token");
+    rmSync(file, { force: true });
+    writeFileSync(file, token + "\n", { mode: 0o600 });
+    console.log(`saved ${token.length} characters to ${file}`);
+    return 0;
+  }
   if (process.stdin.isTTY) console.log("Paste the token (line breaks are fine), then press Enter on an empty line:");
   const token = (process.stdin.isTTY ? await readUntilBlankLine() : await Bun.stdin.text()).replace(/\s+/g, "");
   if (provider === "codex" && (!token || token.startsWith("sk-"))) fail("Paste a Codex access token, not an API key; nothing saved");
   if (provider === "claude" && !/^sk-ant-oat01-[A-Za-z0-9_-]+$/.test(token)) fail("that is not a setup-token token (sk-ant-oat01-...); nothing saved");
-  const file = join(home, provider === "codex" ? "codex-access-token" : `claude-oauth-token${account ? `-${account}` : ""}`);
+  if (provider === "claude") claudeAccounts(join(home, "claude-oauth-token")); // a token saved before accounts had names becomes "default" first
+  const file = join(home, provider === "codex" ? "codex-access-token" : `claude-oauth-token-${account}`);
   rmSync(file, { recursive: false, force: true });
   writeFileSync(file, token + "\n", { mode: 0o600 });
   console.log(`saved ${token.length} characters to ${file}`);
+  return 0;
+}
+
+// The Claude accounts in the order runs use them, each ready or at its usage limit until when. No token is shown.
+function listAccounts(): number {
+  const tokenFile = join(home, "claude-oauth-token");
+  const all = claudeAccounts(tokenFile), limits = readLimits(tokenFile), now = Date.now();
+  if (!all.length) { console.log("no Claude accounts: agentry token claude <name>"); return 0; }
+  for (const a of all) console.log(`${a.name}  ${limits[a.name] > now ? `at its usage limit until ${new Date(limits[a.name]).toLocaleString()}` : "ready"}`);
+  return 0;
+}
+
+function removeAccount(name: string): number {
+  let left = 0;
+  try { left = removeClaudeAccount(name, join(home, "claude-oauth-token")); } catch (e) { fail(e instanceof Error ? e.message : String(e)); }
+  console.log(`removed Claude account ${name}${left ? "" : "; no Claude account is left, so runs can't start until you add one (agentry token claude <name>)"}`);
   return 0;
 }
 
@@ -281,6 +316,13 @@ async function makeCtx(q: Queue, work: string): Promise<RunnerCtx> {
       const authFile = process.env.AGENTRY_CODEX_AUTH_FILE ?? join(home, "codex", "auth.json");
       const o = { bin, token, authFile, model: process.env.AGENTRY_CODEX_MODEL };
       return { ...base, claudeBin: bin, agent: codexAgent(o), verifier: codexVerifier(o) };
+    }
+    if (agent === "copilot") {
+      const bin = realpathSync(process.env.AGENTRY_COPILOT_BIN ?? Bun.which("copilot") ?? fail("copilot is not on PATH (or set AGENTRY_COPILOT_BIN)"));
+      const tokenFile = join(home, "copilot-github-token");
+      const token = existsSync(tokenFile) ? readFileSync(tokenFile, "utf8").trim() : undefined;
+      const o = { bin, token, model: process.env.AGENTRY_COPILOT_MODEL };
+      return { ...base, claudeBin: bin, agent: copilotAgent(o), verifier: copilotVerifier(o) };
     }
     if (agent !== "claude") throw new Error("Unsupported AI agent: " + agent);
     const bin = claudeBin();

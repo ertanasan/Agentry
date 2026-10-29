@@ -840,7 +840,7 @@ ${d.attachedTo ? html`<p>Pause, workers and the default AI agent are set on ${qu
     ${Object.entries(AGENTS).map(([id, label]) => html`<option value="${id}" ${(d.aiAgent ?? "claude") === id ? "selected" : ""}>${label}</option>`)}
   </select>
   <p class="hint">For requests that don't choose an agent of their own. Applies to new runs, including their verifier. Use subscription or ChatGPT token access configured on each runner.</p>
-  <p class="hint">Gemini CLI uses Google OAuth. Antigravity CLI supports Google Free sign-in on Windows; import that login on each runner with agentry token antigravity --from-login.</p>
+  <p class="hint">Gemini CLI uses Google OAuth. Antigravity CLI supports Google Free sign-in on Windows; import that login on each runner with agentry token antigravity --from-login. GitHub Copilot CLI uses a fine-grained GitHub token saved on each runner with agentry token copilot.</p>
   <label for="workers">Workers</label>
   <p class="hint">How many requests the runner works on at once. Pushes and deploys still go one at a time for each deploy group.</p>
   <input type="number" id="workers" name="workers" min="1" max="${d.maxWorkers}" step="1" value="${d.workers}" required${off}>

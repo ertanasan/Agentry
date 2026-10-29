@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claudeAgent, resolveAuth } from "../src/adapters/claude.ts";
+import { claudeAccounts, claudeAgent, removeClaudeAccount, resolveAuth } from "../src/adapters/claude.ts";
 import type { StepIO } from "../src/adapters/types.ts";
 import { git } from "../src/git.ts";
 import { sandbox } from "../src/sandbox.ts";
@@ -151,38 +151,55 @@ describe("subscription auth", () => {
     expect(h.io.sandbox.env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined(); // only the claude step gets it, not build or test
   });
 
-  test("resolveAuth: the token file wins over the key helper; without it, the key helper", () => {
+  test("resolveAuth: an account wins over the key helper; without one, the key helper", () => {
     const dir = mkdtempSync(join(tmpdir(), "agentry-auth-"));
     const tokenFile = join(dir, "claude-oauth-token");
     expect(resolveAuth(tokenFile, "/k/helper")).toEqual({ kind: "api_key", keyHelper: "/k/helper" });
-    writeFileSync(tokenFile, "sk-ant-oat-abc\n");
+    writeFileSync(`${tokenFile}-main`, "sk-ant-oat-abc\n");
     expect(resolveAuth(tokenFile, "/k/helper")).toEqual({ kind: "subscription", token: "sk-ant-oat-abc" });
-    writeFileSync(tokenFile, "sk-ant-oat01-first-half-\n WRAPTAIL\n");
+    writeFileSync(`${tokenFile}-main`, "sk-ant-oat01-first-half-\n WRAPTAIL\n");
     expect(resolveAuth(tokenFile)).toEqual({ kind: "subscription", token: "sk-ant-oat01-first-half-WRAPTAIL" });
-    writeFileSync(tokenFile, "\n");
+    writeFileSync(`${tokenFile}-main`, "\n");
     expect(() => resolveAuth(tokenFile)).toThrow("is empty");
   });
 
-  test("resolveAuth with several accounts: the first not at its limit; all limited, the one that resets first", () => {
+  test("a token saved before accounts had names becomes the account default; removing one drops its limit", () => {
     const dir = mkdtempSync(join(tmpdir(), "agentry-auth-"));
     const tokenFile = join(dir, "claude-oauth-token");
-    writeFileSync(tokenFile, "sk-ant-oat-main\n");
+    writeFileSync(tokenFile, "sk-ant-oat-old\n");
+    writeFileSync(`${tokenFile}-work`, "sk-ant-oat-work\n");
+    expect(claudeAccounts(tokenFile).map((a) => a.name)).toEqual(["default", "work"]);
+    expect(existsSync(tokenFile)).toBe(false);
+    expect(readFileSync(`${tokenFile}-default`, "utf8")).toBe("sk-ant-oat-old\n");
+
+    writeFileSync(join(dir, "claude-limits.json"), JSON.stringify({ default: 5_000, work: 6_000 }));
+    expect(removeClaudeAccount("default", tokenFile)).toBe(1);
+    expect(claudeAccounts(tokenFile).map((a) => a.name)).toEqual(["work"]);
+    expect(JSON.parse(readFileSync(join(dir, "claude-limits.json"), "utf8"))).toEqual({ work: 6_000 });
+    expect(() => removeClaudeAccount("default", tokenFile)).toThrow("no Claude account named default");
+    expect(removeClaudeAccount("work", tokenFile)).toBe(0);
+  });
+
+  test("resolveAuth with several accounts: the first by name not at its limit; all limited, the one that resets first", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentry-auth-"));
+    const tokenFile = join(dir, "claude-oauth-token");
+    writeFileSync(`${tokenFile}-main`, "sk-ant-oat-main\n");
     writeFileSync(`${tokenFile}-work`, "sk-ant-oat-work\n");
     writeFileSync(`${tokenFile}-alt`, "sk-ant-oat-alt\n");
     const limits = (l: Record<string, number>) => writeFileSync(join(dir, "claude-limits.json"), JSON.stringify(l));
     const pick = (now: number) => { const a = resolveAuth(tokenFile, "/k/helper", now); return a.kind === "subscription" && [a.token, a.account?.name]; };
-    expect(pick(1_000)).toEqual(["sk-ant-oat-main", "default"]);
-    limits({ default: 5_000 });
-    expect(pick(1_000)).toEqual(["sk-ant-oat-alt", "alt"]); // the others by name
-    expect(pick(6_000)).toEqual(["sk-ant-oat-main", "default"]); // past its reset
-    limits({ default: 5_000, alt: 3_000, work: 4_000 });
+    expect(pick(1_000)).toEqual(["sk-ant-oat-alt", "alt"]);
+    limits({ alt: 5_000 });
+    expect(pick(1_000)).toEqual(["sk-ant-oat-main", "main"]); // the next by name
+    expect(pick(6_000)).toEqual(["sk-ant-oat-alt", "alt"]); // past its reset
+    limits({ main: 5_000, alt: 3_000, work: 4_000 });
     expect(pick(1_000)).toEqual(["sk-ant-oat-alt", "alt"]);
   });
 
   test("a usage limit marks the account until its reset and asks for a retry while another is free", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agentry-auth-"));
     const tokenFile = join(dir, "claude-oauth-token");
-    writeFileSync(tokenFile, "sk-ant-oat-main\n");
+    writeFileSync(`${tokenFile}-main`, "sk-ant-oat-main\n");
     writeFileSync(`${tokenFile}-work`, "sk-ant-oat-work\n");
     const resetsAt = Math.floor(Date.now() / 1000) + 3600;
     const limited = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt, rateLimitType: "five_hour" } });
@@ -192,7 +209,7 @@ describe("subscription auth", () => {
     const r1 = await claudeAgent({ bin: h1.bin, auth: resolveAuth(tokenFile) }).run({ ...h1.io, prompt: "x" });
     expect(h1.token()).toBe("sk-ant-oat-main");
     expect(r1).toMatchObject({ outcome: "infra_error", retry: true });
-    expect(JSON.parse(readFileSync(join(dir, "claude-limits.json"), "utf8"))).toEqual({ default: resetsAt * 1000 });
+    expect(JSON.parse(readFileSync(join(dir, "claude-limits.json"), "utf8"))).toEqual({ main: resetsAt * 1000 });
 
     const h2 = setup({ out, exit: 1 });
     const r2 = await claudeVerifier({ bin: h2.bin, auth: resolveAuth(tokenFile) }).verify({ ...h2.io, ...input });
@@ -204,7 +221,7 @@ describe("subscription auth", () => {
   test("a usage limit without a rate limit event still counts; with one account nothing is recorded", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agentry-auth-"));
     const tokenFile = join(dir, "claude-oauth-token");
-    writeFileSync(tokenFile, "sk-ant-oat-main\n");
+    writeFileSync(`${tokenFile}-main`, "sk-ant-oat-main\n");
     const h1 = setup({ out: resultLine("Claude AI usage limit reached", true) + "\n", exit: 1 });
     expect(await claudeAgent({ bin: h1.bin, auth: resolveAuth(tokenFile) }).run({ ...h1.io, prompt: "x" }))
       .toEqual({ outcome: "infra_error", detail: "Claude AI usage limit reached" });
@@ -213,7 +230,7 @@ describe("subscription auth", () => {
     writeFileSync(`${tokenFile}-work`, "sk-ant-oat-work\n");
     const h2 = setup({ out: resultLine("Claude AI usage limit reached", true) + "\n", exit: 1 });
     expect(await claudeAgent({ bin: h2.bin, auth: resolveAuth(tokenFile) }).run({ ...h2.io, prompt: "x" })).toMatchObject({ retry: true });
-    const until = JSON.parse(readFileSync(join(dir, "claude-limits.json"), "utf8")).default;
+    const until = JSON.parse(readFileSync(join(dir, "claude-limits.json"), "utf8")).main;
     expect(until - Date.now()).toBeGreaterThan(55 * 60_000); // an hour without a reset time
   });
 });
