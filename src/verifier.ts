@@ -59,7 +59,7 @@ export function claudeVerifier(o: ClaudeOptions): Verifier {
   return {
     async verify(io) {
       const reply = await callClaude(o, io, verifierPrompt(io), ["Read", "Grep"], "dontAsk");
-      return reply.ok ? parseVerdict(reply.text) : { verdict: "infra_error", evidence: reply.detail };
+      return reply.ok ? parseVerdict(reply.text) : { verdict: "infra_error", evidence: reply.detail, ...(reply.retry && { retry: true }) };
     },
   };
 }

@@ -58,6 +58,7 @@ const USAGE = `usage: agentry <command>
   resume                             unpause the runner
   token [claude|codex|gemini|antigravity]   save a token (Google providers: OAuth JSON, not API keys)
   token antigravity --from-login      import the current Windows account's Antigravity Google login
+  token --account <name>              another Claude account: a run uses the first one not at its usage limit
   serve                              the web UI on 127.0.0.1:$AGENTRY_PORT (default 4747), with nightly backups
   user add <name> [--admin]          create a web UI account, an owner (--admin: one that can't change settings);
                                      prints a one-time passkey link (30 min)
@@ -88,7 +89,7 @@ function main(argv: string[]): Promise<number> | number {
       body: { type: "string" }, "done-when": { type: "string" }, "done-when-test": { type: "string" },
       priority: { type: "string" }, once: { type: "boolean" }, all: { type: "boolean" }, help: { type: "boolean", short: "h" },
       owner: { type: "boolean" }, admin: { type: "boolean" }, runner: { type: "string" },
-      "from-login": { type: "boolean" }, agent: { type: "string" },
+      "from-login": { type: "boolean" }, agent: { type: "string" }, account: { type: "string" },
     },
   });
   if (!cmd || o.help) { console.log(USAGE); return cmd ? 0 : 1; }
@@ -122,7 +123,7 @@ function main(argv: string[]): Promise<number> | number {
       return 0;
     }
     case "unblock": A.unblock(db, args[0] ?? fail("unblock needs a group name")); return 0;
-    case "token": return saveToken(args[0], !!o["from-login"]);
+    case "token": return saveToken(args[0], !!o["from-login"], o.account);
     case "attach": return attach(db, args[0]);
     case "detach": return detach();
     case "runner-key": return runnerKey(db, args);
@@ -189,9 +190,14 @@ function list(db: Database, all: boolean): number {
 }
 
 // Reads a pasted `claude setup-token` token from stdin, refuses anything else, and saves it with mode 600.
-async function saveToken(provider = "claude", fromLogin = false): Promise<number> {
+// --account <name>: another Claude account beside the first, used when the ones before it are at their usage limit.
+async function saveToken(provider = "claude", fromLogin = false, account?: string): Promise<number> {
   if (!isAgent(provider)) fail("usage: agentry token [claude|codex|gemini|antigravity]");
   if (fromLogin && provider !== "antigravity") fail("--from-login is supported for Antigravity on Windows only");
+  if (account !== undefined && provider !== "claude") fail("--account is for Claude tokens only");
+  if (account !== undefined && (!/^[A-Za-z0-9._-]{1,32}$/.test(account) || account === "default")) {
+    fail("an account's name is 1-32 letters, digits, '.', '_' or '-', and not \"default\" (the first account's)");
+  }
   if (provider === "gemini" || provider === "antigravity") {
     if (!fromLogin && process.stdin.isTTY) console.log("Paste the Google OAuth credential JSON, then finish stdin (Ctrl-D on macOS, Ctrl-Z then Enter on Windows):");
     const raw = fromLogin ? importAntigravityLogin() : await Bun.stdin.text();
@@ -206,7 +212,7 @@ async function saveToken(provider = "claude", fromLogin = false): Promise<number
   const token = (process.stdin.isTTY ? await readUntilBlankLine() : await Bun.stdin.text()).replace(/\s+/g, "");
   if (provider === "codex" && (!token || token.startsWith("sk-"))) fail("Paste a Codex access token, not an API key; nothing saved");
   if (provider === "claude" && !/^sk-ant-oat01-[A-Za-z0-9_-]+$/.test(token)) fail("that is not a setup-token token (sk-ant-oat01-...); nothing saved");
-  const file = join(home, provider === "codex" ? "codex-access-token" : "claude-oauth-token");
+  const file = join(home, provider === "codex" ? "codex-access-token" : `claude-oauth-token${account ? `-${account}` : ""}`);
   rmSync(file, { recursive: false, force: true });
   writeFileSync(file, token + "\n", { mode: 0o600 });
   console.log(`saved ${token.length} characters to ${file}`);

@@ -9,33 +9,66 @@
 // --tools list; the sandbox, not the permission mode, is the boundary.
 // The prompt goes through a file in the run's temp dir. Output is stream-json in the step log; its final
 // `result` event decides: is_error, a crash without a result, or a timeout is infra_error.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { readTail, runStep } from "../proc.ts";
 import { AGENTRY_HOME, KEY_HELPER } from "../sandbox.ts";
 import type { Agent, StepIO } from "./types.ts";
 
-export type ClaudeAuth = { kind: "api_key"; keyHelper: string } | { kind: "subscription"; token: string };
+// account: with more than one subscription account, the one this run uses and the first account's token file.
+export type ClaudeAuth = { kind: "api_key"; keyHelper: string } | { kind: "subscription"; token: string; account?: { name: string; tokenFile: string } };
 
 export type ClaudeOptions = { bin: string; model?: string; auth?: ClaudeAuth }; // default: api_key with KEY_HELPER
 
-// Output of `claude setup-token`, saved by the user (chmod 600).
+// Output of `claude setup-token`, saved by the user (chmod 600). More accounts sit beside it as
+// claude-oauth-token-<name> (`agentry token --account <name>`).
 export const OAUTH_TOKEN_FILE = join(AGENTRY_HOME, "claude-oauth-token");
 
-// The subscription token when ~/.agentry/claude-oauth-token exists, else the API key helper. Whitespace is dropped
-// anywhere in it: `claude setup-token` wraps the token over two lines, and a copied line break would cut it.
-export function resolveAuth(tokenFile = OAUTH_TOKEN_FILE, keyHelper = KEY_HELPER): ClaudeAuth {
-  if (existsSync(tokenFile)) {
-    const token = readFileSync(tokenFile, "utf8").replace(/\s+/g, "");
-    if (!token) throw new Error(`${tokenFile} is empty`);
-    return { kind: "subscription", token };
-  }
-  return { kind: "api_key", keyHelper };
+// Each limited account's reset time (ms), beside the token files.
+const limitsFile = (tokenFile: string) => join(dirname(tokenFile), "claude-limits.json");
+// Without a reset time from Claude, a limited account is tried again after this.
+const LIMIT_FALLBACK_MS = 60 * 60_000;
+
+function accounts(tokenFile: string): { name: string; file: string }[] {
+  const dir = dirname(tokenFile), base = basename(tokenFile);
+  const named = existsSync(dir) ? readdirSync(dir).filter((f) => f.startsWith(`${base}-`)).sort() : [];
+  return [...(existsSync(tokenFile) ? [{ name: "default", file: tokenFile }] : []),
+    ...named.map((f) => ({ name: f.slice(base.length + 1), file: join(dir, f) }))];
 }
 
-export type Reply = { ok: true; text: string } | { ok: false; detail: string };
+function readLimits(tokenFile: string): Record<string, number> {
+  try { return JSON.parse(readFileSync(limitsFile(tokenFile), "utf8")); } catch { return {}; }
+}
+
+// The subscription token when ~/.agentry/claude-oauth-token or another account exists, else the API key helper.
+// Several accounts: the first not at its usage limit (failover); all of them limited, the one that resets first,
+// whose run is refused and pauses the runner. Whitespace is dropped anywhere in a token: `claude setup-token`
+// wraps it over two lines, and a copied line break would cut it.
+export function resolveAuth(tokenFile = OAUTH_TOKEN_FILE, keyHelper = KEY_HELPER, now = Date.now()): ClaudeAuth {
+  const all = accounts(tokenFile);
+  if (!all.length) return { kind: "api_key", keyHelper };
+  const limits = readLimits(tokenFile);
+  const pick = all.find((a) => !(limits[a.name] > now)) ?? all.reduce((a, b) => (limits[b.name] < limits[a.name] ? b : a));
+  const token = readFileSync(pick.file, "utf8").replace(/\s+/g, "");
+  if (!token) throw new Error(`${pick.file} is empty`);
+  return all.length === 1 ? { kind: "subscription", token } : { kind: "subscription", token, account: { name: pick.name, tokenFile } };
+}
+
+// A usage limit on one of several accounts: skip it until its reset. True when another account is free now.
+function markLimited(account: { name: string; tokenFile: string }, resetsAt: number | undefined, now = Date.now()): boolean {
+  const limits = readLimits(account.tokenFile);
+  limits[account.name] = resetsAt ? resetsAt * 1000 : now + LIMIT_FALLBACK_MS;
+  writeFileSync(limitsFile(account.tokenFile), JSON.stringify(limits) + "\n");
+  return accounts(account.tokenFile).some((a) => !(limits[a.name] > now));
+}
+
+// retry: the account hit its usage limit and another is free, so the run goes back on the queue without a pause.
+export type Reply = { ok: true; text: string } | { ok: false; detail: string; retry?: boolean };
 
 type ResultEvent = { type: "result"; is_error?: boolean; subtype?: string; result?: string };
+// stream-json reports each rate limit check; "rejected" is a usage limit, resetsAt in epoch seconds.
+type RateLimitEvent = { type: "rate_limit_event"; rate_limit_info?: { status?: string; resetsAt?: number | null } };
+const USAGE_LIMIT = /usage limit|hit your (?:\S+ )?limit/i;
 
 const AGENT_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"];
 
@@ -58,29 +91,39 @@ export async function callClaude(o: ClaudeOptions, io: StepIO, prompt: string, t
     cwd: io.worktree, logPath: io.logPath, timeoutMs: io.timeoutMs, wrap: io.sandbox.wrap, env, onStart: io.onStart, stdinPath: promptFile,
   });
   if (r.timedOut) return { ok: false, detail: `claude timed out after ${Math.round(io.timeoutMs / 1000)} s` };
-  const result = lastResult(readTail(io.logPath, RESULT_TAIL_BYTES));
-  if (!result) return { ok: false, detail: `claude exited ${r.exitCode} without a result` };
-  if (result.is_error) return { ok: false, detail: result.result || result.subtype || "error" };
+  const { result, rejected } = scan(readTail(io.logPath, RESULT_TAIL_BYTES));
+  if (!result) return failed(auth, `claude exited ${r.exitCode} without a result`, rejected);
+  if (result.is_error) return failed(auth, result.result || result.subtype || "error", rejected);
   return { ok: true, text: result.result ?? "" };
 }
 
-function lastResult(log: string): ResultEvent | null {
-  let found: ResultEvent | null = null;
+function failed(auth: ClaudeAuth, detail: string, rejected: RateLimitEvent | null): Reply {
+  if (auth.kind !== "subscription" || !auth.account || !(rejected || USAGE_LIMIT.test(detail))) return { ok: false, detail };
+  const resetsAt = rejected?.rate_limit_info?.resetsAt ?? undefined;
+  const retry = markLimited(auth.account, resetsAt);
+  const until = new Date(resetsAt ? resetsAt * 1000 : Date.now() + LIMIT_FALLBACK_MS).toLocaleString();
+  return { ok: false, detail: `${detail} (Claude account ${auth.account.name}, skipped until ${until}${retry ? "" : "; no other account is free"})`, retry };
+}
+
+// The final `result` event, and the last rate limit check that refused the call.
+function scan(log: string): { result: ResultEvent | null; rejected: RateLimitEvent | null } {
+  let result: ResultEvent | null = null, rejected: RateLimitEvent | null = null;
   for (const line of log.split("\n")) {
     if (!line.startsWith("{")) continue;
     try {
       const ev = JSON.parse(line);
-      if (ev?.type === "result") found = ev;
+      if (ev?.type === "result") result = ev;
+      else if (ev?.type === "rate_limit_event" && ev.rate_limit_info?.status === "rejected") rejected = ev;
     } catch { /* stderr or a partial line */ }
   }
-  return found;
+  return { result, rejected };
 }
 
 export function claudeAgent(o: ClaudeOptions): Agent {
   return {
     async run(io) {
       const reply = await callClaude(o, io, io.prompt, AGENT_TOOLS, "bypassPermissions");
-      if (!reply.ok) return { outcome: "infra_error", detail: reply.detail };
+      if (!reply.ok) return { outcome: "infra_error", detail: reply.detail, ...(reply.retry && { retry: true }) };
       const q = reply.text.match(/^\s*NEEDS_INFO:\s*(.+)$/m);
       return q ? { outcome: "needs_info", question: q[1].trim() } : { outcome: "finished" };
     },

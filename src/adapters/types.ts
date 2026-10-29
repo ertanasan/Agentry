@@ -15,13 +15,14 @@ export type StepIO = {
 export type AgentResult =
   | { outcome: "finished" }
   | { outcome: "needs_info"; question: string }
-  | { outcome: "infra_error"; detail: string }; // usage limit, auth, network, crash: requeue and pause
+  | { outcome: "infra_error"; detail: string; retry?: boolean }; // usage limit, auth, network, crash: requeue and pause
+                                                                 // retry: another account is free, so no pause
 
 export type Agent = { run(io: StepIO & { prompt: string }): Promise<AgentResult> };
 
 export type VerifyInput = { title: string; body: string; doneWhen: string; diff: string; testSummary: string };
 
 // An unparseable verdict is FAIL with the raw output as evidence, never infra_error.
-export type Verdict = { verdict: "PASS" | "FAIL" | "infra_error"; evidence: string };
+export type Verdict = { verdict: "PASS" | "FAIL" | "infra_error"; evidence: string; retry?: boolean }; // retry as above
 
 export type Verifier = { verify(io: StepIO & VerifyInput): Promise<Verdict> };

@@ -240,6 +240,14 @@ describe("runner: agent outcomes", () => {
     expect(h.lastRun(id).status).toBe("interrupted");
     expect(await runNext(h.ctx)).toEqual({ kind: "paused" });
   });
+
+  test("agent infra_error with another Claude account free → queued without counting the attempt, no pause", async () => {
+    const h = setup({ agent: () => ({ outcome: "infra_error", detail: "usage limit reached (Claude account default, skipped until 3pm)", retry: true }) });
+    const id = h.add();
+    await runNext(h.ctx);
+    expect(h.req(id)).toMatchObject({ status: "queued", attempts: 0 });
+    expect(runnerRow(h.db).paused).toBe(0);
+  });
 });
 
 describe("runner: gates", () => {

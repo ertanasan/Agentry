@@ -87,6 +87,8 @@ const DEFAULT_BACKOFF_MS = [2_000, 10_000, 30_000];
 const pre = (reason: string): Stop => ({ status: "blocked_pre_push", reason });
 const post = (reason: string, sha: string | null, groups?: number[]): Stop => ({ status: "blocked_post_push", reason, lock: { reason, sha, groups } });
 const infra = (reason: string): Stop => ({ status: "queued", reason, requeue: true, pause: true });
+// A usage limit with another Claude account free: back on the queue for that account, no pause.
+const failover = (reason: string): Stop => ({ status: "queued", reason, requeue: true });
 
 // The request's projects, lowest deploy_order first, then by project.
 function partsOf(rows: PartRow[]): Part[] {
@@ -442,7 +444,7 @@ async function gates(j: Job, approved: boolean): Promise<Stop | null> {
     await s.end(v.verdict === "PASS" ? 0 : 1);
     const changed = tampered(j, "verify");
     if (changed) return changed;
-    if (v.verdict === "infra_error") return infra(`verifier: ${v.evidence}`);
+    if (v.verdict === "infra_error") return (v.retry ? failover : infra)(`verifier: ${v.evidence}`);
     if (v.verdict === "FAIL") return pre(`done-when not met: ${v.evidence}`);
   }
   return null;
@@ -484,7 +486,7 @@ async function agentStep(j: Job, repairFeedback?: string): Promise<Stop | null> 
     prompt: prompt(j, files, await j.ctx.q.answers(j.req.id), repairFeedback),
   });
   await s.end(res.outcome === "infra_error" ? 1 : 0);
-  if (res.outcome === "infra_error") return infra(`agent: ${res.detail}`);
+  if (res.outcome === "infra_error") return (res.retry ? failover : infra)(`agent: ${res.detail}`);
   if (res.outcome === "needs_info") return { status: "needs_info", reason: res.question };
   return null;
 }
