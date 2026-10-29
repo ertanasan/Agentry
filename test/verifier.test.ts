@@ -1,7 +1,7 @@
 // The claude adapter and the done-when verifier (T5, eng review D9), with a fake `claude` binary run through the
 // real sandbox. The fake records its arguments and stdin in the run's temp dir and prints a canned reply.
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeAgent, resolveAuth } from "../src/adapters/claude.ts";
@@ -161,5 +161,59 @@ describe("subscription auth", () => {
     expect(resolveAuth(tokenFile)).toEqual({ kind: "subscription", token: "sk-ant-oat01-first-half-WRAPTAIL" });
     writeFileSync(tokenFile, "\n");
     expect(() => resolveAuth(tokenFile)).toThrow("is empty");
+  });
+
+  test("resolveAuth with several accounts: the first not at its limit; all limited, the one that resets first", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentry-auth-"));
+    const tokenFile = join(dir, "claude-oauth-token");
+    writeFileSync(tokenFile, "sk-ant-oat-main\n");
+    writeFileSync(`${tokenFile}-work`, "sk-ant-oat-work\n");
+    writeFileSync(`${tokenFile}-alt`, "sk-ant-oat-alt\n");
+    const limits = (l: Record<string, number>) => writeFileSync(join(dir, "claude-limits.json"), JSON.stringify(l));
+    const pick = (now: number) => { const a = resolveAuth(tokenFile, "/k/helper", now); return a.kind === "subscription" && [a.token, a.account?.name]; };
+    expect(pick(1_000)).toEqual(["sk-ant-oat-main", "default"]);
+    limits({ default: 5_000 });
+    expect(pick(1_000)).toEqual(["sk-ant-oat-alt", "alt"]); // the others by name
+    expect(pick(6_000)).toEqual(["sk-ant-oat-main", "default"]); // past its reset
+    limits({ default: 5_000, alt: 3_000, work: 4_000 });
+    expect(pick(1_000)).toEqual(["sk-ant-oat-alt", "alt"]);
+  });
+
+  test("a usage limit marks the account until its reset and asks for a retry while another is free", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentry-auth-"));
+    const tokenFile = join(dir, "claude-oauth-token");
+    writeFileSync(tokenFile, "sk-ant-oat-main\n");
+    writeFileSync(`${tokenFile}-work`, "sk-ant-oat-work\n");
+    const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+    const limited = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt, rateLimitType: "five_hour" } });
+    const out = `${limited}\n${resultLine("You've hit your limit · resets 3pm", true)}\n`;
+
+    const h1 = setup({ out, exit: 1 });
+    const r1 = await claudeAgent({ bin: h1.bin, auth: resolveAuth(tokenFile) }).run({ ...h1.io, prompt: "x" });
+    expect(h1.token()).toBe("sk-ant-oat-main");
+    expect(r1).toMatchObject({ outcome: "infra_error", retry: true });
+    expect(JSON.parse(readFileSync(join(dir, "claude-limits.json"), "utf8"))).toEqual({ default: resetsAt * 1000 });
+
+    const h2 = setup({ out, exit: 1 });
+    const r2 = await claudeVerifier({ bin: h2.bin, auth: resolveAuth(tokenFile) }).verify({ ...h2.io, ...input });
+    expect(h2.token()).toBe("sk-ant-oat-work");
+    expect(r2.retry).toBeUndefined(); // both limited now: infra_error that pauses
+    expect(r2.evidence).toContain("no other account is free");
+  });
+
+  test("a usage limit without a rate limit event still counts; with one account nothing is recorded", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentry-auth-"));
+    const tokenFile = join(dir, "claude-oauth-token");
+    writeFileSync(tokenFile, "sk-ant-oat-main\n");
+    const h1 = setup({ out: resultLine("Claude AI usage limit reached", true) + "\n", exit: 1 });
+    expect(await claudeAgent({ bin: h1.bin, auth: resolveAuth(tokenFile) }).run({ ...h1.io, prompt: "x" }))
+      .toEqual({ outcome: "infra_error", detail: "Claude AI usage limit reached" });
+    expect(existsSync(join(dir, "claude-limits.json"))).toBe(false);
+
+    writeFileSync(`${tokenFile}-work`, "sk-ant-oat-work\n");
+    const h2 = setup({ out: resultLine("Claude AI usage limit reached", true) + "\n", exit: 1 });
+    expect(await claudeAgent({ bin: h2.bin, auth: resolveAuth(tokenFile) }).run({ ...h2.io, prompt: "x" })).toMatchObject({ retry: true });
+    const until = JSON.parse(readFileSync(join(dir, "claude-limits.json"), "utf8")).default;
+    expect(until - Date.now()).toBeGreaterThan(55 * 60_000); // an hour without a reset time
   });
 });

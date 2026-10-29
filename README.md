@@ -610,6 +610,13 @@ passkey requirements are the same as for the other runner settings.
 Both choices use token access; the runner does not fall back to API keys. For Claude Code, run
 `claude setup-token`, then paste its output into `agentry token` (or `agentry token claude`).
 
+With several Claude accounts, save each one after the first with `agentry token --account <name>` (saved as
+`claude-oauth-token-<name>` beside the first). A run uses the first account that isn't at its usage limit, in
+that order: the first one, then the others by name. When an account hits its limit, Agentry skips it until the
+reset time Claude reports (or for an hour if Claude gives no time), kept in `claude-limits.json`. The run goes
+back on the queue for the next account, and the runner pauses only when every account is at its limit. To
+remove an account, delete its file.
+
 For Codex, install the Codex CLI in a location the sandbox account can execute. Use either:
 
 - A ChatGPT workspace access token: run `agentry token codex` and paste the token. It is saved in
@@ -757,6 +764,7 @@ agentry reopen <id> <what's wrong>    done → a new linked request (counts one 
 agentry unblock <group>               clear a deploy-group lock no request holds (drift guard)
 agentry resume                        unpause the runner
 agentry token [claude|codex]          save a Claude subscription token or Codex access token (paste, then Enter on an empty line)
+agentry token --account <name>        save another Claude account, used when the ones before it are at their usage limit
 agentry serve                         the web UI, with nightly backups
 agentry user add <name> [--admin]     create a web UI account, an owner unless --admin; prints a one-time passkey link
 agentry user reset <name>             revoke a user's passkeys and sessions; prints a new link
