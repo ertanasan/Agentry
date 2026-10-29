@@ -183,9 +183,11 @@ for what in serve run; do
 done
 
 # 4. The claude credentials, and the first owner.
-if [[ ! -f $home_dir/claude-oauth-token && ! -x $home_dir/api-key-helper ]]; then
-  if [[ -t 0 ]]; then step "Claude token (run \`claude setup-token\` in another terminal and paste its output)"; "$cmd" token
-  else print "    no claude token yet: run \`agentry token\` and paste the output of \`claude setup-token\`"; fi
+# Any Claude account counts (claude-oauth-token-<name>, or the unnamed file from before accounts had names).
+tokens=($home_dir/claude-oauth-token*(N))
+if (( ! $#tokens )) && [[ ! -x $home_dir/api-key-helper ]]; then
+  if [[ -t 0 ]]; then step "Claude account \"default\" (run \`claude setup-token\` in another terminal and paste its output)"; "$cmd" token claude default
+  else print "    no Claude account yet: run \`agentry token claude <name>\` and paste the output of \`claude setup-token\`"; fi
 fi
 if [[ -n $owner ]]; then
   step "Owner $owner"

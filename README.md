@@ -377,7 +377,7 @@ executes code at build time needs a person's approval**: `*.csproj`, `*.props`, 
 ### 5. Credentials
 
 - Claude is authenticated with a **`claude setup-token` subscription token**,
-  saved with mode `600` by `agentry token` (on Windows, in `C:\Agentry\home`, which only `AgentryRunner` and
+  saved with mode `600` by `agentry token claude <name>` (on Windows, in `C:\Agentry\home`, which only `AgentryRunner` and
   administrators can read). Neither touches the keychain.
 - Codex uses a ChatGPT login or a workspace access token. The runner rejects API-key credential files.
 - The tests, build and agent never see your git credentials, SSH keys or cloud credentials. Agentry pushes and
@@ -610,14 +610,20 @@ their selected agent. Each runner needs the chosen CLI installed and its own cre
 passkey requirements are the same as for the other runner settings.
 
 Both choices use token access; the runner does not fall back to API keys. For Claude Code, run
-`claude setup-token`, then paste its output into `agentry token` (or `agentry token claude`).
+`claude setup-token`, then paste its output into `agentry token claude <name>`, naming the account (for example
+`personal`). Every Claude account is added, listed and removed the same way:
 
-With several Claude accounts, save each one after the first with `agentry token --account <name>` (saved as
-`claude-oauth-token-<name>` beside the first). A run uses the first account that isn't at its usage limit, in
-that order: the first one, then the others by name. When an account hits its limit, Agentry skips it until the
-reset time Claude reports (or for an hour if Claude gives no time), kept in `claude-limits.json`. The run goes
-back on the queue for the next account, and the runner pauses only when every account is at its limit. To
-remove an account, delete its file.
+```sh
+agentry token claude work              # add an account, or replace the token of the one with that name
+agentry token claude --list            # the accounts in the order runs use them, and which are at their limit
+agentry token claude --remove work     # remove one
+```
+
+A run uses the first account, by name, that isn't at its usage limit. When an account hits its limit, Agentry
+skips it until the reset time Claude reports (or for an hour if Claude gives no time), kept in
+`claude-limits.json`. The run goes back on the queue for the next account, and the runner pauses only when every
+account is at its limit. Accounts are per machine: each runner uses the ones saved in its own `AGENTRY_HOME`, as
+`claude-oauth-token-<name>`. A token saved before accounts had names becomes the account `default`.
 
 For Codex, install the Codex CLI in a location the sandbox account can execute. Use either:
 
@@ -676,7 +682,7 @@ agentry user add alice                 # first, if you left out -Owner: the owne
 powershell -ExecutionPolicy Bypass -File windows-setup.ps1 -SelfTest   # the Windows checks, as AgentryRunner
 # run setup again with -Clone git@github.com:you/MyApp.git, then:
 agentry project add api recipe.json   # "repo": "C:\\Agentry\\repos\\MyApp"
-agentry token                          # then: Start-ScheduledTask 'Agentry runner'
+agentry token claude personal          # then: Start-ScheduledTask 'Agentry runner'
 ```
 
 Run setup again to update Agentry or change its options. `-Uninstall` removes the startup tasks and takes
@@ -765,8 +771,10 @@ agentry redeploy <id> | resolve <id>  blocked_post_push → queue a re-run of th
 agentry reopen <id> <what's wrong>    done → a new linked request (counts one false-done)
 agentry unblock <group>               clear a deploy-group lock no request holds (drift guard)
 agentry resume                        unpause the runner
-agentry token [claude|codex]          save a Claude subscription token or Codex access token (paste, then Enter on an empty line)
-agentry token --account <name>        save another Claude account, used when the ones before it are at their usage limit
+agentry token claude <name>           save a Claude account's subscription token (paste, then Enter on an empty line)
+agentry token claude --list           the Claude accounts in the order runs use them, and their usage limits
+agentry token claude --remove <name>  remove a Claude account
+agentry token codex                   save a Codex access token
 agentry serve                         the web UI, with nightly backups
 agentry user add <name> [--admin]     create a web UI account, an owner unless --admin; prints a one-time passkey link
 agentry user reset <name>             revoke a user's passkeys and sessions; prints a new link

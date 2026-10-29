@@ -404,7 +404,7 @@ Register-ScheduledTask -TaskName $tasks.selftest -Action $testAction -User $runn
   -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 15)) | Out-Null
 
 Start-ScheduledTask -TaskName $tasks.serve
-$hasToken = Test-Path (Join-Path $home_ 'claude-oauth-token')
+$hasToken = Test-Path (Join-Path $home_ 'claude-oauth-token*')   # any Claude account
 if ($hasToken) { Start-ScheduledTask -TaskName $tasks.run }
 
 # 10. Does the web UI answer? Then the database exists, and the first owner can be made.
@@ -439,7 +439,7 @@ $next += "Add this key to each repository Agentry pushes to, as a deploy key wit
        $publicKey"
 $next += "Clone each repository (run setup again with -Clone <ssh url>), point its recipe's `"repo`" at $Root\repos\<name>,
      and register it:                 agentry project add <name> <recipe.json>"
-if (-not $hasToken) { $next += "Save a claude token (from ``claude setup-token``):  agentry token
+if (-not $hasToken) { $next += "Save a Claude account (from ``claude setup-token``):  agentry token claude <name>
      then start the runner:            Start-ScheduledTask '$($tasks.run)'" }
 Write-Host "`nDone. Agentry is in $Root; the web UI listens on 127.0.0.1:$Port (task '$($tasks.serve)').`nNext:"
 for ($i = 0; $i -lt $next.Count; $i++) { Write-Host "  $($i + 1). $($next[$i])" }

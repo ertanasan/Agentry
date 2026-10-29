@@ -16,7 +16,7 @@ over ssh) and `https://winhost.example.ts.net` (the queue owner's public address
   `Permission denied (publickey)` from a machine without the key).
 - **Windows setup needs an elevated PowerShell** (Run as administrator). Over ssh, the administrator's session is
   elevated.
-- **Keep secrets out of the chat.** `agentry token` and `agentry attach` read the token or key from stdin: have
+- **Keep secrets out of the chat.** `agentry token claude <name>` and `agentry attach` read the token or key from stdin: have
   the person run them in their own terminal and paste there, not into the conversation. If one does land in the
   chat, suggest rotating it afterwards (`claude setup-token` again; `agentry runner-key rotate`).
 - **Never edit Agentry's database by hand.** Every change has a CLI command. If one seems missing, the install
@@ -112,13 +112,13 @@ Each machine that runs requests needs its own token. The person runs, in their o
 
 ```sh
 claude setup-token        # prints a long-lived token
-agentry token             # paste it, then Enter and Ctrl-D
+agentry token claude personal   # name the account; paste the token, then Enter on an empty line
 ```
 
 On Windows, then start the runner: `Start-ScheduledTask 'Agentry runner'`. For Codex, see
 [Choose an AI agent](../README.md#choose-an-ai-agent).
 
-✅ Check: `~/.agentry/claude-oauth-token` (Windows: `C:\Agentry\home\claude-oauth-token`) exists, and the runner
+✅ Check: `agentry token claude --list` shows the account as `ready`, and the runner
 log (`~/.agentry/runner.log`, Windows: `C:\Agentry\logs`) has no authentication errors.
 
 ## Step 4. The owner account
