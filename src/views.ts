@@ -24,12 +24,14 @@ export function html(strings: TemplateStringsArray, ...values: unknown[]): Html 
 // The themes a user picks from in Settings; the first is everyone's default. `swatch`: its page, card and accent colors.
 export const THEMES = [
   { id: "apple", name: "Apple", tagline: "Light grey or black, graphite cards, Apple blue", swatch: ["#000", "#1d1d1f", "#0071e3"] },
-  { id: "midnight", name: "Midnight Ink", tagline: "A cool blue-black night", swatch: ["#0f1420", "#161d2c", "#7aa7ff"] },
-  { id: "matcha", name: "Matcha Paper", tagline: "Pale green paper, forest ink", swatch: ["#f1f4e9", "#1f3d2b", "#2f7d5b"] },
-  { id: "blueprint", name: "Blueprint", tagline: "Cyanotype blue, drafting grid", swatch: ["#0b2545", "#0f2f5c", "#5eead4"] },
-  { id: "lexicographer", name: "Lexicographer's Desk", tagline: "Ivory paper, ink and oxblood", swatch: ["#f6f1e4", "#7b1e2b", "#1c1a2e"] },
-  { id: "busy", name: "Busy Doing Nothing", tagline: "Charcoal, with status-light green, red and amber", swatch: ["#242424", "#63b64c", "#e0a639"] },
+  { id: "mono", name: "Mono", tagline: "White and grey, black ink, black buttons", swatch: ["#f2f2f2", "#fff", "#111"] },
+  { id: "lavender", name: "Lavender", tagline: "Pale violet, deep violet buttons", swatch: ["#f4f2fb", "#fff", "#6d4ae0"] },
+  { id: "terminal", name: "Terminal", tagline: "Near-black, phosphor green, monospace headings", swatch: ["#0a0f0c", "#0f1713", "#3ddc84"] },
+  { id: "plum", name: "Plum", tagline: "Deep plum, orchid accents, rounded headings", swatch: ["#160d1c", "#20142a", "#e27bf5"] },
+  { id: "contrast", name: "High contrast", tagline: "Black, white lines and yellow, for easy reading", swatch: ["#000", "#fff", "#ffd60a"] },
 ] as const;
+// A user's theme as the page uses it: one no longer offered falls back to the default.
+export const themeOf = (user?: User | null): string => THEMES.find((t) => t.id === user?.theme)?.id ?? DEFAULT_THEME;
 export const DEFAULT_THEME = THEMES[0].id;
 
 // The look is a theme, chosen per user in Settings (THEMES). The base is Apple: white cards on Apple's light grey, or
@@ -286,48 +288,45 @@ pre.wide { white-space: pre; overflow-wrap: normal; }
 .message::first-letter { text-transform: uppercase; }
 
 /* The other themes. Each sets every token, so a light theme stays light on a device in dark mode, and the reverse.
-   Fonts are named first and fall back to faces the device has (the page loads none). */
-:root[data-theme="midnight"] { color-scheme: dark;
-  --ground:#0f1420; --on-ground:#9aa7bf; --label:#161d2c; --sunk:#1c2539; --ink:#e6ebf5; --muted:#9aa7bf; --rule:#2c3852;
-  --band: linear-gradient(180deg, #0b1020 0%, #1b2a5a 100%); --on-band:#e6ebf5;
-  --accent:#7aa7ff; --on-accent:#0f1420; --attn:#ff9f0a; --attn-t:#ffb340; --on-attn:#1d1d1f; --work:#7aa7ff; --on-work:#0f1420;
-  --fail:#ff8a73; --on-fail:#0f1420; --done:#6fd3a0; --on-done:#0f1420; --idle:#9aa7bf;
-  --font: Literata, "Iowan Old Style", "Palatino Linotype", Georgia, serif; --font-head: Fraunces, "Iowan Old Style", Georgia, serif;
-  --r:10px; --r-ctl:8px; --btn-r:8px; --chip-r:6px; --lift: 0 8px 24px rgb(0 0 0 / .35); }
-:root[data-theme="matcha"] { color-scheme: light;
-  --ground:#f1f4e9; --on-ground:#5d6b55; --label:#fbfcf6; --sunk:#e8eddc; --ink:#1f2a1c; --muted:#5d6b55; --rule:#cdd6bd;
-  --band: linear-gradient(180deg, #1f3d2b 0%, #0f241a 100%); --on-band:#f1f4e9; --band-done:#9be8b0; --band-fail:#ffb4a6; --band-attn:#ffd27a; --band-work:#b8cdff;
-  --accent:#2f7d5b; --on-accent:#fff; --attn:#ff9f0a; --attn-t:#9a4a00; --on-attn:#1f2a1c; --work:#2f5f8a; --on-work:#fff;
-  --fail:#a65135; --on-fail:#fff; --done:#1f6b3f; --on-done:#fff; --idle:#5d6b55;
-  --font: Nunito, ui-rounded, "SF Pro Rounded", "Trebuchet MS", sans-serif; --font-head: Fraunces, "Iowan Old Style", Georgia, serif;
-  --r:14px; --r-ctl:10px; --btn-r:10px; --chip-r:6px; --lift: 0 2px 10px rgb(31 61 43 / .10); }
-:root[data-theme="blueprint"] { color-scheme: dark;
-  --ground:#0b2545; --on-ground:#8fb3e0; --label:#0f2f5c; --sunk:#123763; --ink:#dbeafe; --muted:#8fb3e0; --rule:#2f5d9b;
-  --band: linear-gradient(180deg, #08203f 0%, #0b2d5a 100%); --on-band:#dbeafe;
-  --accent:#5eead4; --on-accent:#0b2545; --attn:#ff9f0a; --attn-t:#ffc266; --on-attn:#0b2545; --work:#9cc4ff; --on-work:#0b2545;
-  --fail:#ff9e7a; --on-fail:#0b2545; --done:#7ee0a0; --on-done:#0b2545; --idle:#8fb3e0;
-  --font: Nunito, ui-rounded, "SF Pro Rounded", "Trebuchet MS", sans-serif; --font-head: "Space Mono", ui-monospace, "SF Mono", Menlo, monospace;
-  --r:4px; --r-ctl:3px; --btn-r:3px; --chip-r:2px; --lift:none; }
-:root[data-theme="blueprint"] :is(h1, h2, .brand) { text-transform: uppercase; letter-spacing: .06em; font-weight: 700; }
-:root[data-theme="blueprint"] :focus-visible { outline: 2px dashed var(--accent); }
-:root[data-theme="blueprint"] body { background-image: linear-gradient(rgb(94 234 212 / .07) 1px, transparent 1px), linear-gradient(90deg, rgb(94 234 212 / .07) 1px, transparent 1px); background-size: 24px 24px; }
-:root[data-theme="lexicographer"] { color-scheme: light;
-  --ground:#f6f1e4; --on-ground:#5c5a6e; --label:#fcf9f0; --sunk:#efe7d2; --ink:#1c1a2e; --muted:#5c5a6e; --rule:#d8cdb0;
-  --band: linear-gradient(180deg, #7b1e2b 0%, #3d0f16 100%); --on-band:#f6e9c8; --band-done:#9be0a8; --band-fail:#ffb4a6; --band-attn:#ffd27a; --band-work:#b8cdff;
-  --accent:#7b1e2b; --on-accent:#fcf9f0; --attn:#e0a30a; --attn-t:#8a5a00; --on-attn:#1c1a2e; --work:#2b4a8b; --on-work:#fff;
-  --fail:#a8321f; --on-fail:#fff; --done:#2f5d3a; --on-done:#fff; --idle:#5c5a6e;
-  --font: Literata, "Iowan Old Style", "Palatino Linotype", Georgia, serif; --font-head: Fraunces, "Iowan Old Style", Georgia, serif;
-  --r:4px; --r-ctl:4px; --btn-r:4px; --chip-r:3px; --lift: 0 1px 0 rgb(176 141 60 / .45), 0 6px 14px rgb(28 26 46 / .10); }
-:root[data-theme="lexicographer"] :is(h1, h2) { letter-spacing: -.02em; }
-:root[data-theme="lexicographer"] :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-:root[data-theme="lexicographer"] body { background-image: repeating-linear-gradient(0deg, rgb(92 90 110 / .05) 0 1px, transparent 1px 28px); }
-:root[data-theme="busy"] { color-scheme: dark;
-  --ground:#242424; --on-ground:#b0b0b0; --label:#292929; --sunk:#333; --ink:#f5f5f5; --muted:#b0b0b0; --rule:#3d3d3d;
-  --band: linear-gradient(180deg, #1b1b1b 0%, #2e2e2e 100%); --on-band:#f5f5f5;
-  --accent:#e0a639; --on-accent:#1b1b1b; --attn:#e0a639; --attn-t:#e8b65a; --on-attn:#1b1b1b; --work:#6ea8fe; --on-work:#1b1b1b;
-  --fail:#e48481; --on-fail:#1b1b1b; --done:#63b64c; --on-done:#1b1b1b; --idle:#b0b0b0;
-  --font: Nunito, ui-rounded, "SF Pro Rounded", "Trebuchet MS", sans-serif; --font-head: Fredoka, ui-rounded, "SF Pro Rounded", "Trebuchet MS", sans-serif;
-  --r:12px; --r-ctl:10px; --btn-r:10px; --chip-r:6px; --lift: 0 6px 18px rgb(0 0 0 / .35); }
+   Fonts are faces the device has (the page loads none). */
+:root[data-theme="mono"] { color-scheme: light;
+  --ground:#f2f2f2; --on-ground:#555; --label:#fff; --sunk:#ebebeb; --ink:#111; --muted:#555; --rule:#cfcfcf;
+  --band:#111; --on-band:#fafafa;
+  --accent:#111; --on-accent:#fff; --attn:#ff9f0a; --attn-t:#a14a00; --on-attn:#111; --work:#1f5fbf; --on-work:#fff;
+  --fail:#c4171c; --on-fail:#fff; --done:#1a7a35; --on-done:#fff; --idle:#555;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; --font-head: var(--font);
+  --r:10px; --r-ctl:8px; --btn-r:8px; --chip-r:6px; --lift:none; }
+:root[data-theme="lavender"] { color-scheme: light;
+  --ground:#f4f2fb; --on-ground:#5b5675; --label:#fff; --sunk:#ebe7f7; --ink:#1d1833; --muted:#5b5675; --rule:#d9d3ee;
+  --band: linear-gradient(180deg, #2a1f5c 0%, #1d1640 100%); --on-band:#f4f2fb; --band-done:#8ee6a8; --band-fail:#ffb3b3; --band-attn:#ffd27a; --band-work:#b9b0ff;
+  --accent:#6d4ae0; --on-accent:#fff; --attn:#ff9f0a; --attn-t:#9a4a00; --on-attn:#1d1833; --work:#3559c7; --on-work:#fff;
+  --fail:#c2184b; --on-fail:#fff; --done:#1d7a45; --on-done:#fff; --idle:#5b5675;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; --font-head: ui-rounded, "SF Pro Rounded", var(--font);
+  --r:16px; --r-ctl:12px; --btn-r:980px; --chip-r:980px; --lift: 0 2px 12px rgb(45 30 110 / .08); }
+:root[data-theme="terminal"] { color-scheme: dark;
+  --ground:#0a0f0c; --on-ground:#8fb59f; --label:#0f1713; --sunk:#16211b; --ink:#d6f5e3; --muted:#8fb59f; --rule:#23352b;
+  --band:#050806; --on-band:#d6f5e3;
+  --accent:#3ddc84; --on-accent:#04140b; --attn:#ffb000; --attn-t:#ffc54d; --on-attn:#0a0f0c; --work:#5cc8ff; --on-work:#04121b;
+  --fail:#ff6b6b; --on-fail:#1a0505; --done:#b6f36a; --on-done:#0a1203; --idle:#8fb59f;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; --font-head: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --r:6px; --r-ctl:4px; --btn-r:4px; --chip-r:4px; --lift:none; }
+:root[data-theme="terminal"] :is(h1, h2, .brand, .no) { letter-spacing: 0; }
+:root[data-theme="plum"] { color-scheme: dark;
+  --ground:#160d1c; --on-ground:#b9a6c9; --label:#20142a; --sunk:#2b1c37; --ink:#f6ecff; --muted:#b9a6c9; --rule:#3d2a4d;
+  --band: linear-gradient(180deg, #120a17 0%, #2a1538 100%); --on-band:#f6ecff;
+  --accent:#e27bf5; --on-accent:#1a0b22; --attn:#ffa94d; --attn-t:#ffc285; --on-attn:#1a0b22; --work:#8ab4ff; --on-work:#0d1530;
+  --fail:#ff7a8a; --on-fail:#24060c; --done:#6fe0a6; --on-done:#06190e; --idle:#b9a6c9;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; --font-head: ui-rounded, "SF Pro Rounded", var(--font);
+  --r:14px; --r-ctl:10px; --btn-r:980px; --chip-r:980px; --lift: 0 8px 24px rgb(0 0 0 / .4); }
+:root[data-theme="contrast"] { color-scheme: dark;
+  --ground:#000; --on-ground:#fff; --label:#000; --sunk:#1a1a1a; --ink:#fff; --muted:#e6e6e6; --rule:#fff;
+  --band:#000; --on-band:#fff; --band-line: rgb(255 255 255 / .6);
+  --accent:#ffd60a; --on-accent:#000; --attn:#ff9f0a; --attn-t:#ffb340; --on-attn:#000; --work:#66b2ff; --on-work:#000;
+  --fail:#ff6b6b; --on-fail:#000; --done:#4cd964; --on-done:#000; --idle:#e6e6e6;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; --font-head: var(--font);
+  --r:8px; --r-ctl:8px; --btn-r:8px; --chip-r:6px; --lift:none; }
+:root[data-theme="contrast"] :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+:root[data-theme="contrast"] a { text-decoration-thickness: 2px; }
 
 /* The theme picker in Settings: one tile per theme, its swatch the theme's page, card and accent. */
 .picks.themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
@@ -346,7 +345,7 @@ export function page(title: string, body: Html, user?: User | null, extraHead: H
   o: { nav?: Nav; attachedTo?: string | null; band?: Html } = {}): string {
   const here = (n: Nav) => o.nav === n ? html` aria-current="page"` : html``;
   return html`<!doctype html>
-<html lang="en" data-theme="${user?.theme ?? DEFAULT_THEME}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="en" data-theme="${themeOf(user)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title} · Agentry</title><link rel="icon" href="/static/icon.png" type="image/png">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png"><meta name="apple-mobile-web-app-title" content="Agentry">
 <style>${new Html(CSS)}</style>
@@ -822,7 +821,7 @@ ${link ? html`<div class="card"><p class="ok">Open this link on the device that 
 <div class="settings-section">
 <form method="post" action="/settings/theme">
   <fieldset><legend class="sr">Your theme</legend><div class="picks themes">${THEMES.map((t) => html`<label><input type="radio" name="theme" value="${t.id}"${
-    t.id === (user.theme ?? DEFAULT_THEME) ? html` checked` : ""}><span class="swatch ${t.id}" aria-hidden="true"></span><span>${t.name}<small>${t.tagline}</small></span></label>`)}</div></fieldset>
+    t.id === themeOf(user) ? html` checked` : ""}><span class="swatch ${t.id}" aria-hidden="true"></span><span>${t.name}<small>${t.tagline}</small></span></label>`)}</div></fieldset>
   <div class="actions"><button class="primary">Use this theme</button></div>
   <p class="hint">Only for you: everyone else keeps theirs. It needs no passkey check.</p>
 </form></div>

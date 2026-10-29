@@ -794,16 +794,21 @@ describe("settings", () => {
     const theme = async (c: string) => (await (await h.call("/settings", { cookie: c })).text()).match(/<html lang="en" data-theme="([a-z]+)"/)?.[1];
     expect(await theme(cookie)).toBe("apple");
 
-    const r = await h.call("/settings/theme", { method: "POST", cookie, form: { theme: "midnight" } });
+    const r = await h.call("/settings/theme", { method: "POST", cookie, form: { theme: "plum" } });
     expect(r.status).toBe(303);
-    expect(await theme(cookie)).toBe("midnight");
+    expect(await theme(cookie)).toBe("plum");
     expect(await theme(owner.cookie)).toBe("apple");
-    expect((await (await h.call("/settings", { cookie })).text())).toContain('value="midnight" checked');
+    expect((await (await h.call("/settings", { cookie })).text())).toContain('value="plum" checked');
 
     await h.call("/settings/theme", { method: "POST", cookie, form: { theme: "apple" } });
     expect(h.db.query("SELECT theme FROM users WHERE name = 'helper'").get()).toEqual({ theme: null });
     expect((await h.call("/settings/theme", { method: "POST", cookie, form: { theme: "neon" } })).status).toBe(400);
     expect(await theme(cookie)).toBe("apple");
+
+    // A theme stored before it stopped being offered falls back to the default, which the picker then shows.
+    h.db.query("UPDATE users SET theme = 'retired' WHERE name = 'helper'").run();
+    expect(await theme(cookie)).toBe("apple");
+    expect((await (await h.call("/settings", { cookie })).text())).toContain('value="apple" checked');
   });
 
   test("an admin can't pause, toggle projects or manage users", async () => {
