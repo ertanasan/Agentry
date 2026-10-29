@@ -508,8 +508,8 @@ the default, Apple, follows the system's light or dark mode.
 
 **Settings** (owners change them; admins see them)
 
-- **Theme:** each user's own, for every user and with no passkey check: Apple (the default), Midnight Ink, Matcha
-  Paper, Blueprint, Lexicographer's Desk or Busy Doing Nothing.
+- **Theme:** each user's own, for every user and with no passkey check: Apple (the default), Mono, Lavender, Terminal,
+  Plum or High contrast.
 - **Confirm with passkey:** shown when your passkey wasn't checked in the last 5 minutes. Every change below but
   **Pause** needs it.
 - **Runner:** **Pause** stops the runner from starting new requests; those already running finish. **Resume**
