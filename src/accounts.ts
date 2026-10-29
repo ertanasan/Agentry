@@ -21,7 +21,7 @@ const CHALLENGE_TTL_MS = 5 * 60_000;
 export const STEP_UP_TTL_MS = 5 * 60_000;
 
 export type Role = "owner" | "admin";
-export type User = { id: number; name: string; role: Role };
+export type User = { id: number; name: string; role: Role; theme?: string | null };  // theme: views.ts THEMES; none: the default
 // The relying party: the public origin the browser sees, e.g. https://agentry.example.com.
 export type RelyingParty = { rpID: string; origin: string };
 
@@ -208,8 +208,13 @@ function startSession(db: Database, userId: number, device: string, now: number)
 
 export function sessionUser(db: Database, sessionToken: string | undefined, now = Date.now()): User | null {
   if (!sessionToken) return null;
-  return db.query(`SELECT u.id, u.name, u.role FROM sessions s JOIN users u ON u.id = s.user_id
+  return db.query(`SELECT u.id, u.name, u.role, u.theme FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ? AND s.revoked = 0 AND s.expires_at > ? AND u.disabled = 0`).get(hash(sessionToken), now) as User | null;
+}
+
+// A user's own theme; null is the default (views.ts DEFAULT_THEME), which so stays everyone's until they pick another.
+export function setTheme(db: Database, userId: number, theme: string | null): void {
+  db.query("UPDATE users SET theme = ? WHERE id = ?").run(theme, userId);
 }
 
 export function endSession(db: Database, sessionToken: string): void {

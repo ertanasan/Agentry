@@ -38,7 +38,7 @@ against the live `VERSION`. Nothing reaches production on a guess.
 - Pages: home (status line, alerts, new request, needs you, queue, recently finished), run page (pipeline, steps,
   live log, flags, diff, recipe), settings (runner, workers, projects, users), sign-in, passkey setup, offline page,
   message page.
-- Follows the device's light or dark mode.
+- Each user picks a theme in Settings (Apple by default, which follows the device's light or dark mode).
 
 ## Capabilities and Constraints
 

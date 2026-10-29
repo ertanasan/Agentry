@@ -492,8 +492,8 @@ Every time a runner takes the lease, before it picks up any work, it:
 
 ## The web UI
 
-A fast, server-rendered UI that works on a phone. You can add it to the iOS home screen, and it follows the
-system's light or dark mode.
+A fast, server-rendered UI that works on a phone. You can add it to the iOS home screen. Each user picks a theme;
+the default, Apple, follows the system's light or dark mode.
 
 **Home**
 
@@ -508,6 +508,8 @@ system's light or dark mode.
 
 **Settings** (owners change them; admins see them)
 
+- **Theme:** each user's own, for every user and with no passkey check: Apple (the default), Midnight Ink, Matcha
+  Paper, Blueprint, Lexicographer's Desk or Busy Doing Nothing.
 - **Confirm with passkey:** shown when your passkey wasn't checked in the last 5 minutes. Every change below but
   **Pause** needs it.
 - **Runner:** **Pause** stops the runner from starting new requests; those already running finish. **Resume**

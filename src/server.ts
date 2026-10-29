@@ -15,7 +15,7 @@ import * as A from "./actions.ts";
 import { attachment, attachmentFile, checkUploads, MAX_FILE_BYTES, MAX_FILES_PER_REQUEST, saveUploads, type Upload } from "./attachments.ts";
 import {
   addUser, AuthError, endSession, finishLogin, finishRegistration, finishStepUp, LoginThrottle, loginOptions, recentlyVerified,
-  registrationOptions, registrationUser, relyingParty, removeUser, resetUser, SESSION_TTL_MS, sessionUser, stepUpOptions, type User,
+  registrationOptions, registrationUser, relyingParty, removeUser, resetUser, SESSION_TTL_MS, sessionUser, setTheme, stepUpOptions, type User,
 } from "./accounts.ts";
 import { lastBackupAt, STALE_AFTER_MS } from "./backup.ts";
 import { asActor, logEvent, runnerRow } from "./db.ts";
@@ -29,8 +29,8 @@ import { readAttached, runnerApi, storedDiff } from "./remote.ts";
 import { LOCAL, runnersOf, waitOf, waitText, type Wait } from "./routing.ts";
 import { MAX_DIFF_CHARS } from "./verifier.ts";
 import {
-  APP_JS, board, HOME_JS, homePage, liveBlock, loginPage, messagePage, offlinePage, OFFLINE_JS, queueLine, recipesPage, registerPage, RUN_JS,
-  runPage, settingsPage, statusBar, SW_JS, type Draft, type Flash, type GroupLock, type Live, type RecipesData, type ReqRow, type RunnerInfo,
+  APP_JS, board, DEFAULT_THEME, HOME_JS, homePage, liveBlock, loginPage, messagePage, offlinePage, OFFLINE_JS, queueLine, recipesPage, registerPage, RUN_JS,
+  runPage, settingsPage, statusBar, SW_JS, THEMES, type Draft, type Flash, type GroupLock, type Live, type RecipesData, type ReqRow, type RunnerInfo,
   type StepRow,
 } from "./views.ts";
 
@@ -56,7 +56,6 @@ const STATIC: Record<string, { path?: string; body?: string; type: string }> = {
   "/sw.js": { body: SW_JS, type: "text/javascript" },
   "/static/icon.png": { path: join(assets, "icon.png"), type: "image/png" },
   "/static/apple-touch-icon.png": { path: join(assets, "apple-touch-icon.png"), type: "image/png" },  // iOS home screen
-  "/static/archivo.woff2": { path: join(assets, "archivo.woff2"), type: "font/woff2" },              // OFL, static/archivo-OFL.txt
 };
 
 const SECURITY_HEADERS = {
@@ -245,6 +244,12 @@ export function startServer(o: ServerOptions) {
         const rec = path.match(/^\/recipes\/([^/]+)\/([^/]+)$/);
         if (rec) return editRecipe(decodeURIComponent(rec[1]), decodeURIComponent(rec[2]), field("recipe") ?? "", user, verified);
         if (path === "/runner/resume") { A.resume(db); done.verb = "resumed"; return; }
+        // A user's own theme: any user, for themselves only, so neither the owner role nor a passkey check.
+        if (path === "/settings/theme") {
+          const theme = field("theme") ?? "";
+          if (!THEMES.some((t) => t.id === theme)) throw new A.ActionError(`no theme named ${theme}`, "invalid");
+          return setTheme(db, user.id, theme === DEFAULT_THEME ? null : theme);
+        }
         if (path === "/settings" || path.startsWith("/settings/")) return changeSettings(path, field, deployPicks(form), user, verified);
         const grp = path.match(/^\/groups\/([^/]+)\/unblock$/);
         if (grp) { A.unblock(db, decodeURIComponent(grp[1])); done.verb = "unblocked"; return; }
