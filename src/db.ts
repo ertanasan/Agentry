@@ -168,6 +168,16 @@ export const MIGRATIONS: string[] = [
      by_user TEXT NOT NULL, created_at INTEGER NOT NULL, done_at INTEGER, error TEXT);`,
   // 16: each user's theme for the web UI (views.ts THEMES); NULL is the default.
   `ALTER TABLE users ADD COLUMN theme TEXT;`,
+  // 17: GitHub Copilot CLI as an AI agent. A CHECK can't change in place, so each agent column is made again.
+  `ALTER TABLE runner ADD COLUMN ai_agent_next TEXT NOT NULL DEFAULT 'claude'
+     CHECK (ai_agent_next IN ('claude', 'codex', 'gemini', 'antigravity', 'copilot'));
+   UPDATE runner SET ai_agent_next = ai_agent;
+   ALTER TABLE runner DROP COLUMN ai_agent;
+   ALTER TABLE runner RENAME COLUMN ai_agent_next TO ai_agent;
+   ALTER TABLE requests ADD COLUMN ai_agent_next TEXT CHECK (ai_agent_next IN ('claude', 'codex', 'gemini', 'antigravity', 'copilot'));
+   UPDATE requests SET ai_agent_next = ai_agent;
+   ALTER TABLE requests DROP COLUMN ai_agent;
+   ALTER TABLE requests RENAME COLUMN ai_agent_next TO ai_agent;`,
 ];
 
 // Checks run before a migration; a message refuses it and leaves the database as it was.

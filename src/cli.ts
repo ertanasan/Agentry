@@ -20,6 +20,7 @@ import { codexAgent, codexVerifier } from "./adapters/codex.ts";
 import { callGemini, googleAgent, googleVerifier, oauthCredentials } from "./adapters/google.ts";
 import { antigravityCredentials, callAntigravity, importAntigravityLogin } from "./adapters/antigravity.ts";
 import { isAgent, type AgentId } from "./adapters/providers.ts";
+import { copilotAgent, copilotToken, copilotVerifier } from "./adapters/copilot.ts";
 import { ACCOUNT_NAME, claudeAccounts, claudeAgent, readLimits, removeClaudeAccount, resolveAuth } from "./adapters/claude.ts";
 import { asActor, LeaseLost, openDb, runnerRow } from "./db.ts";
 import { addUser, AuthError, passkeyLink, removeUser, resetUser } from "./accounts.ts";
@@ -45,7 +46,7 @@ const USAGE = `usage: agentry <command>
   project add <name> <recipe.json> [--runner R,...]   register or update a project; --runner: the runners that
                                      may run it, home first ("local": this machine's; others: runner key names)
   add <project>[,<project>...] <title> [--body B] [--done-when D] [--done-when-test T] [--priority N]
-                                     --agent claude|codex|gemini|antigravity: its agent (else the queue's)
+                                     --agent claude|codex|gemini|antigravity|copilot: its agent (else the queue's)
   list [--all]
   run [--once]                       work the queue (--once: stop when idle or paused and nothing runs)
   answer <id> <text>                 needs_info → queued
@@ -58,7 +59,7 @@ const USAGE = `usage: agentry <command>
   resume                             unpause the runner
   token claude <name>                save a Claude account's token; a run uses the first account, by name, not at its usage limit
   token claude --list | --remove <name>   the Claude accounts in that order and their limits | remove one
-  token codex|gemini|antigravity     save a token (Google providers: OAuth JSON, not API keys)
+  token codex|gemini|antigravity|copilot   save a token (Google providers: OAuth JSON, not API keys; Copilot: a fine-grained GitHub token)
   token antigravity --from-login      import the current Windows account's Antigravity Google login
   serve                              the web UI on 127.0.0.1:$AGENTRY_PORT (default 4747), with nightly backups
   user add <name> [--admin]          create a web UI account, an owner (--admin: one that can't change settings);
@@ -195,7 +196,7 @@ function list(db: Database, all: boolean): number {
   return 0;
 }
 
-const TOKEN_USAGE = "usage: agentry token claude <name> | agentry token claude --list | agentry token claude --remove <name> | agentry token codex|gemini|antigravity";
+const TOKEN_USAGE = "usage: agentry token claude <name> | agentry token claude --list | agentry token claude --remove <name> | agentry token codex|gemini|antigravity|copilot";
 
 // Reads a pasted `claude setup-token` token from stdin, refuses anything else, and saves it with mode 600. Claude:
 // under the account <name>, a new one or in place of the one of that name.
@@ -213,6 +214,16 @@ async function saveToken(provider: string | undefined, fromLogin: boolean, accou
     rmSync(file, { force: true });
     writeFileSync(file, token + "\n", { mode: 0o600 });
     console.log(`saved ${provider} OAuth credentials to ${file}`);
+    return 0;
+  }
+  if (provider === "copilot") {
+    if (process.stdin.isTTY) console.log("Paste a fine-grained GitHub token with the Copilot Requests permission, then press Enter on an empty line:");
+    let token = "";
+    try { token = copilotToken(process.stdin.isTTY ? await readUntilBlankLine() : await Bun.stdin.text()); } catch (e) { fail(`${(e as Error).message}; nothing saved`); }
+    const file = join(home, "copilot-github-token");
+    rmSync(file, { force: true });
+    writeFileSync(file, token + "\n", { mode: 0o600 });
+    console.log(`saved ${token.length} characters to ${file}`);
     return 0;
   }
   if (process.stdin.isTTY) console.log("Paste the token (line breaks are fine), then press Enter on an empty line:");
@@ -305,6 +316,13 @@ async function makeCtx(q: Queue, work: string): Promise<RunnerCtx> {
       const authFile = process.env.AGENTRY_CODEX_AUTH_FILE ?? join(home, "codex", "auth.json");
       const o = { bin, token, authFile, model: process.env.AGENTRY_CODEX_MODEL };
       return { ...base, claudeBin: bin, agent: codexAgent(o), verifier: codexVerifier(o) };
+    }
+    if (agent === "copilot") {
+      const bin = realpathSync(process.env.AGENTRY_COPILOT_BIN ?? Bun.which("copilot") ?? fail("copilot is not on PATH (or set AGENTRY_COPILOT_BIN)"));
+      const tokenFile = join(home, "copilot-github-token");
+      const token = existsSync(tokenFile) ? readFileSync(tokenFile, "utf8").trim() : undefined;
+      const o = { bin, token, model: process.env.AGENTRY_COPILOT_MODEL };
+      return { ...base, claudeBin: bin, agent: copilotAgent(o), verifier: copilotVerifier(o) };
     }
     if (agent !== "claude") throw new Error("Unsupported AI agent: " + agent);
     const bin = claudeBin();

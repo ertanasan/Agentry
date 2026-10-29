@@ -604,7 +604,8 @@ and an attached runner's `queue.json` in `~/.agentry-backup-<date>`; it prints h
 
 ### Choose an AI agent
 
-In **Settings → Runner → AI Agent**, choose **Claude Code** (the default) or **Codex**, then Save.
+In **Settings → Runner → AI Agent**, choose **Claude Code** (the default), **Codex**, **Gemini CLI**, **Antigravity CLI** or
+**GitHub Copilot CLI**, then Save.
 The selection applies to the next run and its verifier, including on attached runners. Running requests keep
 their selected agent. Each runner needs the chosen CLI installed and its own credentials. Owner and fresh
 passkey requirements are the same as for the other runner settings.
@@ -648,6 +649,15 @@ Codex's coding step uses Agentry's existing external sandbox. Its verifier addit
 mode. Codex must be recent enough to support `--ignore-user-config`, `--ignore-rules`, and `--ephemeral`.
 See the official [authentication documentation](https://learn.chatgpt.com/docs/auth) and
 [access token documentation](https://learn.chatgpt.com/docs/enterprise/access-tokens).
+
+For GitHub Copilot CLI, install `copilot` where the sandbox account can run it, and save a fine-grained GitHub
+token with the **Copilot Requests** permission on each runner: `agentry token copilot` (a `gh` OAuth token, `gho_…`,
+works too; classic `ghp_…` tokens are refused). It's saved in `$AGENTRY_HOME/copilot-github-token`. Each call gets
+a fresh `COPILOT_HOME`, so no stored login, user config, MCP server or plugin of yours applies, and the GitHub MCP
+server, auto-update and remote control are off; the token goes in as `COPILOT_GITHUB_TOKEN`, and `GH_TOKEN` and
+`GITHUB_TOKEN` are removed. The request is written to a file the prompt points at. The verifier gets only the
+read-only file tools. Agentry reads Copilot's JSON events (`--output-format json`), and a run whose output isn't
+those events fails as an infrastructure error instead of passing.
 
 ### Register a project and queue a request
 
@@ -775,6 +785,7 @@ agentry token claude <name>           save a Claude account's subscription token
 agentry token claude --list           the Claude accounts in the order runs use them, and their usage limits
 agentry token claude --remove <name>  remove a Claude account
 agentry token codex                   save a Codex access token
+agentry token copilot                 save a fine-grained GitHub token for Copilot CLI
 agentry serve                         the web UI, with nightly backups
 agentry user add <name> [--admin]     create a web UI account, an owner unless --admin; prints a one-time passkey link
 agentry user reset <name>             revoke a user's passkeys and sessions; prints a new link
@@ -802,6 +813,8 @@ agentry detach                        this machine's runner works its own queue 
 | `AGENTRY_CODEX_BIN` | `codex` on `PATH` | The Codex CLI binary; install somewhere readable by the sandbox account |
 | `AGENTRY_CODEX_MODEL` | Codex's default | Codex model for coding and verification |
 | `AGENTRY_CODEX_AUTH_FILE` | `$AGENTRY_HOME/codex/auth.json` | ChatGPT login credentials; API keys are rejected |
+| `AGENTRY_COPILOT_BIN` | `copilot` on `PATH` | The GitHub Copilot CLI binary; install somewhere the sandbox account can run it |
+| `AGENTRY_COPILOT_MODEL` | Copilot's default | Copilot model for coding and verification |
 
 Runner settings (workers, pause, enabled projects) live in the database and are changed on the
 [settings page](#the-web-ui), so they apply without a restart.
