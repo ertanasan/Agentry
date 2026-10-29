@@ -105,6 +105,21 @@ describe("runner: through to done", () => {
     expect(asked).toEqual(["codex", null]);
   });
 
+  test("a request whose agent can't start is blocked, and the next one still runs", async () => {
+    const h = setup();
+    const ctx: RunnerCtx = { ...h.ctx, selectAgent: async (agent) => {
+      if (agent === "codex") throw new Error("codex is not on PATH (or set AGENTRY_CODEX_BIN)");
+      return h.ctx;
+    } };
+    const bad = h.add();
+    h.db.query("UPDATE requests SET ai_agent = 'codex' WHERE id = ?").run(bad);
+    const good = h.add();
+    expect(await runNext(ctx)).toEqual({ kind: "ran", requestId: bad, status: "blocked_pre_push" });
+    expect(h.req(bad)).toMatchObject({ status: "blocked_pre_push", status_reason: "its AI agent can't start: codex is not on PATH (or set AGENTRY_CODEX_BIN)" });
+    await runNext(ctx);
+    expect(h.req(good).status).toBe("done");
+  });
+
   test("without a deploy_cmd the request ends as built", async () => {
     const h = setup({ recipe: { deploy_cmd: undefined, targets: undefined } });
     const id = h.add();

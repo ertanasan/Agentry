@@ -139,10 +139,18 @@ export async function startNext(ctx: RunnerCtx): Promise<Started> {
   const req = await q.claim();
   if (!req) return { kind: "idle" };
   let j: Job;
+  let selected: RunnerCtx;
+  try {
+    selected = ctx.selectAgent ? await ctx.selectAgent(req.ai_agent) : ctx;
+  } catch (e) {
+    // An agent this machine can't run (not installed, no token) blocks its request, not the whole runner.
+    if (e instanceof LeaseLost) throw e;
+    await q.setStatus(req.id, "blocked_pre_push", `its AI agent can't start: ${e instanceof Error ? e.message : String(e)}`);
+    return { kind: "started", requestId: req.id, done: Promise.resolve({ kind: "ran", requestId: req.id, status: "blocked_pre_push" }) };
+  }
   try {
     const resume = req.resume_run ? await q.run(req.resume_run) : null;
     const attempt = resume ? resume.attempt : req.attempts + 1;
-    const selected = ctx.selectAgent ? await ctx.selectAgent(req.ai_agent) : ctx;
     j = await startRun(selected, req, {
       attempt, branch: resume?.branch ?? `agentry/${req.id}-${attempt}`, base: resume?.base_sha ?? null, candidate: resume?.candidate_sha ?? null,
     });
