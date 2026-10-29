@@ -121,20 +121,38 @@ On Windows, then start the runner: `Start-ScheduledTask 'Agentry runner'`. For C
 ✅ Check: `agentry token claude --list` shows the account as `ready`, and the runner
 log (`~/.agentry/runner.log`, Windows: `C:\Agentry\logs`) has no authentication errors.
 
-## Step 4. The owner account
+## Step 4. Users and passkeys
 
-Skip on an attached machine. If setup ran with `--owner`/`-Owner`, it printed a one-time passkey link
-(30 minutes). Otherwise:
+On an attached machine this is optional: its own UI only says which queue it works. If setup ran with
+`--owner`/`-Owner`, it printed the owner's one-time passkey link. Otherwise, on the server:
 
 ```sh
-agentry user add alice
+agentry user add alice            # an owner: manages settings and users
+agentry user add bob --admin      # an admin: works with requests, sees settings read-only
 ```
 
-Open the link **at the public address** on the device that will hold the passkey (phone or computer), and
-create the passkey. Add more devices later with `agentry user passkey alice`; other people with
-`agentry user add <name>` or from the UI.
+**Where a passkey is saved decides which browser can use it.** A passkey made in Chrome goes to Google Password
+Manager; one made in Safari goes to iCloud Keychain (the Passwords app). Each syncs to the person's other devices
+in that ecosystem, but not across. So give each person one passkey per browser they use:
 
-✅ Check: the person signs in at the public address and sees the home page.
+```sh
+agentry user passkey alice        # one more link; the passkeys alice has stay
+```
+
+- Each command prints one link: it works once, for 30 minutes. Open the Chrome link in Chrome and the Apple link
+  in Safari, at the public address, and tap **Create passkey**. Get the link onto a phone with AirDrop or a note
+  rather than typing it.
+- A link that has made a passkey is spent: opening it again says the link is invalid, used or expired. Ask for
+  another only if that browser has no passkey yet.
+- "This device already has a passkey for this account on this site" means that browser already holds one the
+  server knows: sign in with it instead.
+- Passkeys are per address. Two sites (an owner and an attached machine, say) each need their own.
+
+To start a person over, `agentry user reset alice` removes all their passkeys and sessions and prints a new link.
+Delete their old entry for the site from Google Password Manager and the Passwords app as well, or the browser
+keeps offering a passkey the server no longer knows.
+
+✅ Check: the person signs in at the public address in each browser and sees the home page.
 
 ## Step 5. Projects and a first request
 
@@ -208,4 +226,8 @@ project the attached machine has no recipe for shows as missing on the owner's p
 | A request says "waiting for machost" | That runner is offline or has no recipe for a project | Start it; `agentry project add` the missing recipe there |
 | Nothing answers at the public URL | The address isn't published | `tailscale serve --bg 4747` (or set up the proxy) |
 | A passkey isn't offered or fails | Opened at a different address than it was made on | Use the public address given to setup |
+| A passkey isn't offered in one browser | It was made in the other (Chrome vs Safari) | `agentry user passkey <name>`, and open that link in this browser |
+| "This registration link is invalid, used or expired" | The link already made a passkey, or is over 30 minutes old | A new link with `agentry user passkey <name>` |
+| "This device already has a passkey for this account" | That browser already holds one the server knows | Sign in with it |
+| "Unknown passkey" after a reset | The browser kept a copy the reset removed from the server | Delete it from Google Password Manager or the Passwords app, then use the new link |
 | `bun install` fails on Windows with access denied | Packages hard-linked from the admin's cache | See step 3 of [`windows-update.md`](windows-update.md) |
