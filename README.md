@@ -654,6 +654,7 @@ prints their passkey link. It also prints an SSH key to add to each repository a
 in a new shell:
 
 ```powershell
+agentry user add alice                 # first, if you left out -Owner: the owner who signs in and manages the rest
 powershell -ExecutionPolicy Bypass -File windows-setup.ps1 -SelfTest   # the Windows checks, as AgentryRunner
 # run setup again with -Clone git@github.com:you/MyApp.git, then:
 agentry project add api recipe.json   # "repo": "C:\\Agentry\\repos\\MyApp"

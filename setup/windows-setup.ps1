@@ -417,23 +417,25 @@ if ($PublicUrl) {
   if (Test-Answers $PublicUrl.TrimEnd('/')) { Write-Host "    answers at $PublicUrl" }
   else { Write-Host "    nothing answers at $PublicUrl`: for Tailscale, run ``tailscale serve --bg $Port`` (or set up your proxy)" }
 }
+$ownerMade = $false
 if ($Owner -and $local) {
   Step "Owner $Owner"
   & (Join-Path $Root 'agentry.cmd') user add $Owner --owner
   if ($LASTEXITCODE) { Write-Host "    if $Owner exists already, ``agentry user reset $Owner`` prints a new link" }
+  else { $ownerMade = $true }
 }
 
-Write-Host @"
-
-Done. Agentry is in $Root; the web UI listens on 127.0.0.1:$Port (task '$($tasks.serve)').
-Next:
-  1. Check the platform layer:      powershell -ExecutionPolicy Bypass -File "$PSCommandPath" -SelfTest
-  2. Add this key to each repository Agentry pushes to, as a deploy key with write access:
-       $publicKey
-  3. Clone each repository (run setup again with -Clone <ssh url>), point its recipe's "repo" at $Root\repos\<name>,
-     and register it:                 agentry project add <name> <recipe.json>
-$(if (-not $hasToken) { "  4. Save a claude token (from ``claude setup-token``):  agentry token
-     then start the runner:            Start-ScheduledTask '$($tasks.run)'" })
-$(if (-not $Owner) { "  5. Create your account:              agentry user add <name>   (or run setup again with -Owner <name>)" })
-In a new shell, ``agentry`` runs $Root\agentry.cmd. Open the web UI at $(if ($PublicUrl) { $PublicUrl } else { "http://localhost:$Port" }).
-"@
+# The owner account comes first: it signs in to the web UI and manages users, projects and settings.
+$next = @()
+if (-not $ownerMade) { $next += "Create your owner account first:    agentry user add <name>   (or run setup again with -Owner <name>)
+     and open the passkey link it prints on the device that will hold the passkey" }
+$next += "Check the platform layer:      powershell -ExecutionPolicy Bypass -File `"$PSCommandPath`" -SelfTest"
+$next += "Add this key to each repository Agentry pushes to, as a deploy key with write access:
+       $publicKey"
+$next += "Clone each repository (run setup again with -Clone <ssh url>), point its recipe's `"repo`" at $Root\repos\<name>,
+     and register it:                 agentry project add <name> <recipe.json>"
+if (-not $hasToken) { $next += "Save a claude token (from ``claude setup-token``):  agentry token
+     then start the runner:            Start-ScheduledTask '$($tasks.run)'" }
+Write-Host "`nDone. Agentry is in $Root; the web UI listens on 127.0.0.1:$Port (task '$($tasks.serve)').`nNext:"
+for ($i = 0; $i -lt $next.Count; $i++) { Write-Host "  $($i + 1). $($next[$i])" }
+Write-Host "In a new shell, ``agentry`` runs $Root\agentry.cmd. Open the web UI at $(if ($PublicUrl) { $PublicUrl } else { "http://localhost:$Port" })."
